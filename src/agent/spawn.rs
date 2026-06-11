@@ -1,0 +1,152 @@
+//! Child `claude` process construction.
+
+use crate::config::{AgentConfig, HubConfig};
+use anyhow::{Context, Result};
+use std::path::{Path, PathBuf};
+use std::process::Stdio;
+use tokio::process::{Child, Command};
+
+/// Resolve the claude executable once at hub startup.
+/// `AGENTCOM_CLAUDE_EXE` overrides (used by tests to point at mock-claude).
+pub fn resolve_claude_exe() -> Result<PathBuf> {
+    if let Ok(p) = std::env::var("AGENTCOM_CLAUDE_EXE") {
+        return Ok(PathBuf::from(p));
+    }
+    which::which("claude").context(
+        "could not find `claude` on PATH — install Claude Code or set AGENTCOM_CLAUDE_EXE",
+    )
+}
+
+pub struct SpawnSpec<'a> {
+    pub hub_cfg: &'a HubConfig,
+    pub agent_cfg: &'a AgentConfig,
+    pub claude_exe: &'a Path,
+    pub project_root: &'a Path,
+    pub session_id: &'a str,
+    /// Resume a previous session instead of starting fresh (crash restart).
+    pub resume_session: Option<&'a str>,
+    pub system_prompt_append: &'a str,
+    pub ipc_port: u16,
+    pub ipc_token: &'a str,
+    /// Directory containing the agentcom executable, prepended to the
+    /// child's PATH so agents can run `agentcom <cmd>` from their Bash tool.
+    pub agentcom_dir: Option<&'a Path>,
+}
+
+pub fn spawn_agent(spec: &SpawnSpec) -> Result<Child> {
+    let cwd = spec.hub_cfg.agent_cwd(spec.agent_cfg, spec.project_root);
+    std::fs::create_dir_all(&cwd)
+        .with_context(|| format!("creating agent cwd {}", cwd.display()))?;
+
+    // .cmd/.bat shims can't be CreateProcess'd directly on Windows.
+    let is_shim = spec
+        .claude_exe
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("cmd") || e.eq_ignore_ascii_case("bat"))
+        .unwrap_or(false);
+
+    let mut cmd = if is_shim {
+        let mut c = Command::new("cmd.exe");
+        c.arg("/C").arg(spec.claude_exe);
+        c
+    } else {
+        Command::new(spec.claude_exe)
+    };
+
+    cmd.arg("-p")
+        .arg("--input-format")
+        .arg("stream-json")
+        .arg("--output-format")
+        .arg("stream-json")
+        .arg("--verbose")
+        .arg("--permission-mode")
+        .arg(&spec.agent_cfg.permission_mode)
+        .arg("--append-system-prompt")
+        .arg(spec.system_prompt_append);
+
+    if spec.hub_cfg.partial_messages {
+        cmd.arg("--include-partial-messages");
+    }
+
+    match spec.resume_session {
+        Some(prev) => {
+            cmd.arg("--resume").arg(prev);
+        }
+        None => {
+            cmd.arg("--session-id").arg(spec.session_id);
+        }
+    }
+
+    if let Some(model) = spec
+        .agent_cfg
+        .model
+        .as_ref()
+        .or(spec.hub_cfg.default_model.as_ref())
+    {
+        cmd.arg("--model").arg(model);
+    }
+    // Agents run headless — nobody can answer permission prompts, so any
+    // tool not pre-approved here is auto-denied. Coordination through the
+    // hub CLI must always work, even when the user pre-approves nothing.
+    let mut allowed: Vec<String> = spec.agent_cfg.allowed_tools.clone().unwrap_or_default();
+    if !allowed.iter().any(|t| t == "Bash" || t.starts_with("Bash(agentcom")) {
+        allowed.push("Bash(agentcom:*)".to_string());
+    }
+    cmd.arg("--allowedTools").arg(allowed.join(","));
+    if let Some(max_turns) = spec.agent_cfg.max_turns_per_prompt {
+        cmd.arg("--max-turns").arg(max_turns.to_string());
+    }
+
+    cmd.current_dir(&cwd)
+        .env("AGENTCOM_PORT", spec.ipc_port.to_string())
+        .env("AGENTCOM_TOKEN", spec.ipc_token)
+        .env("AGENTCOM_AGENT", &spec.agent_cfg.name)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    // Make sure `agentcom` is callable from the agent's Bash tool even if
+    // the binary isn't on the global PATH.
+    if let Some(dir) = spec.agentcom_dir {
+        let path_var = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths: Vec<PathBuf> = vec![dir.to_path_buf()];
+        paths.extend(std::env::split_paths(&path_var));
+        if let Ok(joined) = std::env::join_paths(paths) {
+            cmd.env("PATH", joined);
+        }
+    }
+
+    // Keep console Ctrl+C in the hub's terminal from propagating to children;
+    // shutdown is hub-orchestrated (close stdin -> grace -> tree kill).
+    #[cfg(windows)]
+    {
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
+
+    cmd.spawn()
+        .with_context(|| format!("spawning claude for agent {:?}", spec.agent_cfg.name))
+}
+
+/// Kill a child and its entire descendant tree (claude spawns tool
+/// subprocesses that `Child::kill` alone would orphan).
+pub async fn kill_tree(pid: u32) {
+    #[cfg(windows)]
+    {
+        let _ = tokio::process::Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = tokio::process::Command::new("kill")
+            .args(["-KILL", &format!("-{pid}")])
+            .status()
+            .await;
+    }
+}

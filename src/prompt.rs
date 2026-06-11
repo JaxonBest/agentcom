@@ -1,0 +1,165 @@
+//! Prompt construction: the per-agent system-prompt append (how agents
+//! learn the agentcom protocol) and the per-turn prompt composer
+//! ([INBOX] / [TASK] blocks fed by the scheduler).
+
+use crate::config::{AgentConfig, HubConfig};
+use crate::store::{Message, Task};
+
+pub fn system_prompt_append(cfg: &HubConfig, me: &AgentConfig) -> String {
+    let teammates: String = cfg
+        .agents
+        .iter()
+        .filter(|a| a.name != me.name)
+        .map(|a| format!("- \"{}\" — {}\n", a.name, a.role))
+        .collect();
+    let teammates = if teammates.is_empty() {
+        "- (none — you are the only agent)\n".to_string()
+    } else {
+        teammates
+    };
+
+    format!(
+        r#"## agentcom multi-agent team
+
+You are agent "{name}" on the "{project}" team.
+Your role: {role}
+
+Teammates:
+{teammates}
+You coordinate through the `agentcom` CLI (run it with your Bash tool):
+- `agentcom task list` — see the shared task board
+- `agentcom task claim <id>` — claim a task BEFORE working on it
+- `agentcom task done <id> --note "<what changed>"` — mark your claimed task complete
+- `agentcom task block <id> --reason "..."` — mark a task blocked instead of guessing
+- `agentcom task add "<title>" -d "<description>" [-p <0-4>] [--dep <id>]` — file follow-up work you discover (0 = highest priority)
+- `agentcom send <agent|all> "<msg>"` — message a teammate; delivered when their current turn ends
+- `agentcom interrupt <agent> "<msg>"` — URGENT: aborts their in-progress work immediately. Use ONLY to stop wasted or conflicting work (e.g. you're both editing the same files). Prefer `send`.
+- `agentcom inbox` — re-check messages addressed to you mid-turn
+- `agentcom status` — see what every agent is doing right now
+
+Etiquette:
+1. One claimed task at a time. Claim before touching code; mark done or blocked before moving on.
+2. Announce risky or wide-reaching changes to "all" before starting them.
+3. When you finish a task, briefly `send all` what changed and where.
+4. Never work on a task another agent has claimed; coordinate via `send` instead.
+5. If your turn input has an [INBOX] section, read and act on it before the [TASK].
+6. End your turn when the task is done or you are waiting on someone — the hub wakes you when there is news. Do not idle-loop or poll inside a turn.
+"#,
+        name = me.name,
+        project = cfg.project_name,
+        role = me.role,
+        teammates = teammates,
+    )
+}
+
+/// Compose the next turn's prompt from pending messages and the task context.
+/// Returns `None` when there is nothing to do (agent should go idle).
+pub fn turn_prompt(inbox: &[Message], claimed: Option<&Task>, suggested: Option<&Task>) -> Option<String> {
+    if inbox.is_empty() && claimed.is_none() && suggested.is_none() {
+        return None;
+    }
+    let mut out = String::new();
+
+    if !inbox.is_empty() {
+        out.push_str("[INBOX]\n");
+        for (i, m) in inbox.iter().enumerate() {
+            let urgency = if m.urgent { " (URGENT)" } else { "" };
+            out.push_str(&format!("{}. from {}{}: {}\n", i + 1, m.from_who, urgency, m.body));
+        }
+        out.push('\n');
+    }
+
+    match (claimed, suggested) {
+        (Some(t), _) => {
+            out.push_str(&format!(
+                "[TASK]\n#{} (priority {}, claimed by you): {}\n{}\n\n",
+                t.id, t.priority, t.title, t.description
+            ));
+            out.push_str(if inbox.is_empty() {
+                "Continue this task. Use the agentcom commands as needed."
+            } else {
+                "Handle the inbox first, then continue this task. Use the agentcom commands as needed."
+            });
+        }
+        (None, Some(t)) => {
+            out.push_str(&format!(
+                "[TASK — unclaimed suggestion]\n#{} (priority {}): {}\n{}\n\n",
+                t.id, t.priority, t.title, t.description
+            ));
+            out.push_str(if inbox.is_empty() {
+                "If you take this on, run `agentcom task claim` first. If it doesn't fit your role, leave it and check `agentcom task list` for a better one."
+            } else {
+                "Handle the inbox first. Then, if you take this task on, run `agentcom task claim` first."
+            });
+        }
+        (None, None) => {
+            out.push_str(
+                "No task is assigned. Respond to the inbox above, then check `agentcom task list` for open work.",
+            );
+        }
+    }
+
+    Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::TaskStatus;
+
+    fn msg(from: &str, body: &str, urgent: bool) -> Message {
+        Message {
+            id: 1,
+            from_who: from.into(),
+            to_who: "me".into(),
+            body: body.into(),
+            urgent,
+            delivered: false,
+            created_at: 0,
+            delivered_at: None,
+        }
+    }
+
+    fn task(id: i64, title: &str) -> Task {
+        Task {
+            id,
+            title: title.into(),
+            description: "desc".into(),
+            status: TaskStatus::Open,
+            priority: 1,
+            claimed_by: None,
+            blocked_reason: None,
+            note: None,
+            created_by: "human".into(),
+            created_at: 0,
+            updated_at: 0,
+            depends_on: vec![],
+        }
+    }
+
+    #[test]
+    fn empty_means_idle() {
+        assert!(turn_prompt(&[], None, None).is_none());
+    }
+
+    #[test]
+    fn inbox_and_claimed_task() {
+        let p = turn_prompt(
+            &[msg("reviewer", "stop — conflicts", true)],
+            Some(&task(12, "Fix login")),
+            None,
+        )
+        .unwrap();
+        assert!(p.contains("[INBOX]"));
+        assert!(p.contains("URGENT"));
+        assert!(p.contains("#12"));
+        assert!(p.contains("Handle the inbox first"));
+    }
+
+    #[test]
+    fn suggestion_requires_claim() {
+        let p = turn_prompt(&[], None, Some(&task(3, "Refactor"))).unwrap();
+        assert!(p.contains("unclaimed suggestion"));
+        assert!(p.contains("task claim"));
+    }
+}

@@ -1,0 +1,175 @@
+//! TUI key handling.
+
+use super::{App, InputKind, InputModal, Tab};
+use crate::ipc::Request;
+use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+
+pub fn handle_key(app: &mut App, key: KeyEvent) {
+    if key.kind != KeyEventKind::Press {
+        return;
+    }
+
+    // Modal input line takes priority.
+    if app.modal.is_some() {
+        handle_modal_key(app, key);
+        return;
+    }
+
+    if app.confirm_quit {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => app.should_quit = true,
+            _ => app.confirm_quit = false,
+        }
+        return;
+    }
+
+    if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+        app.confirm_quit = true;
+        return;
+    }
+
+    match key.code {
+        KeyCode::Char('q') => app.confirm_quit = true,
+        KeyCode::Tab => {
+            let i = Tab::ALL.iter().position(|t| *t == app.tab).unwrap_or(0);
+            app.tab = Tab::ALL[(i + 1) % Tab::ALL.len()];
+        }
+        KeyCode::Char('1') => app.tab = Tab::Output,
+        KeyCode::Char('2') => app.tab = Tab::Tasks,
+        KeyCode::Char('3') => app.tab = Tab::Messages,
+        KeyCode::Char('4') => app.tab = Tab::HubLog,
+        KeyCode::Up | KeyCode::Char('k') => {
+            if app.selected > 0 {
+                app.selected -= 1;
+                app.scroll_back = None;
+            }
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            if app.selected + 1 < app.agent_names.len() {
+                app.selected += 1;
+                app.scroll_back = None;
+            }
+        }
+        KeyCode::PageUp => {
+            let cur = app.scroll_back.unwrap_or(0);
+            app.scroll_back = Some(cur + 20);
+        }
+        KeyCode::PageDown => {
+            app.scroll_back = match app.scroll_back {
+                Some(n) if n > 20 => Some(n - 20),
+                _ => None,
+            };
+        }
+        KeyCode::End => app.scroll_back = None,
+        KeyCode::Char('m') => open_modal(app, InputKind::Message),
+        KeyCode::Char('u') => open_modal(app, InputKind::Urgent),
+        KeyCode::Char('M') => app.modal = Some(InputModal {
+            kind: InputKind::Broadcast,
+            buffer: String::new(),
+        }),
+        KeyCode::Char('a') => app.modal = Some(InputModal {
+            kind: InputKind::AddTask,
+            buffer: String::new(),
+        }),
+        KeyCode::Char('p') => {
+            if let Some(name) = app.selected_agent().map(str::to_string) {
+                let paused = app
+                    .agent_row(&name)
+                    .map(|r| r.state == "paused")
+                    .unwrap_or(false);
+                let req = if paused {
+                    Request::Resume {
+                        agent: name.clone(),
+                    }
+                } else {
+                    Request::Pause {
+                        agent: name.clone(),
+                    }
+                };
+                app.send_request(req);
+                app.flash = Some(format!(
+                    "{} {name}",
+                    if paused { "resuming" } else { "pausing" }
+                ));
+            }
+        }
+        KeyCode::Char('s') => {
+            if let Some(name) = app.selected_agent().map(str::to_string) {
+                app.send_request(Request::Stop {
+                    agent: Some(name.clone()),
+                });
+                app.flash = Some(format!("stopping {name}"));
+            }
+        }
+        _ => {}
+    }
+}
+
+fn open_modal(app: &mut App, kind: InputKind) {
+    if app.selected_agent().is_some() {
+        app.modal = Some(InputModal {
+            kind,
+            buffer: String::new(),
+        });
+    }
+}
+
+fn handle_modal_key(app: &mut App, key: KeyEvent) {
+    let Some(modal) = app.modal.as_mut() else { return };
+    match key.code {
+        KeyCode::Esc => app.modal = None,
+        KeyCode::Enter => {
+            let kind = modal.kind;
+            let text = modal.buffer.trim().to_string();
+            app.modal = None;
+            if text.is_empty() {
+                return;
+            }
+            match kind {
+                InputKind::Message | InputKind::Urgent => {
+                    if let Some(name) = app.selected_agent().map(str::to_string) {
+                        app.send_request(Request::Send {
+                            to: name.clone(),
+                            body: text,
+                            urgent: kind == InputKind::Urgent,
+                        });
+                        app.flash = Some(format!(
+                            "{} {name}",
+                            if kind == InputKind::Urgent {
+                                "interrupting"
+                            } else {
+                                "messaged"
+                            }
+                        ));
+                    }
+                }
+                InputKind::Broadcast => {
+                    app.send_request(Request::Send {
+                        to: "all".into(),
+                        body: text,
+                        urgent: false,
+                    });
+                    app.flash = Some("broadcast sent".into());
+                }
+                InputKind::AddTask => {
+                    app.send_request(Request::TaskAdd {
+                        title: text,
+                        description: String::new(),
+                        priority: 2,
+                        depends_on: vec![],
+                    });
+                    app.flash = Some("task added".into());
+                }
+            }
+        }
+        KeyCode::Backspace => {
+            modal.buffer.pop();
+        }
+        KeyCode::Char(c) => {
+            if !key.modifiers.contains(KeyModifiers::CONTROL) {
+                modal.buffer.push(c);
+            }
+        }
+        _ => {}
+    }
+}

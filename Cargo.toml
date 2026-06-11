@@ -1,0 +1,43 @@
+[package]
+name = "agentcom"
+version = "0.1.0"
+edition = "2021"
+description = "A communication hub that lets Claude Code agents message and interrupt each other while working autonomously on large codebases"
+license = "MIT"
+
+[[bin]]
+name = "agentcom"
+path = "src/main.rs"
+
+[[bin]]
+name = "mock-claude"
+path = "src/bin/mock_claude.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "net", "sync", "time", "signal"] }
+clap = { version = "4", features = ["derive", "env"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+rusqlite = { version = "0.32", features = ["bundled"] }
+ratatui = "0.29"
+crossterm = { version = "0.28", features = ["event-stream"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+anyhow = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4"] }
+which = "7"
+directories = "5"
+rand = "0.8"
+sha2 = "0.10"
+futures = "0.3"
+
+[dev-dependencies]
+tempfile = "3"
+assert_cmd = "2"
+
+[profile.release]
+lto = true
+strip = true
