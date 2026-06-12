@@ -28,7 +28,24 @@ async fn main() -> Result<()> {
             agents,
             tasks,
             headless,
-        } => run_up(agents, tasks, headless).await,
+            free,
+            for_,
+            budget,
+            usage,
+        } => {
+            let free_mode = match (&free, &for_, &usage) {
+                (Some(goal), _, _) => Some(config::FreeMode {
+                    goal: goal.clone(),
+                    duration: for_.as_deref().map(config::parse_duration).transpose()?,
+                    usage_pct: usage,
+                }),
+                (None, Some(_), _) | (None, None, Some(_)) => {
+                    anyhow::bail!("--for/--usage require --free \"<goal>\"")
+                }
+                _ => None,
+            };
+            run_up(agents, tasks, headless, free_mode, budget).await
+        }
         Command::Agent(cmd) => cli::run_agent_cmd(cmd).await,
         other => cli::run_client(other).await,
     }
@@ -38,6 +55,8 @@ async fn run_up(
     only_agents: Option<Vec<String>>,
     seed_tasks: Vec<String>,
     headless: bool,
+    free_mode: Option<config::FreeMode>,
+    budget_override: Option<f64>,
 ) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let project_root = paths::find_project_root(&cwd)
@@ -57,6 +76,10 @@ async fn run_up(
         cfg.max_agents = (cfg.max_agents + 1).max(cfg.agents.len());
     }
 
+    if let Some(b) = budget_override {
+        cfg.max_total_budget_usd = Some(b);
+    }
+
     init_logging(&project_root, headless)?;
 
     // Refuse to double-start against a live hub.
@@ -72,7 +95,7 @@ async fn run_up(
         }
     }
 
-    let mut hub = hub::Hub::new(cfg, project_root).await?;
+    let mut hub = hub::Hub::new(cfg, project_root, free_mode).await?;
 
     for t in &seed_tasks {
         hub.store().task_add(t, "", 1, &[], "human")?;

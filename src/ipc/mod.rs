@@ -113,6 +113,9 @@ pub enum Response {
         open_tasks: u64,
         pending_msgs: u64,
         total_cost_usd: f64,
+        /// Free-mode summary line (goal + remaining limits), if active.
+        #[serde(default)]
+        free: Option<String>,
     },
     Files {
         claims: Vec<crate::store::files::FileClaim>,

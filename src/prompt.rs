@@ -5,7 +5,11 @@
 use crate::config::{AgentConfig, HubConfig};
 use crate::store::{Message, Task};
 
-pub fn system_prompt_append(cfg: &HubConfig, me: &AgentConfig) -> String {
+pub fn system_prompt_append(
+    cfg: &HubConfig,
+    me: &AgentConfig,
+    free: Option<&crate::config::FreeMode>,
+) -> String {
     let teammates: String = cfg
         .agents
         .iter()
@@ -56,12 +60,19 @@ Recruiting:
 - Recruit only when `agentcom task list` shows more independent, claimable tasks than the team can absorb, or the work needs a role nobody has (e.g. dedicated tester, docs writer).
 - Give recruits a narrow role description, and a --budget when one was given to you.
 - Announce the recruit to "all" so the team knows who owns what.
-{composer_section}"#,
+{free_section}{composer_section}"#,
         name = me.name,
         project = cfg.project_name,
         role = me.role,
         teammates = teammates,
         max_agents = cfg.max_agents,
+        free_section = free
+            .map(|f| format!(
+                "\n## Free mode\nStanding goal: {}\nThe fleet runs until a stop condition (time, budget, or usage limit) fires. \
+                 Between tasks, prefer work that advances this goal. Quality over quantity — never invent busywork.\n",
+                f.goal
+            ))
+            .unwrap_or_default(),
         composer_section = if me.name == crate::config::COMPOSER_NAME {
             COMPOSER_SECTION
         } else {

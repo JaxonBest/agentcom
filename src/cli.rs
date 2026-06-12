@@ -36,6 +36,20 @@ pub enum Command {
         /// Run without the TUI dashboard
         #[arg(long)]
         headless: bool,
+        /// FREE MODE: a standing goal the fleet keeps working toward until a
+        /// stop condition fires (combine with --for / --budget / --usage)
+        #[arg(long, value_name = "GOAL")]
+        free: Option<String>,
+        /// Stop after this much wall-clock time (e.g. 2h, 90m, 1h30m)
+        #[arg(long = "for", value_name = "DURATION")]
+        for_: Option<String>,
+        /// Stop once total spend reaches this many USD (overrides
+        /// max_total_budget_usd from agentcom.toml)
+        #[arg(long)]
+        budget: Option<f64>,
+        /// Stop when the 5-hour usage limit reaches this percent (0-100)
+        #[arg(long, value_name = "PERCENT")]
+        usage: Option<f64>,
     },
     /// Show hub and agent status
     Status,
@@ -413,11 +427,15 @@ fn print_status(resp: Response) -> Result<()> {
             open_tasks,
             pending_msgs,
             total_cost_usd,
+            free,
         } => {
             println!(
                 "{project} — {} agent(s), {open_tasks} open task(s), {pending_msgs} pending message(s), ${total_cost_usd:.2} spent",
                 agents.len()
             );
+            if let Some(free) = free {
+                println!("  FREE MODE · {free}");
+            }
             for a in agents {
                 let detail = a
                     .detail

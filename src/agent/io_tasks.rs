@@ -232,7 +232,10 @@ fn render_event(
                 buf.write().unwrap().close_line();
             }
         }
-        CliEvent::ControlResponse { .. } | CliEvent::User { .. } | CliEvent::Unknown => {}
+        CliEvent::ControlResponse { .. }
+        | CliEvent::User { .. }
+        | CliEvent::RateLimitEvent { .. }
+        | CliEvent::Unknown => {}
     }
 }
 

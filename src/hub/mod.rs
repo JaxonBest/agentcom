@@ -50,10 +50,20 @@ pub struct Hub {
     declined: HashMap<String, std::collections::HashSet<i64>>,
     stop_deadlines: HashMap<String, Instant>,
     shutting_down: bool,
+    free: Option<crate::config::FreeMode>,
+    started: Instant,
+    /// Last time the composer was nudged in free mode (rate-limits nudges).
+    last_nudge: Instant,
+    /// Latest observed 5h usage-limit percentage (from rate_limit_event).
+    usage_observed_pct: Option<f64>,
 }
 
 impl Hub {
-    pub async fn new(cfg: HubConfig, project_root: PathBuf) -> Result<Self> {
+    pub async fn new(
+        cfg: HubConfig,
+        project_root: PathBuf,
+        free: Option<crate::config::FreeMode>,
+    ) -> Result<Self> {
         let store = Arc::new(Store::open(&crate::paths::db_path(&project_root)?)?);
         let claude_exe = spawn::resolve_claude_exe()?;
 
@@ -107,6 +117,10 @@ impl Hub {
             declined: HashMap::new(),
             stop_deadlines: HashMap::new(),
             shutting_down: false,
+            free,
+            started: Instant::now(),
+            last_nudge: Instant::now(),
+            usage_observed_pct: None,
         })
     }
 
@@ -144,7 +158,8 @@ impl Hub {
             .with_context(|| format!("unknown agent {name:?}"))?
             .clone();
         let session_id = uuid::Uuid::new_v4().to_string();
-        let sys_prompt = crate::prompt::system_prompt_append(&self.cfg, &agent_cfg);
+        let sys_prompt =
+            crate::prompt::system_prompt_append(&self.cfg, &agent_cfg, self.free.as_ref());
         let agentcom_dir = std::env::current_exe()
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
@@ -278,6 +293,19 @@ impl Hub {
                 num_turns,
                 ..
             } => self.handle_result(agent, &subtype, total_cost_usd, num_turns),
+            CliEvent::RateLimitEvent { rate_limit_info } => {
+                if let Some(pct) = crate::protocol::event::rate_limit_pct(&rate_limit_info) {
+                    // A fresh "allowed" with no percentage only means "not
+                    // blocked" — don't let it mask a higher prior reading
+                    // unless it carries real utilization data.
+                    let has_numeric = ["utilization", "used_percent", "usedPercent", "percentUsed"]
+                        .iter()
+                        .any(|k| rate_limit_info.get(k).is_some());
+                    if has_numeric || pct > self.usage_observed_pct.unwrap_or(0.0) {
+                        self.usage_observed_pct = Some(pct);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -465,6 +493,81 @@ impl Hub {
                 ));
                 self.begin_shutdown();
             }
+        }
+
+        self.free_mode_tick();
+    }
+
+    /// Free mode: enforce time/usage stop conditions; when the whole fleet
+    /// goes idle, nudge the composer to generate the next round of work.
+    fn free_mode_tick(&mut self) {
+        let Some(free) = self.free.clone() else { return };
+        if self.shutting_down {
+            return;
+        }
+
+        if let Some(limit) = free.duration {
+            if self.started.elapsed() >= limit {
+                self.log(format!(
+                    "free mode: time limit ({}m) reached — shutting down",
+                    limit.as_secs() / 60
+                ));
+                self.begin_shutdown();
+                return;
+            }
+        }
+        if let (Some(threshold), Some(observed)) = (free.usage_pct, self.usage_observed_pct) {
+            if observed >= threshold {
+                self.log(format!(
+                    "free mode: 5h usage limit at {observed:.0}% (threshold {threshold:.0}%) — shutting down"
+                ));
+                self.begin_shutdown();
+                return;
+            }
+        }
+
+        let nudge_interval = Duration::from_secs(
+            std::env::var("AGENTCOM_FREE_NUDGE_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30),
+        );
+        let all_idle = self
+            .agents
+            .values()
+            .filter(|a| a.is_running())
+            .all(|a| a.state == AgentState::Idle);
+        let composer_ready = self
+            .agents
+            .get(crate::config::COMPOSER_NAME)
+            .map(|a| a.state == AgentState::Idle)
+            .unwrap_or(false);
+        if all_idle && composer_ready && self.last_nudge.elapsed() >= nudge_interval {
+            self.last_nudge = Instant::now();
+            let mut remaining = Vec::new();
+            if let Some(limit) = free.duration {
+                let left = limit.saturating_sub(self.started.elapsed());
+                remaining.push(format!("{}m of time", left.as_secs() / 60));
+            }
+            if let Some(max) = self.cfg.max_total_budget_usd {
+                let total: f64 = self.agents.values().map(|a| a.spent_usd).sum();
+                remaining.push(format!("${:.2} of budget", (max - total).max(0.0)));
+            }
+            let remaining = if remaining.is_empty() {
+                "no explicit limits".to_string()
+            } else {
+                format!("{} remaining", remaining.join(", "))
+            };
+            let nudge = format!(
+                "[FREE MODE] Standing goal: {goal}\n\
+                 The whole team is idle ({remaining}). Review `agentcom task list` and the codebase, \
+                 then queue the next most valuable work toward the goal (decompose into file-disjoint \
+                 tasks; recruit if it parallelizes). Quality over quantity — if nothing genuinely \
+                 valuable remains, tell the human via `agentcom send human` and do not invent busywork.",
+                goal = free.goal,
+            );
+            self.log("free mode: fleet idle — nudging composer".to_string());
+            self.do_send("hub", crate::config::COMPOSER_NAME, &nudge, false);
         }
     }
 
@@ -678,6 +781,20 @@ impl Hub {
             open_tasks: self.store.open_task_count().unwrap_or(0),
             pending_msgs: self.store.msg_pending_count().unwrap_or(0),
             total_cost_usd: self.agents.values().map(|a| a.spent_usd).sum(),
+            free: self.free.as_ref().map(|f| {
+                let mut parts = vec![format!("goal: {}", f.goal)];
+                if let Some(limit) = f.duration {
+                    let left = limit.saturating_sub(self.started.elapsed());
+                    parts.push(format!("{}m left", left.as_secs() / 60));
+                }
+                if let (Some(threshold), observed) = (f.usage_pct, self.usage_observed_pct) {
+                    parts.push(format!(
+                        "usage {:.0}%/{threshold:.0}%",
+                        observed.unwrap_or(0.0)
+                    ));
+                }
+                parts.join(" · ")
+            }),
         }
     }
 

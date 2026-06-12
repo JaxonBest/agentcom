@@ -57,6 +57,50 @@ pub struct AgentConfig {
 
 pub const COMPOSER_NAME: &str = "composer";
 
+/// Free mode: a standing goal the fleet keeps working toward until a
+/// stopping condition fires. Whenever every agent goes idle, the hub nudges
+/// the composer to generate the next round of work.
+#[derive(Debug, Clone)]
+pub struct FreeMode {
+    pub goal: String,
+    /// Wall-clock limit from hub start.
+    pub duration: Option<std::time::Duration>,
+    /// Stop when the 5-hour usage limit reaches this percentage (0-100).
+    pub usage_pct: Option<f64>,
+}
+
+/// Parse "2h", "90m", "1h30m", "45s", or plain seconds ("3600").
+pub fn parse_duration(s: &str) -> Result<std::time::Duration> {
+    let s = s.trim().to_lowercase();
+    if let Ok(secs) = s.parse::<u64>() {
+        return Ok(std::time::Duration::from_secs(secs));
+    }
+    let mut total: u64 = 0;
+    let mut num = String::new();
+    let mut matched = false;
+    for c in s.chars() {
+        if c.is_ascii_digit() {
+            num.push(c);
+        } else {
+            let n: u64 = num
+                .parse()
+                .map_err(|_| anyhow::anyhow!("invalid duration {s:?}"))?;
+            num.clear();
+            total += match c {
+                'h' => n * 3600,
+                'm' => n * 60,
+                's' => n,
+                _ => bail!("invalid duration {s:?} (use e.g. 2h, 90m, 1h30m, 45s)"),
+            };
+            matched = true;
+        }
+    }
+    if !num.is_empty() || !matched {
+        bail!("invalid duration {s:?} (use e.g. 2h, 90m, 1h30m, 45s)");
+    }
+    Ok(std::time::Duration::from_secs(total))
+}
+
 /// The built-in coordinator. Injected by `agentcom up` when the config
 /// doesn't define its own `[[agent]] name = "composer"`. It coordinates and
 /// converses with the human; it does not edit code itself.
@@ -235,6 +279,19 @@ pub fn write_example(project_root: &Path, force: bool) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn durations_parse() {
+        use std::time::Duration;
+        assert_eq!(parse_duration("2h").unwrap(), Duration::from_secs(7200));
+        assert_eq!(parse_duration("90m").unwrap(), Duration::from_secs(5400));
+        assert_eq!(parse_duration("1h30m").unwrap(), Duration::from_secs(5400));
+        assert_eq!(parse_duration("45s").unwrap(), Duration::from_secs(45));
+        assert_eq!(parse_duration("3600").unwrap(), Duration::from_secs(3600));
+        assert!(parse_duration("2x").is_err());
+        assert!(parse_duration("h").is_err());
+        assert!(parse_duration("").is_err());
+    }
 
     #[test]
     fn example_config_parses_and_validates() {

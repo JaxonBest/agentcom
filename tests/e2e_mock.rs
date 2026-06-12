@@ -49,11 +49,22 @@ fn write_config(project: &Path, agents: &[(&str, &str)], extra: &str) {
 }
 
 fn start_hub(project: &Path, script_dir: &Path, tasks: &[&str], extra_env: &[(&str, &str)]) -> HubGuard {
+    start_hub_args(project, script_dir, tasks, extra_env, &[])
+}
+
+fn start_hub_args(
+    project: &Path,
+    script_dir: &Path,
+    tasks: &[&str],
+    extra_env: &[(&str, &str)],
+    extra_args: &[&str],
+) -> HubGuard {
     let mut cmd = Command::new(agentcom_bin());
     cmd.arg("up").arg("--headless");
     for t in tasks {
         cmd.arg("--task").arg(t);
     }
+    cmd.args(extra_args);
     cmd.current_dir(project)
         .env("AGENTCOM_CLAUDE_EXE", mock_claude_bin())
         .env("MOCK_SCRIPT_DIR", script_dir)
@@ -448,6 +459,86 @@ fn composer_chat_and_file_claims() {
         Duration::from_secs(20),
         |out| out.contains("claim-was-rejected"),
     );
+}
+
+#[test]
+fn free_mode_nudges_composer_when_fleet_idles() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    let scripts = tmp.path().join("scripts");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+
+    write_config(&project, &[("worker", "does the work")], "");
+    // The composer reacts to the free-mode nudge by queuing real work.
+    std::fs::write(
+        scripts.join("composer.ndjson"),
+        r#"{"run": ["agentcom task add \"free-work-1\"", "agentcom send human \"queued the next round\""], "text": "planned"}
+"#,
+    )
+    .unwrap();
+
+    let _hub = start_hub_args(
+        &project,
+        &scripts,
+        &[],
+        &[("AGENTCOM_FREE_NUDGE_SECS", "1")],
+        &["--free", "continuously improve this project", "--for", "10m"],
+    );
+
+    // No seed tasks, everyone idles -> the hub nudges the composer, which
+    // files work toward the standing goal.
+    wait_for(
+        &project,
+        &["task", "list"],
+        Duration::from_secs(20),
+        |out| out.contains("free-work-1"),
+    );
+    let (_, status) = cli(&project, &["status"]);
+    assert!(status.contains("FREE MODE"), "status shows mode: {status}");
+    assert!(
+        status.contains("continuously improve"),
+        "status shows goal: {status}"
+    );
+}
+
+#[test]
+fn free_mode_time_limit_shuts_down() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    let scripts = tmp.path().join("scripts");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+
+    write_config(&project, &[("worker", "does the work")], "");
+
+    let mut hub = start_hub_args(
+        &project,
+        &scripts,
+        &[],
+        // Keep nudges out of the way so shutdown is the only event.
+        &[("AGENTCOM_FREE_NUDGE_SECS", "600")],
+        &["--free", "anything", "--for", "2s"],
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(25);
+    loop {
+        if let Ok(Some(exit)) = hub.child.try_wait() {
+            assert!(
+                exit.success(),
+                "hub exits cleanly at the time limit; logs:\n{}",
+                hub_logs(&mut hub)
+            );
+            return;
+        }
+        if Instant::now() > deadline {
+            panic!(
+                "hub did not stop at the 2s time limit; logs:\n{}",
+                hub_logs(&mut hub)
+            );
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
 }
 
 #[test]

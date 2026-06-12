@@ -53,6 +53,11 @@ pub enum CliEvent {
         #[serde(default)]
         response: Value,
     },
+    /// Subscription usage-limit signal, emitted alongside API calls.
+    RateLimitEvent {
+        #[serde(default)]
+        rate_limit_info: Value,
+    },
     /// Echoes of stdin user messages (`--replay-user-messages`) and any
     /// future event types.
     #[serde(other)]
@@ -98,6 +103,29 @@ pub fn parse_line(line: &str) -> ParsedLine {
             tracing::warn!(error = %e, line, "unparsed cli event line");
             ParsedLine::Raw(line.to_string())
         }
+    }
+}
+
+/// Best-effort 5h usage percentage from a `rate_limit_event`. The exact
+/// field set varies by CLI version: prefer a numeric utilization field,
+/// fall back to mapping the status string.
+pub fn rate_limit_pct(info: &Value) -> Option<f64> {
+    if let Some(t) = info.get("rateLimitType").and_then(|t| t.as_str()) {
+        if t != "five_hour" {
+            return None;
+        }
+    }
+    for key in ["utilization", "used_percent", "usedPercent", "percentUsed"] {
+        if let Some(v) = info.get(key).and_then(|v| v.as_f64()) {
+            // Some fields are 0-1 fractions, some 0-100 percentages.
+            return Some(if v <= 1.0 { v * 100.0 } else { v });
+        }
+    }
+    match info.get("status").and_then(|s| s.as_str()) {
+        Some("allowed") => Some(0.0),
+        Some("allowed_warning") => Some(80.0),
+        Some("rejected") | Some("limit_reached") | Some("queued") => Some(100.0),
+        _ => None,
     }
 }
 

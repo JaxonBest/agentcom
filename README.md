@@ -22,6 +22,24 @@ agentcom init                # writes agentcom.toml — edit your fleet
 agentcom up --task "Refactor the auth module; keep tests green"
 ```
 
+### Free mode
+
+Give the fleet a standing goal and a stopping point, then walk away:
+
+```powershell
+agentcom up --free "raise test coverage and fix what you find" --for 2h --budget 5.0
+agentcom up --free "polish the docs" --usage 80        # stop at 80% of the 5h usage limit
+```
+
+Whenever the whole fleet goes idle, the hub nudges the composer to queue the next
+most valuable work toward the goal (it's told to prefer quality over busywork and to
+say so when nothing worthwhile remains). The run ends when ANY stop condition fires:
+`--for` wall-clock time, `--budget` USD spend, or `--usage` percent of the 5-hour
+subscription limit (read from the CLI's rate-limit events; falls back to the
+warning/rejected status signals when no exact percentage is reported).
+
+### The dashboard
+
 `agentcom up` opens the TUI dashboard: live agent output panes, the task board, the message feed, and keybindings to message (`m`), interrupt (`u`), broadcast (`M`), add tasks (`a`), pause (`p`), and stop (`s`) agents. Use `--headless` to run without it.
 
 ## Configuration (`agentcom.toml`)
