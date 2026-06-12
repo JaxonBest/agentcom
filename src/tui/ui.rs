@@ -81,9 +81,14 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
             let state = row.map(|r| r.state.as_str()).unwrap_or("stopped");
             let cost = row.map(|r| r.spent_usd).unwrap_or(0.0);
             let marker = if i == app.selected { ">" } else { " " };
+            let glyph = if state == "working" {
+                SPINNER[app.spin % SPINNER.len()]
+            } else {
+                state_glyph(state)
+            };
             let line = Line::from(vec![
                 Span::raw(format!("{marker} ")),
-                Span::styled(format!("{} ", state_glyph(state)), state_style(state)),
+                Span::styled(format!("{glyph} "), state_style(state)),
                 Span::raw(format!("{name:<10}")),
                 Span::styled(format!("${cost:.2}"), Style::default().fg(Color::DarkGray)),
             ]);
@@ -116,11 +121,142 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect) {
     );
 
     match app.tab {
+        Tab::Chat => draw_chat(f, app, chunks[1]),
         Tab::Output => draw_output(f, app, chunks[1]),
         Tab::Tasks => draw_tasks(f, app, chunks[1]),
         Tab::Messages => draw_messages(f, app, chunks[1]),
         Tab::HubLog => draw_hub_log(f, app, chunks[1]),
     }
+}
+
+const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
+
+/// The conversation with the composer (top) plus a live activity panel
+/// (bottom) showing what every busy agent is doing right now.
+fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(8)])
+        .split(area);
+    draw_conversation(f, app, chunks[0]);
+    draw_activity(f, app, chunks[1]);
+}
+
+fn draw_conversation(f: &mut Frame, app: &App, area: Rect) {
+    let inner = area.height.saturating_sub(2) as usize;
+    let chat: Vec<&crate::store::Message> = app
+        .messages
+        .iter()
+        .filter(|m| m.from_who == "human" || m.to_who == "human")
+        .collect();
+    let lines: Vec<Line> = chat
+        .iter()
+        .rev()
+        .take(inner.max(1))
+        .rev()
+        .map(|m| {
+            if m.from_who == "human" {
+                Line::from(vec![
+                    Span::styled(
+                        format!("you → {}: ", m.to_who),
+                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(m.body.clone()),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::styled(
+                        format!("{}: ", m.from_who),
+                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(m.body.clone()),
+                ])
+            }
+        })
+        .collect();
+    let lines = if lines.is_empty() {
+        vec![
+            Line::from(Span::styled(
+                "Tell the composer what you want done — it will plan, recruit, and report back.",
+                Style::default().fg(Color::DarkGray),
+            )),
+            Line::from(Span::styled(
+                "(Type below, Enter to send. Tab for agent output panes.)",
+                Style::default().fg(Color::DarkGray),
+            )),
+        ]
+    } else {
+        lines
+    };
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).title(" composer ")),
+        area,
+    );
+}
+
+/// What is everyone doing right now: spinner + state + the last line of
+/// each busy agent's output, then the most recent hub events.
+fn draw_activity(f: &mut Frame, app: &App, area: Rect) {
+    let spinner = SPINNER[app.spin % SPINNER.len()];
+    let mut lines: Vec<Line> = Vec::new();
+
+    for row in &app.agents {
+        let busy = matches!(row.state.as_str(), "working" | "interrupting");
+        if !busy {
+            continue;
+        }
+        let last_action: String = {
+            let map = app.buffers.read().unwrap();
+            map.get(&row.name)
+                .map(|b| b.read().unwrap().tail(1))
+                .unwrap_or_default()
+                .pop()
+                .unwrap_or_default()
+        };
+        let last_action: String = last_action.chars().take(120).collect();
+        let style = if row.state == "interrupting" {
+            Style::default().fg(Color::Red)
+        } else {
+            Style::default().fg(Color::Green)
+        };
+        lines.push(Line::from(vec![
+            Span::styled(format!("{spinner} "), style),
+            Span::styled(
+                format!("{} · {}", row.name, row.state),
+                style.add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                if last_action.is_empty() {
+                    String::new()
+                } else {
+                    format!("  {last_action}")
+                },
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]));
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "all agents idle",
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    // Recent hub events (task lifecycle, recruits, interrupts) fill the rest.
+    let remaining = (area.height.saturating_sub(2) as usize).saturating_sub(lines.len());
+    for event in app.hub_log.iter().rev().take(remaining).rev() {
+        lines.push(Line::from(Span::styled(
+            format!("· {event}"),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    f.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" activity ")),
+        area,
+    );
 }
 
 fn draw_output(f: &mut Frame, app: &App, area: Rect) {
@@ -296,6 +432,16 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             "quit and stop all agents? [y/N]",
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ))
+    } else if app.tab == Tab::Chat {
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(Color::Green)),
+            Span::raw(app.chat_input.clone()),
+            Span::styled("▏", Style::default().fg(Color::Green)),
+            Span::styled(
+                "  (Enter send · Tab panes · Ctrl+C quit)",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ])
     } else if let Some(flash) = &app.flash {
         Line::from(vec![
             Span::styled(format!(" {flash} "), Style::default().fg(Color::Green)),

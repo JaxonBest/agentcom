@@ -118,13 +118,18 @@ impl Hub {
         self.buffers.clone()
     }
 
-    /// Spawn every configured agent (or the named subset).
+    /// Spawn every configured agent (or the named subset), in config order —
+    /// the composer is first, so it gets first crack at seeded goals.
     pub fn spawn_agents(&mut self, only: Option<&[String]>) -> Result<()> {
         let names: Vec<String> = self
+            .cfg
             .agents
-            .keys()
-            .filter(|n| only.map(|o| o.iter().any(|x| x == *n)).unwrap_or(true))
-            .cloned()
+            .iter()
+            .map(|a| a.name.clone())
+            .filter(|n| {
+                n == crate::config::COMPOSER_NAME
+                    || only.map(|o| o.iter().any(|x| x == n)).unwrap_or(true)
+            })
             .collect();
         for name in names {
             self.spawn_agent(&name, None)?;
@@ -303,7 +308,10 @@ impl Hub {
                 crate::store::now_ts(),
             );
         }
-        // A suggestion the agent didn't claim is never re-offered to it.
+        // A suggestion the agent didn't claim is never re-offered to it —
+        // but it must be re-offered to everyone else, or an open task can
+        // strand while the rest of the fleet idles.
+        let mut declined_open_task = false;
         if let Some(tid) = self.suggested.remove(agent) {
             let still_open = self
                 .store
@@ -317,6 +325,7 @@ impl Hub {
                     .entry(agent.to_string())
                     .or_default()
                     .insert(tid);
+                declined_open_task = true;
             }
         }
 
@@ -344,6 +353,9 @@ impl Hub {
         rt.state = AgentState::Idle;
         self.emit_state(agent);
         self.try_feed(agent);
+        if declined_open_task {
+            self.wake_idle();
+        }
     }
 
     fn handle_exit(&mut self, agent: &str, code: Option<i32>) {
@@ -394,13 +406,17 @@ impl Hub {
                 let _ = self.store.release_claims(&name);
             }
         } else {
-            // Stranded work goes back on the board.
+            // Stranded work goes back on the board, file claims free up.
             let released = self.store.release_claims(agent).unwrap_or(0);
             if released > 0 {
                 self.log(format!(
                     "{agent}: released {released} claimed task(s) back to open"
                 ));
                 let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
+            }
+            let freed = self.store.files_release(agent, &[], true).unwrap_or(0);
+            if freed > 0 {
+                self.log(format!("{agent}: released {freed} file claim(s)"));
             }
         }
     }
@@ -481,6 +497,7 @@ impl Hub {
                 .task_add(&title, &description, priority, &depends_on, identity)
             {
                 Ok(id) => {
+                    self.log(format!("{identity} added task #{id}: {title}"));
                     let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
                     self.wake_idle();
                     Response::ok_msg(format!("created task #{id}"))
@@ -503,6 +520,7 @@ impl Hub {
             Request::TaskClaim { id } => match self.store.task_claim(id, identity) {
                 Ok(t) => {
                     self.clear_declined(id);
+                    self.log(format!("{identity} claimed task #{} — {}", t.id, t.title));
                     let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
                     Response::ok_msg(format!("claimed task #{} — {}", t.id, t.title))
                 }
@@ -511,7 +529,27 @@ impl Hub {
             Request::TaskDone { id, note } => {
                 match self.store.task_done(id, identity, note.as_deref()) {
                     Ok(t) => {
+                        self.log(format!("{identity} completed task #{} — {}", t.id, t.title));
                         let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
+                        // Close the loop: whoever filed the task hears that
+                        // it's finished (the composer relies on this to
+                        // report completions to the human).
+                        if t.created_by != identity
+                            && self.agents.contains_key(&t.created_by)
+                        {
+                            let body = format!(
+                                "task #{} \"{}\" completed by {}{}",
+                                t.id,
+                                t.title,
+                                identity,
+                                t.note
+                                    .as_deref()
+                                    .map(|n| format!(" — {n}"))
+                                    .unwrap_or_default()
+                            );
+                            let creator = t.created_by.clone();
+                            self.do_send("hub", &creator, &body, false);
+                        }
                         // A completed dependency may unblock queued work.
                         self.wake_idle();
                         Response::ok_msg(format!("task #{} done — {}", t.id, t.title))
@@ -522,6 +560,7 @@ impl Hub {
             Request::TaskBlock { id, reason } => {
                 match self.store.task_block(id, identity, &reason) {
                     Ok(t) => {
+                        self.log(format!("{identity} blocked task #{}: {reason}", t.id));
                         let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
                         Response::ok_msg(format!("task #{} blocked", t.id))
                     }
@@ -538,7 +577,30 @@ impl Hub {
                 Err(e) => Response::err(e.to_string()),
             },
             Request::Status => self.status_response(),
-            Request::AgentAdd { config } => self.add_agent_live(config),
+            Request::AgentAdd { config } => self.add_agent_live(identity, config),
+            Request::FilesClaim { paths } => match self.store.files_claim(identity, &paths) {
+                Ok(()) => Response::ok_msg(format!("claimed {} file(s)", paths.len())),
+                Err(conflicts) => {
+                    let detail: Vec<String> = conflicts
+                        .iter()
+                        .map(|c| format!("{} (held by {})", c.path, c.agent))
+                        .collect();
+                    Response::err(format!(
+                        "claim rejected — already held: {}. Coordinate with the holder via `agentcom send` before touching these files.",
+                        detail.join(", ")
+                    ))
+                }
+            },
+            Request::FilesRelease { paths, all } => {
+                match self.store.files_release(identity, &paths, all) {
+                    Ok(n) => Response::ok_msg(format!("released {n} file claim(s)")),
+                    Err(e) => Response::err(e.to_string()),
+                }
+            }
+            Request::FilesList => match self.store.files_list() {
+                Ok(claims) => Response::Files { claims },
+                Err(e) => Response::err(e.to_string()),
+            },
             Request::Stop { agent } => match agent {
                 Some(name) => self.stop_agent(&name),
                 None => {
@@ -555,14 +617,24 @@ impl Hub {
     /// Hot-add an agent while the hub is running. Existing agents learn
     /// about the newcomer when they next check `agentcom status`; their
     /// system prompts list teammates from spawn time only.
-    fn add_agent_live(&mut self, config: crate::config::AgentConfig) -> Response {
+    fn add_agent_live(&mut self, requested_by: &str, config: crate::config::AgentConfig) -> Response {
         if let Err(e) = crate::config::validate_agent_name(&config.name) {
             return Response::err(e.to_string());
         }
         if self.agents.contains_key(&config.name) {
             return Response::err(format!("agent {:?} already exists", config.name));
         }
+        if self.agents.len() >= self.cfg.max_agents {
+            return Response::err(format!(
+                "fleet is at max_agents = {} — decompose into tasks instead, or raise the cap in agentcom.toml",
+                self.cfg.max_agents
+            ));
+        }
         let name = config.name.clone();
+        self.log(format!(
+            "{requested_by} recruited new agent {name} (role: {})",
+            config.role
+        ));
         let buf = Arc::new(RwLock::new(RingBuf::new()));
         self.buffers.write().unwrap().insert(name.clone(), buf.clone());
         self.cfg.agents.push(config.clone());

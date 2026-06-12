@@ -20,6 +20,10 @@ pub struct HubConfig {
     /// to a tree-kill + resume.
     #[serde(default = "default_interrupt_timeout")]
     pub interrupt_timeout_secs: u64,
+    /// Hard cap on fleet size — agents may recruit teammates with
+    /// `agentcom agent add`, and this is what stops a recruitment spiral.
+    #[serde(default = "default_max_agents")]
+    pub max_agents: usize,
     #[serde(default, rename = "agent")]
     pub agents: Vec<AgentConfig>,
 }
@@ -51,6 +55,30 @@ pub struct AgentConfig {
     pub auto_restart: bool,
 }
 
+pub const COMPOSER_NAME: &str = "composer";
+
+/// The built-in coordinator. Injected by `agentcom up` when the config
+/// doesn't define its own `[[agent]] name = "composer"`. It coordinates and
+/// converses with the human; it does not edit code itself.
+pub fn composer_default(default_model: Option<&str>) -> AgentConfig {
+    AgentConfig {
+        name: COMPOSER_NAME.to_string(),
+        role: "Coordinator. You converse with the human, turn their goals into board tasks, \
+               recruit and direct worker agents, prevent conflicting edits, and report progress. \
+               You never edit code yourself."
+            .to_string(),
+        cwd: None,
+        model: default_model.map(str::to_string),
+        allowed_tools: Some(
+            ["Bash", "Read", "Glob", "Grep"].map(String::from).to_vec(),
+        ),
+        permission_mode: "acceptEdits".to_string(),
+        max_turns_per_prompt: Some(30),
+        max_budget_usd: None,
+        auto_restart: true,
+    }
+}
+
 /// Shared by config validation and live `agent add`.
 pub fn validate_agent_name(name: &str) -> Result<()> {
     if name.is_empty()
@@ -78,6 +106,9 @@ fn default_permission_mode() -> String {
 fn default_interrupt_timeout() -> u64 {
     15
 }
+fn default_max_agents() -> usize {
+    8
+}
 
 impl HubConfig {
     pub fn load(project_root: &Path) -> Result<Self> {
@@ -93,6 +124,13 @@ impl HubConfig {
     pub fn validate(&self) -> Result<()> {
         if self.agents.is_empty() {
             bail!("agentcom.toml defines no [[agent]] entries");
+        }
+        if self.agents.len() > self.max_agents {
+            bail!(
+                "{} agents configured but max_agents = {}",
+                self.agents.len(),
+                self.max_agents
+            );
         }
         let mut seen = std::collections::HashSet::new();
         for a in &self.agents {
@@ -132,6 +170,11 @@ project_name = "my-project"
 # Seconds to wait for an interrupted agent to abort before force-killing it.
 # interrupt_timeout_secs = 15
 
+# Hard cap on fleet size. Agents can recruit teammates with `agentcom agent
+# add` when the board has more parallel work than the team can absorb; this
+# cap (plus the budgets) is what keeps that bounded.
+# max_agents = 8
+
 [[agent]]
 name = "builder"
 role = "Implements features and fixes. Owns src/. Coordinates with reviewer before large refactors."
@@ -153,10 +196,11 @@ role = "Reviews changes made by other agents, runs tests, and files follow-up ta
 allowed_tools = ["Bash", "Read", "Glob", "Grep"]
 "#;
 
-/// Append a new `[[agent]]` block to an existing agentcom.toml, preserving
-/// the rest of the file (comments included). The combined file is re-parsed
-/// and validated before anything is written.
-pub fn append_agent(project_root: &Path, agent: &AgentConfig) -> Result<PathBuf> {
+/// Render agentcom.toml with a new `[[agent]]` block appended, preserving
+/// the rest of the file (comments included). Validates the combined config
+/// (duplicates, max_agents, names) without writing — callers persist the
+/// returned text once any hub-side checks have also passed.
+pub fn render_with_agent(project_root: &Path, agent: &AgentConfig) -> Result<(PathBuf, String)> {
     #[derive(Serialize)]
     struct Wrap<'a> {
         agent: [&'a AgentConfig; 1],
@@ -173,8 +217,7 @@ pub fn append_agent(project_root: &Path, agent: &AgentConfig) -> Result<PathBuf>
     let combined: HubConfig =
         toml::from_str(&text).context("config invalid after adding agent")?;
     combined.validate()?;
-    std::fs::write(&path, text)?;
-    Ok(path)
+    Ok((path, text))
 }
 
 pub fn write_example(project_root: &Path, force: bool) -> Result<PathBuf> {

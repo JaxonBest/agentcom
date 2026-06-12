@@ -28,16 +28,24 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    // Chat tab: the keyboard belongs to the input line (so you can type
+    // freely); Tab still switches panes, Ctrl+C still quits.
+    if app.tab == Tab::Chat {
+        handle_chat_key(app, key);
+        return;
+    }
+
     match key.code {
         KeyCode::Char('q') => app.confirm_quit = true,
         KeyCode::Tab => {
             let i = Tab::ALL.iter().position(|t| *t == app.tab).unwrap_or(0);
             app.tab = Tab::ALL[(i + 1) % Tab::ALL.len()];
         }
-        KeyCode::Char('1') => app.tab = Tab::Output,
-        KeyCode::Char('2') => app.tab = Tab::Tasks,
-        KeyCode::Char('3') => app.tab = Tab::Messages,
-        KeyCode::Char('4') => app.tab = Tab::HubLog,
+        KeyCode::Char('1') => app.tab = Tab::Chat,
+        KeyCode::Char('2') => app.tab = Tab::Output,
+        KeyCode::Char('3') => app.tab = Tab::Tasks,
+        KeyCode::Char('4') => app.tab = Tab::Messages,
+        KeyCode::Char('5') => app.tab = Tab::HubLog,
         KeyCode::Up | KeyCode::Char('k') => {
             if app.selected > 0 {
                 app.selected -= 1;
@@ -100,6 +108,34 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 });
                 app.flash = Some(format!("stopping {name}"));
             }
+        }
+        _ => {}
+    }
+}
+
+fn handle_chat_key(app: &mut App, key: KeyEvent) {
+    match key.code {
+        KeyCode::Tab => {
+            app.tab = Tab::Output;
+        }
+        KeyCode::Enter => {
+            let text = app.chat_input.trim().to_string();
+            app.chat_input.clear();
+            if text.is_empty() {
+                return;
+            }
+            app.send_request(Request::Send {
+                to: crate::config::COMPOSER_NAME.to_string(),
+                body: text,
+                urgent: false,
+            });
+        }
+        KeyCode::Esc => app.chat_input.clear(),
+        KeyCode::Backspace => {
+            app.chat_input.pop();
+        }
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.chat_input.push(c);
         }
         _ => {}
     }

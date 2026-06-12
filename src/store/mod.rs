@@ -5,6 +5,7 @@
 //! directly from the hub loop behind a `Mutex` rather than through
 //! `spawn_blocking` plumbing.
 
+pub mod files;
 pub mod messages;
 pub mod schema;
 pub mod tasks;

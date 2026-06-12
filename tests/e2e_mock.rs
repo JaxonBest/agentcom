@@ -90,6 +90,14 @@ fn cli(project: &Path, args: &[&str]) -> (bool, String) {
     (out.status.success(), text)
 }
 
+/// True when the status output shows `agent` in `state` (the injected
+/// composer means a bare "working" substring check is ambiguous).
+fn agent_in_state(status_out: &str, agent: &str, state: &str) -> bool {
+    status_out
+        .lines()
+        .any(|l| l.contains(agent) && l.contains(state))
+}
+
 /// Poll a CLI command until its output satisfies `pred`.
 fn wait_for(project: &Path, args: &[&str], timeout: Duration, pred: impl Fn(&str) -> bool) -> String {
     let deadline = Instant::now() + timeout;
@@ -207,9 +215,9 @@ fn interrupt_aborts_turn_and_delivers_urgent_message() {
 
     let _hub = start_hub(&project, &scripts, &["long running work"], &[]);
 
-    // Wait until the worker is mid-turn.
+    // Wait until the worker (specifically) is mid-turn.
     wait_for(&project, &["status"], Duration::from_secs(15), |out| {
-        out.contains("working")
+        agent_in_state(out, "worker", "working")
     });
 
     let (ok, out) = cli(&project, &["interrupt", "worker", "stop what you are doing"]);
@@ -260,7 +268,7 @@ fn ignored_interrupt_escalates_to_kill_and_restart() {
     );
 
     wait_for(&project, &["status"], Duration::from_secs(15), |out| {
-        out.contains("working")
+        agent_in_state(out, "stubborn", "working")
     });
 
     let (ok, _) = cli(&project, &["interrupt", "stubborn", "please stop"]);
@@ -270,7 +278,7 @@ fn ignored_interrupt_escalates_to_kill_and_restart() {
     // After restart the agent is fed the urgent message; the fresh mock
     // process replays step 1 (await_interrupt) so it ends up working again.
     wait_for(&project, &["status"], Duration::from_secs(30), |out| {
-        out.contains("working") || out.contains("starting")
+        agent_in_state(out, "stubborn", "working")
     });
 
     // The restart is visible in run history via a second `working` stretch;
@@ -329,6 +337,117 @@ fn agent_add_persists_and_spawns_live() {
     // Duplicate names are rejected.
     let (ok, out) = cli(&project, &["agent", "add", "newbie", "--role", "again"]);
     assert!(!ok, "duplicate rejected: {out}");
+}
+
+#[test]
+fn agent_can_recruit_a_teammate_and_cap_is_enforced() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    let scripts = tmp.path().join("scripts");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+
+    // Cap of 2: the starter may recruit exactly one teammate.
+    write_config(&project, &[("lead", "decomposes work")], "max_agents = 2\n");
+
+    // The lead recruits a helper on its first turn, then tries to recruit a
+    // second one (which must be rejected by the cap) and records the result.
+    std::fs::write(
+        scripts.join("lead.ndjson"),
+        r#"{"run": ["agentcom agent add helper --role \"recruited helper\"", "agentcom send helper \"welcome\""], "text": "recruited"}
+"#,
+    )
+    .unwrap();
+    // The recruit proves it's alive by filing a task when the welcome lands.
+    std::fs::write(
+        scripts.join("helper.ndjson"),
+        r#"{"run": ["agentcom task add \"recruit-reporting\"", "agentcom agent add third --role \"one too many\""], "text": "hi"}
+"#,
+    )
+    .unwrap();
+
+    let _hub = start_hub(&project, &scripts, &["kick off"], &[]);
+
+    // The recruit went live and did work.
+    wait_for(&project, &["status"], Duration::from_secs(20), |out| {
+        out.contains("helper")
+    });
+    wait_for(
+        &project,
+        &["task", "list"],
+        Duration::from_secs(20),
+        |out| out.contains("recruit-reporting"),
+    );
+
+    // Recruit persisted to config.
+    let cfg = std::fs::read_to_string(project.join("agentcom.toml")).unwrap();
+    assert!(cfg.contains("helper"), "recruit persisted:\n{cfg}");
+
+    // The cap held: "third" must not exist anywhere.
+    let (_, status) = cli(&project, &["status"]);
+    assert!(!status.contains("third"), "cap enforced: {status}");
+    let cfg = std::fs::read_to_string(project.join("agentcom.toml")).unwrap();
+    assert!(!cfg.contains("one too many"), "cap rejection not persisted:\n{cfg}");
+}
+
+#[test]
+fn composer_chat_and_file_claims() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    let scripts = tmp.path().join("scripts");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+
+    // Note: NO composer in the config — `up` must inject one.
+    write_config(&project, &[("worker", "does the work")], "");
+
+    // The composer reacts to the human's chat message: claims a file (so the
+    // worker will collide), files a task, and reports back to the human.
+    std::fs::write(
+        scripts.join("composer.ndjson"),
+        r#"{"run": ["agentcom files claim src/app.js", "agentcom task add \"update src/app.js\"", "agentcom send human \"plan is in motion\""], "text": "delegated"}
+"#,
+    )
+    .unwrap();
+    // The worker tries to claim the same file (must be rejected), records the
+    // rejection, then reports to the human too.
+    std::fs::write(
+        scripts.join("worker.ndjson"),
+        r#"{"run": ["agentcom files claim src/app.js || agentcom task add \"claim-was-rejected\"", "agentcom send human \"worker checking in\""], "text": "tried"}
+"#,
+    )
+    .unwrap();
+
+    let _hub = start_hub(&project, &scripts, &[], &[]);
+
+    // Composer was injected and is visible.
+    wait_for(&project, &["status"], Duration::from_secs(15), |out| {
+        out.contains("composer") && out.contains("worker")
+    });
+
+    // Human chats with the composer (this is what the TUI chat input sends).
+    let (ok, out) = cli(&project, &["send", "composer", "please update app.js"]);
+    assert!(ok, "{out}");
+
+    // Composer replied to the human; the reply is readable as the human.
+    wait_for(&project, &["inbox"], Duration::from_secs(20), |out| {
+        out.contains("plan is in motion")
+    });
+
+    // The composer's file claim is on record...
+    let files = wait_for(&project, &["files", "list"], Duration::from_secs(10), |out| {
+        out.contains("src/app.js")
+    });
+    assert!(files.contains("composer"), "composer holds the claim: {files}");
+
+    // ...and the worker's conflicting claim was rejected (it filed the marker
+    // task from the `||` fallback branch).
+    wait_for(
+        &project,
+        &["task", "list"],
+        Duration::from_secs(20),
+        |out| out.contains("claim-was-rejected"),
+    );
 }
 
 #[test]

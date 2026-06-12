@@ -37,6 +37,12 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_messages_inbox
             ON messages (to_who, delivered, created_at);
 
+        CREATE TABLE IF NOT EXISTS file_claims (
+            path        TEXT PRIMARY KEY,
+            agent       TEXT NOT NULL,
+            claimed_at  INTEGER NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS runs (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             agent       TEXT NOT NULL,

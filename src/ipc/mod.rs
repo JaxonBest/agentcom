@@ -67,6 +67,14 @@ pub enum Request {
     AgentAdd {
         config: crate::config::AgentConfig,
     },
+    FilesClaim {
+        paths: Vec<String>,
+    },
+    FilesRelease {
+        paths: Vec<String>,
+        all: bool,
+    },
+    FilesList,
     Tail {
         agent: String,
         lines: usize,
@@ -105,6 +113,9 @@ pub enum Response {
         open_tasks: u64,
         pending_msgs: u64,
         total_cost_usd: f64,
+    },
+    Files {
+        claims: Vec<crate::store::files::FileClaim>,
     },
     /// Streamed repeatedly in `Tail { follow: true }` mode.
     TailLine {

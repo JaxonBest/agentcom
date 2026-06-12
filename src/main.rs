@@ -42,7 +42,20 @@ async fn run_up(
     let cwd = std::env::current_dir()?;
     let project_root = paths::find_project_root(&cwd)
         .context("no agentcom.toml found — run `agentcom init` first")?;
-    let cfg = config::HubConfig::load(&project_root)?;
+    let mut cfg = config::HubConfig::load(&project_root)?;
+
+    // Every fleet gets a composer: the coordinator the human talks to in
+    // the chat pane. Define your own [[agent]] name = "composer" to
+    // customize it; it sits outside the max_agents worker cap.
+    if cfg.agent(config::COMPOSER_NAME).is_none() {
+        cfg.agents.insert(
+            0,
+            config::composer_default(cfg.default_model.as_deref()),
+        );
+        // max_agents is the WORKER cap — the injected composer gets its own
+        // slot on top of it.
+        cfg.max_agents = (cfg.max_agents + 1).max(cfg.agents.len());
+    }
 
     init_logging(&project_root, headless)?;
 

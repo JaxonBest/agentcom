@@ -57,6 +57,10 @@ pub enum Command {
     /// Manage the agent fleet
     #[command(subcommand)]
     Agent(AgentCmd),
+    /// Advisory file claims — claim files before editing so agents don't
+    /// overwrite each other's work
+    #[command(subcommand)]
+    Files(FilesCmd),
     /// Show an agent's recent output
     Tail {
         agent: String,
@@ -111,6 +115,23 @@ pub enum TaskCmd {
     },
     /// Reopen a blocked (or stuck-claimed) task
     Reopen { id: i64 },
+}
+
+#[derive(Subcommand)]
+pub enum FilesCmd {
+    /// Claim paths before editing them (rejected if another agent holds any)
+    Claim {
+        #[arg(required = true)]
+        paths: Vec<String>,
+    },
+    /// Release your claims (specific paths, or --all)
+    Release {
+        paths: Vec<String>,
+        #[arg(long)]
+        all: bool,
+    },
+    /// Show who holds what
+    List,
 }
 
 #[derive(Subcommand)]
@@ -243,6 +264,27 @@ pub async fn run_client(command: Command) -> Result<()> {
             }
             Ok(())
         }
+        Command::Files(files_cmd) => {
+            let req = match files_cmd {
+                FilesCmd::Claim { paths } => Request::FilesClaim { paths },
+                FilesCmd::Release { paths, all } => Request::FilesRelease { paths, all },
+                FilesCmd::List => Request::FilesList,
+            };
+            let resp = client.request(&req).await?;
+            match resp {
+                Response::Files { claims } if claims.is_empty() => {
+                    println!("no file claims");
+                    Ok(())
+                }
+                Response::Files { claims } => {
+                    for c in claims {
+                        println!("{:<14} {}", c.agent, c.path);
+                    }
+                    Ok(())
+                }
+                other => print_simple(other),
+            }
+        }
         Command::Stop { agent } => {
             let resp = client.request(&Request::Stop { agent }).await?;
             print_simple(resp)
@@ -295,22 +337,31 @@ pub async fn run_agent_cmd(cmd: AgentCmd) -> Result<()> {
                 max_budget_usd: budget,
                 auto_restart: true,
             };
-            let path = crate::config::append_agent(&project_root, &config)?;
-            println!("added {name:?} to {}", path.display());
+            // Validate the combined config first; only persist after the
+            // hub (if running) has also accepted — a cap rejection must not
+            // leave a half-added agent in the file.
+            let (path, text) = crate::config::render_with_agent(&project_root, &config)?;
 
-            if no_spawn {
-                return Ok(());
-            }
-            match Client::connect().await {
-                Ok(mut client) => {
-                    let resp = client.request(&Request::AgentAdd { config }).await?;
-                    print_simple(resp)
+            if !no_spawn {
+                if let Ok(mut client) = Client::connect().await {
+                    match client.request(&Request::AgentAdd { config }).await? {
+                        Response::Ok { message } => {
+                            std::fs::write(&path, text)?;
+                            println!("added {name:?} to {}", path.display());
+                            println!("{}", message.unwrap_or_else(|| "live".into()));
+                            return Ok(());
+                        }
+                        Response::Err { message } => bail!("hub rejected {name:?}: {message}"),
+                        other => bail!("unexpected response: {other:?}"),
+                    }
                 }
-                Err(_) => {
-                    println!("hub not running — {name} will start with the next `agentcom up`");
-                    Ok(())
-                }
             }
+            std::fs::write(&path, text)?;
+            println!("added {name:?} to {}", path.display());
+            if !no_spawn {
+                println!("hub not running — {name} will start with the next `agentcom up`");
+            }
+            Ok(())
         }
         AgentCmd::List => {
             let cfg = crate::config::HubConfig::load(&project_root)?;

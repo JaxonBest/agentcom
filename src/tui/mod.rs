@@ -23,6 +23,7 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Tab {
+    Chat,
     Output,
     Tasks,
     Messages,
@@ -30,13 +31,20 @@ pub enum Tab {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 4] = [Tab::Output, Tab::Tasks, Tab::Messages, Tab::HubLog];
+    pub const ALL: [Tab; 5] = [
+        Tab::Chat,
+        Tab::Output,
+        Tab::Tasks,
+        Tab::Messages,
+        Tab::HubLog,
+    ];
     pub fn title(self) -> &'static str {
         match self {
-            Tab::Output => "1 Output",
-            Tab::Tasks => "2 Tasks",
-            Tab::Messages => "3 Messages",
-            Tab::HubLog => "4 Hub Log",
+            Tab::Chat => "1 Chat",
+            Tab::Output => "2 Output",
+            Tab::Tasks => "3 Tasks",
+            Tab::Messages => "4 Messages",
+            Tab::HubLog => "5 Hub Log",
         }
     }
 }
@@ -67,6 +75,10 @@ pub struct App {
     pub total_cost: f64,
     /// `None` = follow live output; `Some(n)` = scrolled up by n lines.
     pub scroll_back: Option<usize>,
+    /// Always-on input line in the Chat tab (talks to the composer).
+    pub chat_input: String,
+    /// Animation frame counter, bumped on every tick (drives spinners).
+    pub spin: usize,
     pub modal: Option<InputModal>,
     pub confirm_quit: bool,
     pub should_quit: bool,
@@ -161,7 +173,7 @@ async fn run_loop(
         project,
         agent_names,
         selected: 0,
-        tab: Tab::Output,
+        tab: Tab::Chat,
         agents: Vec::new(),
         tasks: Vec::new(),
         messages: Vec::new(),
@@ -169,6 +181,8 @@ async fn run_loop(
         open_tasks: 0,
         total_cost: 0.0,
         scroll_back: None,
+        chat_input: String::new(),
+        spin: 0,
         modal: None,
         confirm_quit: false,
         should_quit: false,
@@ -228,6 +242,7 @@ async fn run_loop(
                 }
             }
             _ = tick.tick() => {
+                app.spin = app.spin.wrapping_add(1);
                 refresh_status(&mut app, &ipc_tx).await;
                 dirty = true;
             }

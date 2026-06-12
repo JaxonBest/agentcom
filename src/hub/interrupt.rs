@@ -24,6 +24,16 @@ impl Hub {
         body: &str,
         urgent: bool,
     ) -> Response {
+        // Agents report to the human through the same message system; those
+        // messages land in the TUI chat / `agentcom inbox`.
+        if to == "human" {
+            if let Err(e) = self.store.msg_send(from, &["human".to_string()], body, urgent) {
+                return Response::err(e.to_string());
+            }
+            let _ = self.ui_tx.send(super::events::UiEvent::MessagesChanged);
+            return Response::ok_msg("delivered to the human's inbox");
+        }
+
         let recipients: Vec<String> = if to == "all" {
             self.agents
                 .keys()
@@ -34,7 +44,7 @@ impl Hub {
             vec![to.to_string()]
         } else {
             return Response::err(format!(
-                "unknown recipient {to:?} (agents: {}, or \"all\")",
+                "unknown recipient {to:?} (agents: {}, \"all\", or \"human\")",
                 self.agent_names().join(", ")
             ));
         };

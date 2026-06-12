@@ -8,6 +8,7 @@ A communication hub for fleets of [Claude Code](https://claude.com/claude-code) 
 
 - **The hub drives the loop.** When an agent's turn ends, the hub composes its next prompt from pending inbox messages and the task board, and feeds it. Idle agents cost nothing; the hub wakes them when messages or tasks arrive. No polling, no stop-hook tricks.
 - **Agents coordinate themselves.** Each agent's system prompt teaches it the `agentcom` CLI: claim tasks before working, file follow-up tasks it discovers, message teammates when it finishes something, and *interrupt* a teammate only to stop wasted or conflicting work.
+- **The fleet scales itself — within caps.** When the board has more independent work than the team can absorb, agents may recruit teammates with `agentcom agent add` (they're taught to decompose into tasks first). The `max_agents` cap and the USD budgets keep recruitment bounded, and every recruitment is logged with who hired whom.
 - **Interrupts are real.** `agentcom interrupt <agent> "<msg>"` sends a `control_request` over the agent's stdin that aborts its in-progress turn; the urgent message is delivered the moment the aborted turn ends. If the child doesn't abort within `interrupt_timeout_secs`, the hub force-kills the process tree and restarts the session with `--resume`, delivering the message as the first prompt.
 - **Everything survives restarts.** Tasks, messages, and run history live in SQLite under `%LOCALAPPDATA%\agentcom\<project-id>\` (deliberately outside OneDrive-synced folders).
 
