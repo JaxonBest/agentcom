@@ -1003,6 +1003,7 @@ impl Hub {
                     self.clear_declined(id);
                     let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
                     self.wake_idle();
+                    self.audit.write("task_reopen", identity, serde_json::json!({"task_id": t.id}));
                     Response::ok_msg(format!("task #{} reopened", t.id))
                 }
                 Err(e) => Response::err(e.to_string()),
@@ -1010,6 +1011,7 @@ impl Hub {
             Request::TaskAssign { id, agent, .. } => match self.store.task_assign(id, &agent) {
                 Ok(t) => {
                     self.log(format!("{identity} assigned task #{} to {agent}", t.id));
+                    self.audit.write("task_assign", identity, serde_json::json!({"task_id": t.id, "assignee": agent}));
                     let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
                     let msg = format!(
                         "[INBOX] task #{} assigned to you by {identity}: {}\n{}",
