@@ -292,6 +292,14 @@ impl Hub {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+        // Catch SIGTERM so we log why the hub is dying and do a graceful
+        // shutdown instead of being killed silently. The `if !sigterm_fired`
+        // guard disables the branch after the first delivery so we don't
+        // re-poll a completed future on subsequent iterations.
+        let sigterm = hub_sigterm_signal();
+        tokio::pin!(sigterm);
+        let mut sigterm_fired = false;
+
         loop {
             tokio::select! {
                 Some(ev) = self.bus_rx.recv() => self.handle_bus_event(ev),
@@ -299,6 +307,11 @@ impl Hub {
                 _ = tick.tick() => self.handle_tick(),
                 _ = tokio::signal::ctrl_c() => {
                     self.log("ctrl-c received — shutting down".into());
+                    self.begin_shutdown();
+                }
+                _ = &mut sigterm, if !sigterm_fired => {
+                    sigterm_fired = true;
+                    self.log("SIGTERM received — shutting down".into());
                     self.begin_shutdown();
                 }
             }
@@ -788,6 +801,15 @@ impl Hub {
             Request::Stop { agent } => match agent {
                 Some(name) => self.stop_agent(&name),
                 None => {
+                    if identity != "human" {
+                        self.log(format!(
+                            "WARN: {identity} attempted to stop the hub — rejected (only the human operator can stop the hub)"
+                        ));
+                        return Response::err(
+                            "only the human operator can stop the hub; \
+                             use `agentcom stop <agent-name>` to stop a specific agent",
+                        );
+                    }
                     self.begin_shutdown();
                     Response::ok_msg("hub shutting down")
                 }
@@ -954,4 +976,18 @@ impl Hub {
             }
         }
     }
+}
+
+/// Resolves when SIGTERM is delivered to the process (Unix), or never (other
+/// platforms). Used by the hub run loop to catch external kills and log them.
+async fn hub_sigterm_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        if let Ok(mut s) = signal(SignalKind::terminate()) {
+            s.recv().await;
+            return;
+        }
+    }
+    std::future::pending::<()>().await
 }

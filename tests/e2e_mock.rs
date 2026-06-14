@@ -31,9 +31,15 @@ struct HubGuard {
 impl Drop for HubGuard {
     fn drop(&mut self) {
         // Best-effort graceful stop, then hard kill.
+        // Strip the hub's IPC env vars so discover() uses hub.json for this
+        // test project instead of routing to the outer hub (if tests run inside
+        // an agentcom agent that has AGENTCOM_PORT set in its environment).
         let _ = Command::new(agentcom_bin())
             .args(["stop"])
             .current_dir(&self.project)
+            .env_remove("AGENTCOM_PORT")
+            .env_remove("AGENTCOM_TOKEN")
+            .env_remove("AGENTCOM_AGENT")
             .output();
         let deadline = Instant::now() + Duration::from_secs(5);
         while Instant::now() < deadline {
