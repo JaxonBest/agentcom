@@ -870,6 +870,13 @@ Always set `max_total_budget_usd` in the config AND pass `--budget` to `agentcom
 | `interrupt_timeout_secs` | integer | `15` | Seconds to wait for an agent to abort before force-killing it |
 | `max_agents` | integer | `8` | Fleet size cap; prevents recruitment spirals |
 | `partial_messages` | bool | `true` | Enable live streaming of partial agent output to the TUI |
+| `auto_commit` | bool | `true` | Auto-commit any changed files when an agent releases its file claims. Author is set to the agent's name |
+| `auto_commit_author_name` | string | *(agent name)* | Git author name for auto-commits (overridable per agent) |
+| `auto_commit_author_email` | string | `<agent>@agentcom.local` | Git author email for auto-commits |
+| `auto_commit_skip_hooks` | bool | `false` | Skip pre-commit hooks on auto-commits (`--no-verify`). Off by default — hooks enforce project policy |
+| `commit_exclude_patterns` | string[] | `["agentcom.toml", ".agentcom/**"]` | Glob patterns for files to skip during auto-commit. Defaults protect hub state files |
+| `webhook_url` | string | *(none)* | HTTP/HTTPS endpoint to POST hub events to (task done, agent crash, hub start/stop). Leave unset to disable |
+| `webhook_secret` | string | *(none)* | Optional HMAC-SHA256 secret for webhook payload signing. Delivered as `X-Agentcom-Signature: sha256=<hex>` |
 
 ### `[[agent]]` fields
 
@@ -887,6 +894,11 @@ Each agent is defined by an `[[agent]]` table. You can have as many as `max_agen
 | `max_turns_per_prompt` | integer | *(none)* | Max autonomous turns per fed prompt. Caps a single work stretch |
 | `max_budget_usd` | float | *(none)* | Cumulative USD spend cap for this agent across the hub's lifetime |
 | `auto_restart` | bool | `true` | Automatically restart the agent if it crashes |
+| `auto_commit` | bool | *(inherits global)* | Per-agent override for auto-commit. Set to `false` to opt this agent out even when the global setting is `true` |
+| `auto_commit_author_name` | string | *(agent name)* | Git author name for this agent's auto-commits |
+| `auto_commit_author_email` | string | `<agent>@agentcom.local` | Git author email for this agent's auto-commits |
+| `max_rpm` | integer | *(none)* | Max API requests per minute. Hub skips feeding a new prompt if the agent exceeds this rate in the last 60 seconds |
+| `env` | table | `{}` | Extra environment variables injected into this agent's process. Useful for per-agent API keys or tool flags. Example: `env = { ANTHROPIC_API_KEY = "sk-...", DEBUG = "1" }` |
 
 ---
 
@@ -965,6 +977,7 @@ $env:AGENTCOM_DEEPSEEK_OUTPUT_PER_MTOK = "1.10"
 |---|---|
 | `agentcom init [--force] [--template solo\|team\|mixed]` | Write a starter `agentcom.toml` in the current directory |
 | `agentcom up` | Start the hub, spawn agents, open TUI |
+| `agentcom up --restart` | Stop a running hub first, then start a fresh one — useful after config changes |
 | `agentcom up --headless` | Start hub without TUI |
 | `agentcom up --agents builder,reviewer` | Start only the named agents |
 | `agentcom up --task "..."` | Seed a task before agents start (repeatable) |
@@ -982,6 +995,7 @@ These commands read local files directly and work without a running hub.
 | `agentcom budget` | Per-agent spend and turn report from the run history database |
 | `agentcom completions <bash\|zsh\|fish\|elvish>` | Print shell completion script to stdout |
 | `agentcom config show` | Print the loaded `agentcom.toml` as pretty JSON — useful for scripting and debugging |
+| `agentcom config set <key> <value>` | Update a config value in-place without editing TOML manually. Supports dotted paths: `agent.builder.model`, `auto_commit`, etc. |
 
 ### Real-time control
 
@@ -1011,14 +1025,19 @@ These commands read local files directly and work without a running hub.
 | `agentcom task remove <id>` | Permanently delete a task (not allowed if claimed) |
 | `agentcom task prune [--before 7d]` | Delete all done/blocked tasks older than the given duration |
 | `agentcom task export [--format md\|json]` | Dump the task board offline — Markdown checklist (default) or JSON array for scripting |
+| `agentcom task stats [--json]` | Velocity metrics: avg completion time, throughput, blocked rate, top contributors |
+| `agentcom task assign <id> <agent>` | Route a task directly to a specific agent; delivers a message so they pick it up |
 
 ### Agent fleet
 
 | Command | Description |
 |---|---|
 | `agentcom agent add <name> --role "<role>" [--provider claude\|codex\|deepseek] [--model <m>] [--budget <usd>]` | Add an agent to config and spawn it live |
+| `agentcom agent add <name> --role "<role>" --env KEY=VALUE` | Add agent with extra env vars (repeatable flag) |
+| `agentcom agent add <name> --role "<role>" --no-auto-restart` | Disable automatic restart on crash |
 | `agentcom agent add <name> --role "<role>" --no-spawn` | Add to config only; starts on next `agentcom up` |
 | `agentcom agent list` | List configured agents with live state |
+| `agentcom agent remove <name>` | Remove agent from config (and stop it if hub is running) |
 
 ### File claims
 
@@ -1111,6 +1130,46 @@ agentcom up --free "refactor the payment module" --for 1h --budget 8
 The composer is instructed to prefer high-value work and to report when nothing worth doing remains, preventing busy-work loops.
 
 > **Tip:** Pair free mode with **[Recipe 4 — Overnight audit fleet](#recipe-4--overnight-audit-fleet-4-agents-all-read-only)** for a zero-risk, finding-only run. Wake up to a triaged backlog with no surprise edits.
+
+---
+
+## Auto-commit
+
+When an agent runs `agentcom files release --all`, the hub automatically stages and commits any files they modified, using the agent's name as the git author:
+
+```
+builder: task #12 implement rate limiting — 3 files changed
+Author: builder <builder@agentcom.local>
+```
+
+**Configuration:**
+
+```toml
+# agentcom.toml
+
+# Enable/disable globally (default: true)
+auto_commit = true
+
+# Skip pre-commit hooks (default: false — hooks should run)
+auto_commit_skip_hooks = false
+
+# Files to never auto-commit (glob patterns)
+commit_exclude_patterns = ["agentcom.toml", ".agentcom/**", "*.lock"]
+
+# Override commit author for all agents
+auto_commit_author_name = "agentcom bot"
+auto_commit_author_email = "bot@example.com"
+
+[[agent]]
+name = "builder"
+role = "..."
+# Per-agent override — opt this agent out
+auto_commit = false
+# Or override just the author
+auto_commit_author_email = "builder-bot@example.com"
+```
+
+Commit messages include the agent's currently claimed task title when available. New and untracked files are staged automatically alongside modified files.
 
 ---
 
