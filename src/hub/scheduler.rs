@@ -19,6 +19,45 @@ impl Hub {
             return;
         }
 
+        // Global budget ceiling: pause the entire fleet when the total spend
+        // across all agents hits max_total_budget_usd.
+        if let Some(ceiling) = self.cfg.max_total_budget_usd {
+            let total_spent: f64 = self.agents.values().map(|r| r.spent_usd).sum();
+            if total_spent >= ceiling {
+                let rt = self.agents.get_mut(name).expect("agent exists");
+                if rt.state == AgentState::Idle {
+                    rt.state = AgentState::Paused;
+                    rt.state_detail = Some(format!(
+                        "global budget ceiling ${ceiling:.2} reached (total: ${total_spent:.2})"
+                    ));
+                    self.emit_state(name);
+                }
+                // Notify on the first agent we catch hitting the ceiling each run.
+                if !self
+                    .agents
+                    .values()
+                    .any(|r| r.state == AgentState::Working)
+                {
+                    let msg = format!(
+                        "GLOBAL BUDGET CEILING: total fleet spend ${total_spent:.2} has reached \
+                         the configured limit of ${ceiling:.2}. All idle agents are paused. \
+                         Adjust max_total_budget_usd in agentcom.toml to continue."
+                    );
+                    let _ = self.store.msg_send(
+                        "hub",
+                        &[
+                            crate::config::COMPOSER_NAME.to_string(),
+                            "human".to_string(),
+                        ],
+                        &msg,
+                        true,
+                    );
+                    self.log(msg);
+                }
+                return;
+            }
+        }
+
         // Per-agent budget gate.
         if let Some(max) = rt.cfg.max_budget_usd {
             if rt.spent_usd >= max {
