@@ -117,6 +117,8 @@ pub struct Task {
     pub claimed_by: Option<String>,
     pub blocked_reason: Option<String>,
     pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
     pub created_by: String,
     pub created_at: i64,
     pub updated_at: i64,

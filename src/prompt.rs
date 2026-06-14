@@ -193,6 +193,7 @@ mod tests {
             claimed_by: None,
             blocked_reason: None,
             note: None,
+            tags: vec![],
             created_by: "human".into(),
             created_at: 0,
             updated_at: 0,

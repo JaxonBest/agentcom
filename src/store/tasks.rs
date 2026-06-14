@@ -5,7 +5,16 @@ use super::{now_ts, Store, Task, TaskStatus};
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection, Row};
 
+fn parse_tags(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
 fn task_from_row(row: &Row) -> rusqlite::Result<Task> {
+    let tags_raw: String = row.get("tags").unwrap_or_default();
     Ok(Task {
         id: row.get("id")?,
         title: row.get("title")?,
@@ -15,6 +24,7 @@ fn task_from_row(row: &Row) -> rusqlite::Result<Task> {
         claimed_by: row.get("claimed_by")?,
         blocked_reason: row.get("blocked_reason")?,
         note: row.get("note")?,
+        tags: parse_tags(&tags_raw),
         created_by: row.get("created_by")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
@@ -475,6 +485,60 @@ impl Store {
             |r| r.get(0),
         )?)
     }
+
+    /// Add a tag label to a task. No-ops if the label is already present.
+    pub fn task_tag(&self, id: i64, label: &str) -> Result<()> {
+        let label = label.trim().to_lowercase();
+        anyhow::ensure!(!label.is_empty(), "tag label cannot be empty");
+        anyhow::ensure!(
+            !label.contains(','),
+            "tag label cannot contain commas"
+        );
+        let conn = self.conn.lock().unwrap();
+        let raw: Option<String> = conn
+            .query_row("SELECT tags FROM tasks WHERE id = ?1", [id], |r| r.get(0))
+            .map_err(|_| anyhow::anyhow!("task #{id} does not exist"))?;
+        let raw = raw.unwrap_or_default();
+        let mut tags = parse_tags(&raw);
+        if !tags.contains(&label) {
+            tags.push(label);
+            let new_raw = tags.join(",");
+            conn.execute(
+                "UPDATE tasks SET tags = ?1, updated_at = ?2 WHERE id = ?3",
+                params![new_raw, now_ts(), id],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Remove a tag label from a task. No-ops if the label is not present.
+    pub fn task_untag(&self, id: i64, label: &str) -> Result<()> {
+        let label = label.trim().to_lowercase();
+        let conn = self.conn.lock().unwrap();
+        let raw: Option<String> = conn
+            .query_row("SELECT tags FROM tasks WHERE id = ?1", [id], |r| r.get(0))
+            .map_err(|_| anyhow::anyhow!("task #{id} does not exist"))?;
+        let raw = raw.unwrap_or_default();
+        let tags: Vec<String> = parse_tags(&raw)
+            .into_iter()
+            .filter(|t| t != &label)
+            .collect();
+        let new_raw = tags.join(",");
+        conn.execute(
+            "UPDATE tasks SET tags = ?1, updated_at = ?2 WHERE id = ?3",
+            params![new_raw, now_ts(), id],
+        )?;
+        Ok(())
+    }
+
+    /// Return the tag list for a task.
+    pub fn task_tags(&self, id: i64) -> Result<Vec<String>> {
+        let conn = self.conn.lock().unwrap();
+        let raw: Option<String> = conn
+            .query_row("SELECT tags FROM tasks WHERE id = ?1", [id], |r| r.get(0))
+            .map_err(|_| anyhow::anyhow!("task #{id} does not exist"))?;
+        Ok(parse_tags(&raw.unwrap_or_default()))
+    }
 }
 
 #[cfg(test)]
@@ -655,6 +719,46 @@ mod tests {
     fn task_clone_nonexistent_errors() {
         let s = Store::open_in_memory().unwrap();
         assert!(s.task_clone(9999, "builder").is_err());
+    }
+
+    #[test]
+    fn task_tag_and_untag() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.task_add("t", "", 2, &[], "human").unwrap();
+
+        s.task_tag(id, "bug").unwrap();
+        s.task_tag(id, "  Bug  ").unwrap(); // duplicate (normalised) — should be idempotent
+        s.task_tag(id, "urgent").unwrap();
+        let tags = s.task_tags(id).unwrap();
+        assert_eq!(tags, vec!["bug", "urgent"]);
+
+        s.task_untag(id, "bug").unwrap();
+        let tags = s.task_tags(id).unwrap();
+        assert_eq!(tags, vec!["urgent"]);
+
+        // Untagging a non-existent label is a no-op.
+        s.task_untag(id, "missing").unwrap();
+        let tags = s.task_tags(id).unwrap();
+        assert_eq!(tags, vec!["urgent"]);
+
+        // Tags should be visible on task_get.
+        let t = s.task_get(id).unwrap().unwrap();
+        assert_eq!(t.tags, vec!["urgent"]);
+    }
+
+    #[test]
+    fn task_tag_empty_label_rejected() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.task_add("t", "", 2, &[], "human").unwrap();
+        assert!(s.task_tag(id, "").is_err());
+        assert!(s.task_tag(id, "  ").is_err());
+    }
+
+    #[test]
+    fn task_tag_comma_rejected() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.task_add("t", "", 2, &[], "human").unwrap();
+        assert!(s.task_tag(id, "foo,bar").is_err());
     }
 
     #[test]
