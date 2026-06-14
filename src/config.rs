@@ -242,109 +242,7 @@ pub enum ConfigTemplate {
     Mixed,
 }
 
-/// The canonical team template (builder + reviewer, DeepSeek example commented
-/// out).  Used by tests and as the source for `render_example_config` when the
-/// project name is not yet known.
-#[allow(dead_code)]
-pub const EXAMPLE_CONFIG: &str = r#"# ============================================================
-# agentcom.toml — my-project
-# ============================================================
-#
-# GETTING STARTED
-# ─────────────────────────────────────────────────────────────
-# 1. Edit the [[agent]] entries below to describe your fleet.
-# 2. Run `agentcom up` to launch the hub and agent fleet.
-# 3. Chat with the auto-injected "composer" coordinator in the
-#    TUI pane — it turns your goals into board tasks and
-#    directs workers without ever editing code itself.
-# 4. Seed the board early: `agentcom task add "Fix login bug"`
-# 5. Monitor: `agentcom status`  |  `agentcom tail <agent>`
-# ─────────────────────────────────────────────────────────────
 
-# ── GLOBAL SETTINGS ─────────────────────────────────────────
-
-# (required) Human-readable label shown in the TUI and status.
-project_name = "my-project"
-
-# Default runtime for agents that don't set provider themselves.
-# Values: "claude" | "codex" | "deepseek"    Default: "claude"
-# default_provider = "claude"
-
-# Default model passed to agents that don't set model themselves.
-# Omit to use each provider's own default (recommended).
-# Values: any model string                   Default: (provider default)
-# default_model = "claude-sonnet-4-5"
-
-# Hub-wide cumulative spend cap in USD. Hub shuts down once reached.
-# Values: any positive float                 Default: (no cap)
-# max_total_budget_usd = 20.0
-
-# Seconds to wait for an interrupted agent to abort gracefully
-# before the hub escalates to a force-kill.
-# Values: any positive integer               Default: 15
-# interrupt_timeout_secs = 15
-
-# Hard cap on fleet size. Agents can recruit teammates with
-# `agentcom agent add`; this cap (plus budgets) bounds that.
-# Values: any positive integer               Default: 8
-# max_agents = 8
-
-# ── AGENT FLEET ─────────────────────────────────────────────
-#
-# One [[agent]] block per worker. A "composer" coordinator is
-# injected automatically (unless you define your own below).
-# The composer talks to the human, files board tasks, and
-# directs workers — it never edits code itself.
-#
-# Each agent gets agentcom CLI commands (task/send/files/inbox)
-# automatically. Tools not in allowed_tools are auto-denied
-# when agents run headless — keep the list explicit.
-#
-
-[[agent]]
-name = "builder"
-role = "Implements features and fixes. Owns src/. Coordinates with reviewer before large refactors."
-# Tools the agent may call — everything else is auto-denied.
-# Values: list of tool names               Default: (all tools)
-allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
-# Working directory (relative to this file's location).
-# Values: any path                         Default: (project root)
-# cwd = "."
-# Agent runtime (overrides default_provider).
-# Values: "claude" | "codex" | "deepseek"  Default: (default_provider)
-# provider = "claude"
-# Model to use (overrides default_model).
-# Values: any model string                 Default: (default_model)
-# model = "claude-sonnet-4-5"
-# Tool permission policy.
-# Values: "acceptEdits" | "plan" | "default" | "bypassPermissions"
-#                                          Default: "acceptEdits"
-# permission_mode = "acceptEdits"
-# Max turns per fed prompt (caps one autonomous stretch).
-# Values: any positive integer             Default: (no cap)
-# max_turns_per_prompt = 50
-# Per-agent cumulative USD spend cap.
-# Values: any positive float               Default: (no cap)
-# max_budget_usd = 10.0
-# Restart the agent automatically if it exits.
-# Values: true | false                     Default: true
-# auto_restart = true
-
-[[agent]]
-name = "reviewer"
-role = "Reviews changes made by other agents, runs tests, and files follow-up tasks for problems found."
-allowed_tools = ["Bash", "Read", "Glob", "Grep"]
-
-# ── ADD A DEEPSEEK WORKER (uncomment to activate) ───────────
-#
-# [[agent]]
-# name = "junior-developer"
-# role = "Given clear instructions to do large amounts of code that require little reasoning."
-# provider = "deepseek"
-# model = "deepseek-coder"
-# allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
-# max_budget_usd = 5.0
-"#;
 
 /// Generate an `agentcom.toml` for the given project name and fleet archetype.
 pub fn render_example_config(project_name: &str, template: ConfigTemplate) -> String {
@@ -546,7 +444,8 @@ mod tests {
 
     #[test]
     fn example_config_parses_and_validates() {
-        let cfg: HubConfig = toml::from_str(EXAMPLE_CONFIG).unwrap();
+        let text = render_example_config("test-project", ConfigTemplate::Team);
+        let cfg: HubConfig = toml::from_str(&text).unwrap();
         cfg.validate().unwrap();
         assert_eq!(cfg.agents.len(), 2);
         assert_eq!(cfg.agents[0].name, "builder");

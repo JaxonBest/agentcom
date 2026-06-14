@@ -383,8 +383,20 @@ pub async fn kill_tree(pid: u32) {
     }
     #[cfg(not(windows))]
     {
+        // Kill the child process directly first (covers the always-present root).
         let _ = tokio::process::Command::new("kill")
-            .args(["-KILL", &format!("-{pid}")])
+            .args(["-9", &pid.to_string()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+        // Also try killing its process group (works when the child called
+        // setpgid/setsid so its PGID == its own PID, which claude may do via
+        // shell job-control). This is a no-op if no group with that PGID exists.
+        let _ = tokio::process::Command::new("kill")
+            .args(["-9", &format!("-{pid}")])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()
             .await;
     }

@@ -338,10 +338,11 @@ fn init_logging(project_root: &std::path::Path, headless: bool) -> Result<()> {
     use tracing_subscriber::Layer;
 
     let log_dir = paths::log_dir(project_root)?;
+    // Use synchronous (blocking) writes so log entries are never lost in a
+    // buffer when the process exits or panics. Non-blocking with a leaked guard
+    // meant the background writer thread was killed before it could flush,
+    // silently discarding the last N entries and hiding crash causes.
     let file_appender = tracing_appender::rolling::daily(log_dir, "hub.log");
-    // Leak the guard: logging lives for the whole process.
-    let (writer, guard) = tracing_appender::non_blocking(file_appender);
-    Box::leak(Box::new(guard));
 
     let filter = || {
         tracing_subscriber::EnvFilter::try_from_default_env()
@@ -349,7 +350,7 @@ fn init_logging(project_root: &std::path::Path, headless: bool) -> Result<()> {
     };
 
     let file_layer = tracing_subscriber::fmt::layer()
-        .with_writer(writer)
+        .with_writer(file_appender)
         .with_ansi(false)
         .with_filter(filter());
 
