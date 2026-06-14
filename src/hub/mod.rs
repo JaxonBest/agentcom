@@ -846,8 +846,18 @@ impl Hub {
                 }
             },
             Request::FilesRelease { paths, all } => {
+                let claimed_paths = self
+                    .store
+                    .files_list_for_agent(identity)
+                    .unwrap_or_default();
                 match self.store.files_release(identity, &paths, all) {
-                    Ok(n) => Response::ok_msg(format!("released {n} file claim(s)")),
+                    Ok(n) => {
+                        // Auto-commit any changed files if enabled
+                        if self.cfg.auto_commit && !claimed_paths.is_empty() {
+                            self.auto_commit_changes(identity, &claimed_paths);
+                        }
+                        Response::ok_msg(format!("released {n} file claim(s)"))
+                    }
                     Err(e) => Response::err(e.to_string()),
                 }
             }
@@ -1047,6 +1057,119 @@ impl Hub {
         for name in names {
             if self.agents[&name].state == AgentState::Idle && self.agents[&name].is_running() {
                 self.stop_agent(&name);
+            }
+        }
+    }
+
+    /// After an agent releases file claims, auto-commit any modified files
+    /// to git using the agent's name as author.
+    fn auto_commit_changes(&self, agent: &str, claimed: &[crate::store::files::FileClaim]) {
+        use std::process::Command;
+
+        // Collect the claimed paths (normalized, in repo-relative form)
+        let paths: Vec<&str> = claimed.iter().map(|c| c.path.as_str()).collect();
+
+        // Ask git which of these paths have been modified (staged or unstaged)
+        let modified = match Command::new("git")
+            .args(["diff", "--name-only", "--cached", "--"])
+            .args(&paths)
+            .current_dir(&self.project_root)
+            .output()
+        {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+            _ => return, // not a git repo or git not available — skip
+        };
+        let unstaged = match Command::new("git")
+            .args(["diff", "--name-only", "--"])
+            .args(&paths)
+            .current_dir(&self.project_root)
+            .output()
+        {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+            _ => return,
+        };
+
+        let all_modified: Vec<&str> = modified
+            .lines()
+            .chain(unstaged.lines())
+            .filter(|l| !l.is_empty())
+            .collect();
+        if all_modified.is_empty() {
+            return;
+        }
+
+        // Deduplicate while preserving order
+        let mut seen = std::collections::HashSet::new();
+        let unique: Vec<&&str> = all_modified
+            .iter()
+            .filter(|p| seen.insert(**p))
+            .collect();
+
+        // Stage the files
+        if Command::new("git")
+            .arg("add")
+            .args(&unique)
+            .current_dir(&self.project_root)
+            .output()
+            .map_or(true, |o| !o.status.success())
+        {
+            self.log(format!(
+                "auto-commit: failed to stage files for {agent}"
+            ));
+            return;
+        }
+
+        // Build the author string
+        let author_name = self
+            .cfg
+            .auto_commit_author_name
+            .as_deref()
+            .unwrap_or(agent);
+        let default_email = format!("{agent}@agentcom.local");
+        let author_email = self
+            .cfg
+            .auto_commit_author_email
+            .as_deref()
+            .unwrap_or(&default_email);
+        let author = format!("{author_name} <{author_email}>");
+
+        // Build a commit message
+        let file_count = unique.len();
+        let summary = if file_count == 1 {
+            format!("{agent}: {file_count} file changed")
+        } else {
+            format!("{agent}: {file_count} files changed")
+        };
+
+        match Command::new("git")
+            .args([
+                "commit",
+                "--author",
+                &author,
+                "-m",
+                &summary,
+                "--no-verify",
+            ])
+            .current_dir(&self.project_root)
+            .output()
+        {
+            Ok(o) if o.status.success() => {
+                let hash = String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .find_map(|l| l.strip_prefix('['))
+                    .and_then(|s| s.split(' ').nth(1))
+                    .unwrap_or("unknown")
+                    .to_string();
+                self.log(format!(
+                    "auto-commit [{hash}]: {summary} (author: {author})"
+                ));
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                self.log(format!("auto-commit: git commit failed for {agent}: {stderr}"));
+            }
+            Err(e) => {
+                self.log(format!("auto-commit: failed to run git for {agent}: {e}"));
             }
         }
     }

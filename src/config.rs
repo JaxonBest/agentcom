@@ -28,6 +28,17 @@ pub struct HubConfig {
     /// `agentcom agent add`, and this is what stops a recruitment spiral.
     #[serde(default = "default_max_agents")]
     pub max_agents: usize,
+    /// When an agent releases file claims, auto-commit any changed files to
+    /// git using the agent's name as the commit author.
+    #[serde(default = "default_true")]
+    pub auto_commit: bool,
+    /// Git author name to use for auto-commits (defaults to the agent's name).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_commit_author_name: Option<String>,
+    /// Git author email to use for auto-commits (defaults to
+    /// "<agent>@agentcom.local").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_commit_author_email: Option<String>,
     #[serde(default, rename = "agent")]
     pub agents: Vec<AgentConfig>,
 }

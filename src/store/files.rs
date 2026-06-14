@@ -101,6 +101,22 @@ impl Store {
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
+
+    /// List all file claims held by a specific agent.
+    pub fn files_list_for_agent(&self, agent: &str) -> Result<Vec<FileClaim>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "SELECT path, agent, claimed_at FROM file_claims WHERE agent = ?1 ORDER BY path",
+        )?;
+        let rows = stmt.query_map([agent], |r| {
+            Ok(FileClaim {
+                path: r.get(0)?,
+                agent: r.get(1)?,
+                claimed_at: r.get(2)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
 }
 
 #[cfg(test)]
