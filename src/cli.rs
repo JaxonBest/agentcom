@@ -274,6 +274,20 @@ pub enum Command {
         /// Snapshot file to restore from
         file: std::path::PathBuf,
     },
+    /// Show per-agent cost breakdown from hub run data (no hub needed)
+    ///
+    /// Examples:
+    ///   agentcom cost
+    ///   agentcom cost --agent builder
+    ///   agentcom cost --json
+    Cost {
+        /// Filter to a single agent
+        #[arg(long)]
+        agent: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Check staged diff for struct field changes and warn which other files may need updating
     ///
     /// Run before committing to catch cascade build breaks caused by partial field additions.
@@ -894,6 +908,7 @@ pub async fn run_client(command: Command) -> Result<()> {
         | Command::Snapshot { .. }
         | Command::Restore { .. }
         | Command::Preflight { .. }
+        | Command::Cost { .. }
         | Command::Version
         | Command::Config(_) => {
             unreachable!("handled in main")

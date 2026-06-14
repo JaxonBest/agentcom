@@ -145,6 +145,7 @@ async fn main() -> Result<()> {
         Command::Audit { event, agent, since, count, json } => run_audit(event, agent, since, count, json),
         Command::Context { file, agent } => run_context_push(file, agent).await,
         Command::Preflight { verbose } => run_preflight(verbose),
+        Command::Cost { agent, json } => run_cost(agent, json),
         other => cli::run_client(other).await,
     }
 }
@@ -1643,6 +1644,86 @@ fn run_summary(json_out: bool) -> Result<()> {
         println!("  commits    {commit_count}");
         println!("  tasks      {tasks_done}/{tasks_total} done");
     }
+    Ok(())
+}
+
+fn run_cost(agent_filter: Option<String>, json_out: bool) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let project_root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+    let db = paths::db_path(&project_root)?;
+    if !db.exists() {
+        anyhow::bail!("no hub data found — run `agentcom up` first");
+    }
+    let conn = rusqlite::Connection::open(&db)?;
+
+    // Query all completed runs
+    let sql = "SELECT agent, cost_usd, turns FROM runs WHERE ended_at IS NOT NULL ORDER BY agent";
+    let mut stmt = conn.prepare(sql)?;
+
+    struct AgentRow { agent: String, cost: f64, turns: i64 }
+    let mut rows: Vec<AgentRow> = Vec::new();
+    {
+        let iter = stmt.query_map([], |row| {
+            Ok(AgentRow {
+                agent: row.get(0)?,
+                cost: row.get::<_, Option<f64>>(1)?.unwrap_or(0.0),
+                turns: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
+            })
+        })?;
+        for r in iter { rows.push(r?); }
+    }
+
+    if let Some(ref f) = agent_filter {
+        rows.retain(|r| &r.agent == f);
+        if rows.is_empty() {
+            anyhow::bail!("no runs found for agent '{f}'");
+        }
+    }
+
+    // Aggregate per agent
+    let mut agents: Vec<String> = rows.iter().map(|r| r.agent.clone()).collect();
+    agents.sort();
+    agents.dedup();
+
+    struct AgentStats { name: String, sessions: usize, total_cost: f64, total_turns: i64 }
+    let mut stats: Vec<AgentStats> = agents.iter().map(|a| {
+        let agent_rows: Vec<&AgentRow> = rows.iter().filter(|r| &r.agent == a).collect();
+        let sessions = agent_rows.len();
+        let total_cost = agent_rows.iter().map(|r| r.cost).sum();
+        let total_turns = agent_rows.iter().map(|r| r.turns).sum();
+        AgentStats { name: a.clone(), sessions, total_cost, total_turns }
+    }).collect();
+
+    // Sort most expensive first
+    stats.sort_by(|a, b| b.total_cost.partial_cmp(&a.total_cost).unwrap_or(std::cmp::Ordering::Equal));
+    let grand_total: f64 = stats.iter().map(|s| s.total_cost).sum();
+    let grand_turns: i64 = stats.iter().map(|s| s.total_turns).sum();
+
+    if json_out {
+        let entries: Vec<String> = stats.iter().map(|s| {
+            let avg = if s.total_turns > 0 { s.total_cost / s.total_turns as f64 } else { 0.0 };
+            format!(
+                r#"{{"agent":"{}", "sessions":{}, "total_cost_usd":{:.6}, "turns":{}, "avg_cost_per_turn":{:.6}}}"#,
+                s.name, s.sessions, s.total_cost, s.total_turns, avg
+            )
+        }).collect();
+        println!(r#"{{"total_cost_usd":{:.6},"agents":[{}]}}"#, grand_total, entries.join(","));
+    } else {
+        println!("cost breakdown (all time)");
+        println!("  {:<20} {:>8}  {:>8}  {:>6}  {:>12}", "agent", "cost", "turns", "sess", "$/turn");
+        println!("  {}", "-".repeat(60));
+        for s in &stats {
+            let avg = if s.total_turns > 0 { s.total_cost / s.total_turns as f64 } else { 0.0 };
+            println!("  {:<20} {:>8.4}  {:>8}  {:>6}  {:>12.6}",
+                s.name, s.total_cost, s.total_turns, s.sessions, avg);
+        }
+        println!("  {}", "-".repeat(60));
+        let grand_avg = if grand_turns > 0 { grand_total / grand_turns as f64 } else { 0.0 };
+        println!("  {:<20} {:>8.4}  {:>8}  {:>6}  {:>12.6}",
+            "TOTAL", grand_total, grand_turns, stats.iter().map(|s| s.sessions).sum::<usize>(), grand_avg);
+    }
+
     Ok(())
 }
 
