@@ -186,6 +186,16 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 app.flash = Some(format!("stopping {name}"));
             }
         }
+        // P — fleet-wide pause (all agents); p already handles single-agent pause/resume.
+        KeyCode::Char('P') => {
+            app.send_request(Request::Pause { agent: "all".to_string() });
+            app.flash = Some("pausing all agents".into());
+        }
+        // R — fleet-wide resume.
+        KeyCode::Char('R') => {
+            app.send_request(Request::Resume { agent: "all".to_string() });
+            app.flash = Some("resuming all agents".into());
+        }
         _ => {}
     }
 }

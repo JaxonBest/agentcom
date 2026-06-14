@@ -729,6 +729,7 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
         ("/",          "filter tasks",        "F",           "clear task filter"),
         ("d",          "toggle done tasks",   "Enter",       "task detail popup"),
         ("p",          "pause/resume agent",  "s",           "stop agent"),
+        ("P",          "pause ALL agents",    "R",           "resume ALL agents"),
         ("PgUp/PgDn",  "scroll output",       "End",         "follow live"),
         ("Enter",      "send chat message",   "?",           "toggle this help"),
         ("q / Ctrl+C", "quit",                "",            ""),
