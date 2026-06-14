@@ -457,6 +457,21 @@ pub enum TaskCmd {
         id: i64,
         text: String,
     },
+    /// Soft-delete a task (hidden from list but recoverable)
+    ///
+    /// Example:
+    ///   agentcom task archive 42
+    Archive { id: i64 },
+    /// Restore a previously archived task
+    ///
+    /// Example:
+    ///   agentcom task restore 42
+    Restore { id: i64 },
+    /// List archived (soft-deleted) tasks
+    ///
+    /// Example:
+    ///   agentcom task archived
+    Archived,
 }
 
 #[derive(Subcommand)]
@@ -705,6 +720,9 @@ pub async fn run_client(command: Command) -> Result<()> {
                 TaskCmd::Untag { id, label } => Request::TaskUntag { id, label },
                 TaskCmd::Pin { id } => Request::TaskPin { id },
                 TaskCmd::Unpin { id } => Request::TaskUnpin { id },
+                TaskCmd::Archive { id } => Request::TaskArchive { id },
+                TaskCmd::Restore { id } => Request::TaskRestore { id },
+                TaskCmd::Archived => Request::TaskListArchived,
                 TaskCmd::Export { .. }
                 | TaskCmd::Import { .. }
                 | TaskCmd::Stats { .. }
