@@ -95,6 +95,7 @@ async fn main() -> Result<()> {
         }
         Command::Budget => run_budget(),
         Command::Messages { from, to, count, json } => run_messages(from, to, count, json),
+        Command::Replay { lines, agent } => run_replay(Some(lines), agent),
         Command::Config(cli::ConfigCmd::Show) => {
             let cwd = std::env::current_dir()?;
             let project_root = paths::find_project_root(&cwd)
@@ -744,6 +745,180 @@ fn run_messages(from: Option<String>, to: Option<String>, count: usize, json: bo
         }
         println!();
     }
+    Ok(())
+}
+
+fn run_replay(lines: Option<usize>, agent_filter: Option<String>) -> Result<()> {
+    /// Reconstruct a human-readable session narrative from hub logs.
+    const RESET: &str = "\x1b[0m";
+    const GREEN: &str = "\x1b[32m";
+    const YELLOW: &str = "\x1b[33m";
+    const RED: &str = "\x1b[31m";
+    const BLUE: &str = "\x1b[34m";
+    const CYAN: &str = "\x1b[36m";
+
+    /// A single parsed log event.
+    struct LogEvent {
+        timestamp: String,
+        _level: String,
+        message: String,
+    }
+
+    let cwd = std::env::current_dir()?;
+    let project_root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+
+    let log_dir = paths::log_dir(&project_root)?;
+
+    let mut entries: Vec<(std::path::PathBuf, std::time::SystemTime)> = std::fs::read_dir(&log_dir)
+        .with_context(|| format!("reading log dir {}", log_dir.display()))?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("hub.log"))
+        .filter_map(|e| {
+            let mtime = e.metadata().ok()?.modified().ok()?;
+            Some((e.path(), mtime))
+        })
+        .collect();
+
+    if entries.is_empty() {
+        anyhow::bail!("no hub log files found in {}", log_dir.display());
+    }
+
+    entries.sort_by_key(|a| a.1);
+
+    // Regex to parse the default tracing-subscriber format:
+    // 2025-01-01T12:00:00.123456Z  INFO agentcom::hub: message
+    // or with file/line:
+    // 2025-01-01T12:00:00.123456Z  INFO agentcom::hub: message
+    // The level is 5 chars wide, padded with spaces.
+    let log_re = regex::Regex::new(
+        r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d+(?:Z|[+-]\d{2}:\d{2}))\s+(\w+)\s+(\S+(?:::\S+)*):\s+(.+)$"
+    ).expect("valid regex");
+
+    let filter = agent_filter.as_deref().map(|s| s.to_lowercase());
+
+    // Parse all log files into a flat vec of events.
+    let mut events: Vec<LogEvent> = Vec::new();
+    for (path, _) in &entries {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        for line in content.lines() {
+            if let Some(caps) = log_re.captures(line) {
+                let msg = caps[4].to_string();
+                // Apply agent filter (check if agent name appears in message)
+                if let Some(ref f) = filter {
+                    if !msg.to_lowercase().contains(f.as_str()) {
+                        continue;
+                    }
+                }
+                events.push(LogEvent {
+                    timestamp: caps[1].to_string(),
+                    _level: caps[2].to_string(),
+                    message: msg,
+                });
+            }
+        }
+    }
+
+    // Apply line limit (most recent N events)
+    if let Some(n) = lines {
+        if events.len() > n {
+            events = events.split_off(events.len() - n);
+        }
+    }
+
+    if events.is_empty() {
+        println!("no matching log events found");
+        return Ok(());
+    }
+
+    // --- Render markdown narrative ---
+    println!("# agentcom replay — Session Narrative\n");
+    println!(
+        "> {} events from {} to {}\n",
+        events.len(),
+        events.first().unwrap().timestamp,
+        events.last().unwrap().timestamp
+    );
+
+    // Categorize events for a richer narrative.
+    let mut section_open = false;
+
+    for ev in &events {
+        let msg = &ev.message;
+        let ts_short = &ev.timestamp[..19]; // "2025-01-01T12:00:00"
+
+        // Determine event category for styling
+        let (icon, label, style) = if msg.contains(": stopped") || msg.contains("Hub stop") {
+            ("🛑", "STOP", RED)
+        } else if msg.contains("ctrl-c received") || msg.contains("SIGTERM received") {
+            ("🛑", "SHUTDOWN", RED)
+        } else if msg.contains("crashed") || msg.contains("exit code") {
+            ("💥", "CRASH", RED)
+        } else if msg.contains("Hub start") || msg.contains("auto-restarting") {
+            ("🚀", "START", GREEN)
+        } else if msg.contains("added task #") || msg.contains("cloned task #") {
+            ("📋", "TASK", CYAN)
+        } else if msg.contains("claimed task #") {
+            ("👤", "CLAIM", BLUE)
+        } else if msg.contains("completed task #") {
+            ("✅", "DONE", GREEN)
+        } else if msg.contains("blocked task #") {
+            ("🚧", "BLOCKED", YELLOW)
+        } else if msg.contains("released") && msg.contains("claimed task") {
+            ("↩️", "RELEASE", YELLOW)
+        } else if msg.contains("free mode") {
+            ("🎯", "FREE", CYAN)
+        } else if msg.contains("budget warning") {
+            ("💰", "BUDGET", YELLOW)
+        } else if msg.contains("assigned task #") {
+            ("📩", "ASSIGN", BLUE)
+        } else if msg.contains("->") && (msg.contains("from") || msg.contains("to")) {
+            ("💬", "MSG", BLUE)
+        } else if msg.starts_with("[FREE MODE]") {
+            ("🎯", "NUDGE", CYAN)
+        } else if msg.contains("spawn") {
+            ("🤖", "SPAWN", GREEN)
+        } else {
+            ("•", "INFO", "")
+        };
+
+        // Print section header for new sessions/hubs
+        if msg.contains("Hub start") || msg == "ctrl-c received — shutting down" {
+            if section_open {
+                println!();
+            }
+            section_open = true;
+        }
+
+        let prefix = if style.is_empty() {
+            format!("  {} `{}`", icon, ts_short)
+        } else {
+            format!("  {}{} {}`{}`{}", style, icon, RESET, ts_short, style)
+        };
+
+        // Colorize the label
+        let label_fmt = if style.is_empty() {
+            format!("[{}]", label)
+        } else {
+            format!("{}[{}]{}", style, label, RESET)
+        };
+
+        // Format the message — highlight agent names, task IDs
+        let msg_fmt = msg
+            .replace(": stopped", "")
+            .replace(": process exited unexpectedly", " exited unexpectedly");
+
+        println!("{prefix} {label_fmt} {msg_fmt}");
+    }
+
+    println!();
+    println!("---");
+    println!(
+        "> End of replay. {} events shown.",
+        events.len()
+    );
+
     Ok(())
 }
 

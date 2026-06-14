@@ -178,6 +178,20 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Reconstruct a human-readable session narrative from hub logs
+    ///
+    /// Examples:
+    ///   agentcom replay
+    ///   agentcom replay -n 200
+    ///   agentcom replay --agent builder
+    Replay {
+        /// Number of most-recent events to include (default 500)
+        #[arg(short = 'n', long, default_value_t = 500)]
+        lines: usize,
+        /// Only show events mentioning this agent
+        #[arg(long)]
+        agent: Option<String>,
+    },
     /// Print version and build metadata (git commit, build time, rustc version)
     Version,
     /// Read the loaded agentcom.toml config
@@ -601,6 +615,7 @@ pub async fn run_client(command: Command) -> Result<()> {
         | Command::Completions { .. }
         | Command::Budget
         | Command::Messages { .. }
+        | Command::Replay { .. }
         | Command::Version
         | Command::Config(_) => {
             unreachable!("handled in main")
