@@ -260,14 +260,24 @@ $env:AGENTCOM_DEEPSEEK_OUTPUT_PER_MTOK = "1.10"
 
 | Command | Description |
 |---|---|
-| `agentcom init [--force]` | Write a starter `agentcom.toml` in the current directory |
+| `agentcom init [--force] [--template solo\|team\|mixed]` | Write a starter `agentcom.toml` in the current directory |
 | `agentcom up` | Start the hub, spawn agents, open TUI |
 | `agentcom up --headless` | Start hub without TUI |
 | `agentcom up --agents builder,reviewer` | Start only the named agents |
 | `agentcom up --task "..."` | Seed a task before agents start (repeatable) |
-| `agentcom status` | Fleet state, spend, turns, pending messages, open tasks |
+| `agentcom status [--json]` | Fleet state, spend, turns, pending messages, open tasks |
 | `agentcom stop` | Gracefully shut down all agents and the hub |
 | `agentcom doctor` | Pre-flight check: CLIs, API keys, config validity |
+
+### Offline tools (no hub required)
+
+These commands read local files directly and work without a running hub.
+
+| Command | Description |
+|---|---|
+| `agentcom logs [-n 100] [--agent <name>] [--follow]` | Read hub log files; reads across rotated daily logs; `-n` controls line count |
+| `agentcom budget` | Per-agent spend and turn report from the run history database |
+| `agentcom completions <bash\|zsh\|fish\|elvish>` | Print shell completion script to stdout |
 
 ### Real-time control
 
@@ -286,11 +296,16 @@ $env:AGENTCOM_DEEPSEEK_OUTPUT_PER_MTOK = "1.10"
 | Command | Description |
 |---|---|
 | `agentcom task add "<title>" [-d "<desc>"] [-p 0-4] [--dep <id>]` | Add a task (0 = highest priority) |
-| `agentcom task list [--status open\|claimed\|done\|blocked]` | List tasks |
+| `agentcom task list [--status open\|claimed\|done\|blocked]` | List tasks, optionally filtered by status |
+| `agentcom task list --search "<keyword>"` | Filter tasks by keyword in title or description |
+| `agentcom task show <id>` | Show full details of a single task |
 | `agentcom task claim <id>` | Claim a task (used by agents) |
 | `agentcom task done <id> --note "<note>"` | Mark a task complete |
 | `agentcom task block <id> --reason "<reason>"` | Mark a task blocked |
 | `agentcom task reopen <id>` | Reopen a blocked or stuck-claimed task |
+| `agentcom task edit <id> [-t title] [-d desc] [-p priority]` | Update task fields (PATCH — omitted fields unchanged) |
+| `agentcom task remove <id>` | Permanently delete a task (not allowed if claimed) |
+| `agentcom task prune [--before 7d]` | Delete all done/blocked tasks older than the given duration |
 
 ### Agent fleet
 
