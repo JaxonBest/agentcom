@@ -238,7 +238,33 @@ impl Store {
         }
     }
 
+    /// Returns the IDs of any dependencies of `id` that are not yet done.
+    /// Empty vec means the task is claimable from a dependency standpoint.
+    pub fn task_unmet_deps(&self, id: i64) -> Result<Vec<i64>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "SELECT d.depends_on_id FROM task_deps d
+             JOIN tasks t ON t.id = d.depends_on_id
+             WHERE d.task_id = ?1 AND t.status != 'done'",
+        )?;
+        let ids: Vec<i64> = stmt
+            .query_map([id], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(ids)
+    }
+
     pub fn task_claim(&self, id: i64, agent: &str) -> Result<Task> {
+        // Check dependency gate before acquiring the write lock so the
+        // error message can name the blocking task IDs.
+        let unmet = self.task_unmet_deps(id)?;
+        if !unmet.is_empty() {
+            let blocking: Vec<String> = unmet.iter().map(|i| format!("#{i}")).collect();
+            bail!(
+                "task #{id} cannot be claimed: waiting on {}",
+                blocking.join(", ")
+            );
+        }
+
         let conn = self.conn.lock().unwrap();
         let updated = conn.execute(
             "UPDATE tasks SET status = 'claimed', claimed_by = ?1, updated_at = ?2
@@ -463,6 +489,30 @@ mod tests {
     fn missing_dep_rejected() {
         let s = Store::open_in_memory().unwrap();
         assert!(s.task_add("t", "", 2, &[999], "human").is_err());
+    }
+
+    #[test]
+    fn claim_blocked_by_unfinished_dep() {
+        let s = Store::open_in_memory().unwrap();
+        let parent = s.task_add("parent", "", 1, &[], "human").unwrap();
+        let child = s.task_add("child", "", 0, &[parent], "human").unwrap();
+
+        // Claiming child while parent is still open must fail.
+        let err = s.task_claim(child, "alice").unwrap_err();
+        assert!(
+            err.to_string().contains(&format!("#{parent}")),
+            "error should name the blocking task: {err}"
+        );
+
+        // Claiming the parent directly must succeed.
+        s.task_claim(parent, "alice").unwrap();
+
+        // Child still blocked while parent is claimed (not done).
+        assert!(s.task_claim(child, "bob").is_err());
+
+        // Complete parent — now child is claimable.
+        s.task_done(parent, "alice", None).unwrap();
+        s.task_claim(child, "bob").unwrap();
     }
 
     #[test]
