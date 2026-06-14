@@ -73,6 +73,10 @@ pub struct AgentRuntime {
     pub stall_warned: bool,
     /// Timestamp when the agent entered the Paused state. Cleared on resume.
     pub paused_at: Option<Instant>,
+    /// Number of consecutive crashes in the current window (reset after window expires).
+    pub crash_count: u32,
+    /// Timestamp of the first crash in the current window.
+    pub first_crash_at: Option<Instant>,
 }
 
 impl AgentRuntime {
@@ -96,6 +100,8 @@ impl AgentRuntime {
             working_since: None,
             stall_warned: false,
             paused_at: None,
+            crash_count: 0,
+            first_crash_at: None,
         }
     }
 

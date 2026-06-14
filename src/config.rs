@@ -75,6 +75,14 @@ pub struct HubConfig {
     /// the commit is skipped and a warning is logged. Example: "cargo test".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_commit_test_cmd: Option<String>,
+    /// Circuit breaker: max consecutive crashes before auto-pausing an agent.
+    /// When an agent crashes this many times within crash_circuit_breaker_window_secs,
+    /// it is paused instead of restarted. Default: 3.
+    #[serde(default = "default_circuit_breaker_n")]
+    pub crash_circuit_breaker_n: u32,
+    /// Window in seconds for the crash circuit breaker counter. Default: 600 (10 min).
+    #[serde(default = "default_circuit_breaker_window_secs")]
+    pub crash_circuit_breaker_window_secs: u64,
     /// Re-read agentcom.toml while the hub is running. When the file changes,
     /// new agents are spawned and existing agent configs are updated in memory.
     /// Removing an agent from the file logs a warning but does not stop it.
@@ -321,6 +329,12 @@ fn default_max_agents() -> usize {
 }
 fn default_commit_exclude_patterns() -> Vec<String> {
     vec!["agentcom.toml".into(), ".agentcom/**".into()]
+}
+fn default_circuit_breaker_n() -> u32 {
+    3
+}
+fn default_circuit_breaker_window_secs() -> u64 {
+    600
 }
 
 impl HubConfig {
