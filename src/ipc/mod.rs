@@ -87,6 +87,10 @@ pub enum Request {
         /// Delete tasks whose updated_at is more than this many seconds ago.
         before_secs: i64,
     },
+    /// Clone a task: copy title, description, and priority into a new open task.
+    TaskClone {
+        id: i64,
+    },
     Status,
     /// Hot-add an agent to the running hub (already persisted to
     /// agentcom.toml by the client).
@@ -153,6 +157,10 @@ pub enum Response {
     /// Streamed repeatedly in `Tail { follow: true }` mode.
     TailLine {
         line: String,
+    },
+    /// Result of a TaskClone operation.
+    Cloned {
+        new_id: i64,
     },
 }
 
