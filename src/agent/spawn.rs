@@ -384,7 +384,26 @@ fn write_temp_prompt(agent: &str, prompt: &str) -> Result<PathBuf> {
         "agentcom-{agent}-{}-system.txt",
         uuid::Uuid::new_v4()
     ));
-    std::fs::write(&path, prompt)?;
+    // Write owner-only so the system prompt (role, team config, goals) is not
+    // visible to other OS users sharing the same /tmp directory.
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)
+            .with_context(|| format!("creating temp prompt for {agent}"))?;
+        f.write_all(prompt.as_bytes())
+            .with_context(|| format!("writing temp prompt for {agent}"))?;
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&path, prompt)?;
+    }
     Ok(path)
 }
 
