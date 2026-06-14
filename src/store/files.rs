@@ -81,6 +81,12 @@ impl Store {
         Ok(released)
     }
 
+    /// Clear all file claims from all agents — called at session start.
+    pub fn files_release_all_agents(&self) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute("DELETE FROM file_claims", [])?)
+    }
+
     pub fn files_list(&self) -> Result<Vec<FileClaim>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn

@@ -135,6 +135,21 @@ impl Hub {
     /// Spawn every configured agent (or the named subset), in config order —
     /// the composer is first, so it gets first crack at seeded goals.
     pub fn spawn_agents(&mut self, only: Option<&[String]>) -> Result<()> {
+        // Fresh session: reset any tasks/file-claims left over from the
+        // previous run so agents don't silently resume old work on restart.
+        let released = self.store.release_all_claimed().unwrap_or(0);
+        let freed = self.store.files_release_all_agents().unwrap_or(0);
+        if released > 0 {
+            self.log(format!(
+                "session start: reset {released} claimed task(s) to open"
+            ));
+        }
+        if freed > 0 {
+            self.log(format!(
+                "session start: cleared {freed} stale file claim(s)"
+            ));
+        }
+
         let names: Vec<String> = self
             .cfg
             .agents

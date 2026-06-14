@@ -239,6 +239,17 @@ impl Store {
         )?)
     }
 
+    /// Reset every claimed task to open — called at session start so work
+    /// from the previous run doesn't auto-resume on the next `agentcom up`.
+    pub fn release_all_claimed(&self) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        Ok(conn.execute(
+            "UPDATE tasks SET status = 'open', claimed_by = NULL, updated_at = ?1
+             WHERE status = 'claimed'",
+            params![now_ts()],
+        )?)
+    }
+
     pub fn open_task_count(&self) -> Result<u64> {
         let conn = self.conn.lock().unwrap();
         Ok(conn.query_row(
