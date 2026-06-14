@@ -135,6 +135,8 @@ pub enum Command {
     Completions {
         shell: clap_complete::Shell,
     },
+    /// Show per-agent spend and turn counts from the local DB (no hub needed)
+    Budget,
 }
 
 #[derive(Subcommand)]
@@ -407,7 +409,8 @@ pub async fn run_client(command: Command) -> Result<()> {
         | Command::Agent(_)
         | Command::Doctor
         | Command::Logs { .. }
-        | Command::Completions { .. } => {
+        | Command::Completions { .. }
+        | Command::Budget => {
             unreachable!("handled in main")
         }
     }

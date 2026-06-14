@@ -55,6 +55,7 @@ async fn main() -> Result<()> {
             clap_complete::generate(shell, &mut Cli::command(), "agentcom", &mut std::io::stdout());
             Ok(())
         }
+        Command::Budget => run_budget(),
         other => cli::run_client(other).await,
     }
 }
@@ -445,6 +446,41 @@ fn most_recent_hub_log(log_dir: &std::path::Path) -> Option<std::path::PathBuf> 
         })
         .max_by_key(|(_, mtime)| *mtime)
         .map(|(path, _)| path)
+}
+
+fn run_budget() -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let project_root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+    let db = paths::db_path(&project_root)?;
+    if !db.exists() {
+        anyhow::bail!("no hub data found — run `agentcom up` first to generate spend data");
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        &db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+    let mut stmt = conn.prepare(
+        "SELECT agent, SUM(cost_usd), SUM(turns) FROM runs GROUP BY agent ORDER BY SUM(cost_usd) DESC",
+    )?;
+    let rows: Vec<(String, f64, i64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    if rows.is_empty() {
+        println!("no spend data yet");
+        return Ok(());
+    }
+    println!("{:<14} {:>10}  {:>8}", "AGENT", "COST (USD)", "TURNS");
+    println!("{}", "-".repeat(36));
+    let (mut total_cost, mut total_turns) = (0f64, 0i64);
+    for (agent, cost, turns) in &rows {
+        println!("{:<14} ${:>9.4}  {:>8}", agent, cost, turns);
+        total_cost += cost;
+        total_turns += turns;
+    }
+    println!("{}", "-".repeat(36));
+    println!("{:<14} ${:>9.4}  {:>8}", "TOTAL", total_cost, total_turns);
+    Ok(())
 }
 
 fn init_logging(project_root: &std::path::Path, headless: bool) -> Result<()> {
