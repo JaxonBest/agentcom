@@ -46,6 +46,9 @@ pub enum Request {
         /// Auto-block the task if it stays claimed for more than this many minutes.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         timeout_mins: Option<u64>,
+        /// Capability labels the claiming agent must have (all required).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        requires: Vec<String>,
     },
     TaskList {
         status: Option<String>,
@@ -236,6 +239,7 @@ impl Request {
             priority,
             depends_on,
             timeout_mins: None,
+            requires: vec![],
         }
     }
 
