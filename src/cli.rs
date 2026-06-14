@@ -246,6 +246,9 @@ pub enum TaskCmd {
         /// Filter by keyword in title/description (case-insensitive)
         #[arg(short, long)]
         search: Option<String>,
+        /// Filter to tasks that have this label
+        #[arg(long)]
+        tag: Option<String>,
     },
     /// Claim an open task
     Claim { id: i64 },
@@ -341,6 +344,21 @@ pub enum TaskCmd {
         /// Agent to remind
         agent: String,
     },
+    /// Assign a task directly to an agent (hub also sends them an inbox message)
+    Assign {
+        id: i64,
+        agent: String,
+    },
+    /// Duplicate a task as a new open task (copies title, description, priority)
+    Clone { id: i64 },
+    /// Add a label to a task
+    Tag { id: i64, label: String },
+    /// Remove a label from a task
+    Untag { id: i64, label: String },
+    /// Elevate a task to sort before all non-pinned tasks
+    Pin { id: i64 },
+    /// Remove a task's pin
+    Unpin { id: i64 },
 }
 
 #[derive(Subcommand)]
@@ -427,6 +445,11 @@ pub enum AgentCmd {
         #[arg(long)]
         no_stop: bool,
     },
+    /// Hot-swap an agent's model (takes effect on next restart)
+    SwapModel {
+        name: String,
+        model: String,
+    },
 }
 
 #[derive(Args, Clone)]
@@ -495,7 +518,7 @@ pub async fn run_client(command: Command) -> Result<()> {
                     depends_on,
                     timeout_mins: None,
                 },
-                TaskCmd::List { status, search } => Request::TaskList { status, search, tag: None },
+                TaskCmd::List { status, search, tag } => Request::TaskList { status, search, tag },
                 TaskCmd::Claim { id } => Request::TaskClaim { id },
                 TaskCmd::Done { id, note } => Request::TaskDone { id, note },
                 TaskCmd::Block { id, reason } => Request::TaskBlock { id, reason },
@@ -536,6 +559,12 @@ pub async fn run_client(command: Command) -> Result<()> {
                     let resp = client.request(&Request::Send { to: agent, body, urgent: false }).await?;
                     return print_simple(resp);
                 }
+                TaskCmd::Assign { id, agent } => Request::TaskAssign { id, agent },
+                TaskCmd::Clone { id } => Request::TaskClone { id },
+                TaskCmd::Tag { id, label } => Request::TaskTag { id, label },
+                TaskCmd::Untag { id, label } => Request::TaskUntag { id, label },
+                TaskCmd::Pin { id } => Request::TaskPin { id },
+                TaskCmd::Unpin { id } => Request::TaskUnpin { id },
                 TaskCmd::Export { .. } | TaskCmd::Import { .. } | TaskCmd::Stats { .. } | TaskCmd::Watch { .. } => unreachable!("handled in main"),
             };
             let resp = client.request(&req).await?;
@@ -546,6 +575,10 @@ pub async fn run_client(command: Command) -> Result<()> {
                 }
                 Response::Pruned { count } => {
                     println!("pruned {count} task(s)");
+                    Ok(())
+                }
+                Response::Cloned { new_id } => {
+                    println!("cloned as #{new_id}");
                     Ok(())
                 }
                 other => print_simple(other),
@@ -673,12 +706,10 @@ pub async fn run_agent_cmd(cmd: AgentCmd) -> Result<()> {
                 auto_restart: !no_auto_restart,
                 auto_commit_author_name,
                 auto_commit_author_email,
-                auto_commit: None,
-                max_rpm: None,
                 env,
                 initial_prompt,
                 spawn_delay_ms: spawn_delay,
-                capabilities: vec![],
+                ..Default::default()
             };
             // Validate the combined config first; only persist after the
             // hub (if running) has also accepted — a cap rejection must not
@@ -733,6 +764,11 @@ pub async fn run_agent_cmd(cmd: AgentCmd) -> Result<()> {
                 }
             }
             Ok(())
+        }
+        AgentCmd::SwapModel { name, model } => {
+            let mut client = Client::connect().await?;
+            let resp = client.request(&Request::AgentSwapModel { agent: name, model }).await?;
+            print_simple(resp)
         }
         AgentCmd::Remove { name, no_stop } => {
             crate::config::remove_agent(&project_root, &name)?;
