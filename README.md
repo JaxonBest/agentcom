@@ -307,7 +307,7 @@ These commands read local files directly and work without a running hub.
 | `agentcom task edit <id> [-t title] [-d desc] [-p priority]` | Update task fields (PATCH — omitted fields unchanged) |
 | `agentcom task remove <id>` | Permanently delete a task (not allowed if claimed) |
 | `agentcom task prune [--before 7d]` | Delete all done/blocked tasks older than the given duration |
-| `agentcom task export` | Print the full task board as a Markdown checklist (offline, no hub required) |
+| `agentcom task export [--format md\|json]` | Dump the task board offline — Markdown checklist (default) or JSON array for scripting |
 
 ### Agent fleet
 
