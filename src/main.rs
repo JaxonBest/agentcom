@@ -1651,11 +1651,37 @@ fn run_audit(
     let project_root = paths::find_project_root(&cwd)
         .context("no agentcom.toml found — run `agentcom init` first")?;
     let log_path = paths::data_dir(&project_root)?.join("audit.log");
-    if !log_path.exists() {
+    let log_is_empty = !log_path.exists() || log_path.metadata().map(|m| m.len() == 0).unwrap_or(true);
+    if log_is_empty {
+        // Fall back to synthesizing audit events from the tasks table.
+        let db = paths::db_path(&project_root)?;
+        if !db.exists() {
+            if json_out { println!("[]"); } else { println!("no audit log and no hub database found"); }
+            return Ok(());
+        }
+        let conn = rusqlite::Connection::open(&db)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, title, status, claimed_by, priority, updated_at FROM tasks ORDER BY updated_at DESC LIMIT ?1"
+        )?;
+        let rows: Vec<(i64, String, String, Option<String>, i64, i64)> = {
+            let iter = stmt.query_map([count as i64], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+            })?;
+            iter.filter_map(|r| r.ok()).collect()
+        };
         if json_out {
-            println!("[]");
+            let vals: Vec<serde_json::Value> = rows.iter().map(|(id, title, status, agent, _, ts)| {
+                serde_json::json!({"event": format!("task_{status}"), "task_id": id, "title": title, "agent": agent, "ts": ts})
+            }).collect();
+            println!("{}", serde_json::to_string_pretty(&vals)?);
         } else {
-            println!("no audit log found — hub hasn't run yet");
+            println!("(audit.log empty — showing task activity from DB)");
+            println!("{:<24} {:<16} {:<6} {}", "TIME", "EVENT", "ID", "TITLE");
+            println!("{}", "-".repeat(70));
+            for (id, title, status, agent, _, ts) in &rows {
+                let who = agent.as_deref().unwrap_or("-");
+                println!("{:<24} {:<16} {:<6} {} @{}", fmt_unix_ts(*ts), format!("task_{status}"), id, title, who);
+            }
         }
         return Ok(());
     }
