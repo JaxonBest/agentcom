@@ -95,11 +95,74 @@ impl Store {
             |r| r.get(0),
         )?)
     }
+
+    /// Offline browse: filter by from/to agent, return at most `limit` rows newest-first.
+    pub fn msg_list(
+        &self,
+        from: Option<&str>,
+        to: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<Message>> {
+        let conn = self.conn.lock().unwrap();
+        let lim = limit as i64;
+        // Each branch uses positional ?N that match the params! order.
+        let rows: Vec<Message> = match (from, to) {
+            (None, None) => {
+                let mut s = conn.prepare(
+                    "SELECT * FROM (SELECT * FROM messages ORDER BY id DESC LIMIT ?1) ORDER BY id",
+                )?;
+                let v = s.query_map([lim], msg_from_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                v
+            }
+            (Some(f), None) => {
+                let mut s = conn.prepare(
+                    "SELECT * FROM (SELECT * FROM messages WHERE from_who = ?1 ORDER BY id DESC LIMIT ?2) ORDER BY id",
+                )?;
+                let v = s.query_map(rusqlite::params![f, lim], msg_from_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                v
+            }
+            (None, Some(t)) => {
+                let mut s = conn.prepare(
+                    "SELECT * FROM (SELECT * FROM messages WHERE to_who = ?1 ORDER BY id DESC LIMIT ?2) ORDER BY id",
+                )?;
+                let v = s.query_map(rusqlite::params![t, lim], msg_from_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                v
+            }
+            (Some(f), Some(t)) => {
+                let mut s = conn.prepare(
+                    "SELECT * FROM (SELECT * FROM messages WHERE from_who = ?1 AND to_who = ?2 ORDER BY id DESC LIMIT ?3) ORDER BY id",
+                )?;
+                let v = s.query_map(rusqlite::params![f, t, lim], msg_from_row)?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                v
+            }
+        };
+        Ok(rows)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn msg_list_filters() {
+        let s = Store::open_in_memory().unwrap();
+        s.msg_send("alice", &["bob".into()], "hi bob", false).unwrap();
+        s.msg_send("bob", &["alice".into()], "hi alice", false).unwrap();
+        s.msg_send("alice", &["carol".into()], "hi carol", false).unwrap();
+
+        assert_eq!(s.msg_list(None, None, 100).unwrap().len(), 3);
+        assert_eq!(s.msg_list(Some("alice"), None, 100).unwrap().len(), 2);
+        assert_eq!(s.msg_list(None, Some("bob"), 100).unwrap().len(), 1);
+        assert_eq!(s.msg_list(Some("alice"), Some("bob"), 100).unwrap().len(), 1);
+        assert_eq!(s.msg_list(Some("nobody"), None, 100).unwrap().len(), 0);
+        // limit works
+        assert_eq!(s.msg_list(None, None, 2).unwrap().len(), 2);
+    }
 
     #[test]
     fn take_pending_marks_delivered() {

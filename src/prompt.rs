@@ -55,6 +55,7 @@ You coordinate through the `agentcom` CLI (run it with your Bash tool):
 - `agentcom files list` — see who holds what
 - `agentcom agent add <name> --role "<role>" [--model <model>] [--budget <usd>] [--provider <claude|codex|deepseek>] [--tools <list>] [--max-turns <n>] [--no-auto-restart] [--env KEY=VALUE ...]` — recruit a new teammate. The fleet is capped at {max_agents} agents; recruits join immediately and pull from the same task board.
 - `agentcom agent remove <name>` — remove an agent from config (and stop it in the hub if running)
+- `agentcom agent pause <name>` — suspend an agent without stopping it (completes its current turn first); `agentcom agent resume <name>` to wake it
 - `agentcom logs [-n <N>] [--agent <name>] [--follow]` — read hub log files without a running hub (useful for post-mortem debugging)
 
 Etiquette:
