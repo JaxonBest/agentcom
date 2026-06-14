@@ -998,3 +998,63 @@ fn task_stats() {
     assert_eq!(claimants[0]["agent"], "worker");
     assert_eq!(claimants[0]["tasks_done"], 1);
 }
+
+#[test]
+fn messages_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    let scripts = tmp.path().join("scripts");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+
+    write_config(&project, &[("alice", "sender"), ("bob", "receiver")], "");
+    // Alice: claim the seed task, send bob a message, mark done.
+    std::fs::write(
+        scripts.join("alice.ndjson"),
+        r#"{"run": ["agentcom task claim 1", "agentcom send bob \"hello from alice\"", "agentcom task done 1 --note done"], "text": "sent"}
+"#,
+    )
+    .unwrap();
+    // Bob: read the inbox.
+    std::fs::write(
+        scripts.join("bob.ndjson"),
+        r#"{"run": ["agentcom inbox"], "text": "received"}
+"#,
+    )
+    .unwrap();
+
+    // Seed a task so alice gets a turn and sends the message.
+    let hub = start_hub(&project, &scripts, &["test task for alice"], &[]);
+    // Wait until alice finishes (task done = message was sent).
+    wait_for(
+        &project,
+        &["task", "list", "--status", "done"],
+        Duration::from_secs(20),
+        |out| out.contains("done"),
+    );
+    drop(hub);
+
+    // agentcom messages reads the DB without a hub.
+    let (ok, stdout, stderr) = cli_split(&project, &["messages"]);
+    assert!(ok, "messages exits 0: stderr={stderr}");
+    assert!(stdout.contains("alice"), "output shows sender alice: {stdout}");
+    assert!(stdout.contains("bob"), "output shows recipient bob: {stdout}");
+    assert!(stdout.contains("hello from alice"), "output shows message body: {stdout}");
+
+    // --from filter
+    let (ok, stdout, _) = cli_split(&project, &["messages", "--from", "alice"]);
+    assert!(ok, "messages --from exits 0");
+    assert!(stdout.contains("alice -> bob"), "filter shows alice->bob: {stdout}");
+
+    // --json returns a JSON array
+    let (ok, stdout, stderr) = cli_split(&project, &["messages", "--json"]);
+    assert!(ok, "messages --json exits 0: stderr={stderr}");
+    let v: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("messages --json is valid JSON: {e}\n{stdout}"));
+    assert!(v.is_array(), "output is array: {stdout}");
+    let arr = v.as_array().unwrap();
+    assert!(!arr.is_empty(), "at least one message: {stdout}");
+    let msg = arr.iter().find(|m| m["from_who"] == "alice").unwrap();
+    assert_eq!(msg["to_who"], "bob");
+    assert!(msg["body"].as_str().unwrap_or("").contains("hello from alice"));
+}
