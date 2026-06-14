@@ -29,6 +29,11 @@ pub enum Command {
         template: crate::config::ConfigTemplate,
     },
     /// Start the hub and the agent fleet (TUI by default)
+    ///
+    /// Examples:
+    ///   agentcom up
+    ///   agentcom up --free "ship the login page" --for 2h --budget 5.00
+    ///   agentcom up --headless
     Up {
         /// Only start these agents (comma-separated names)
         #[arg(long, value_delimiter = ',')]
@@ -101,6 +106,10 @@ pub enum Command {
 #[derive(Subcommand)]
 pub enum TaskCmd {
     /// Add a task to the shared board
+    ///
+    /// Examples:
+    ///   agentcom task add "implement login page" -d "use React + Express"
+    ///   agentcom task add "deploy to prod" -p 0 --dep 5 --dep 6
     Add {
         title: String,
         #[arg(short, long, default_value = "")]
@@ -157,6 +166,10 @@ pub enum FilesCmd {
 pub enum AgentCmd {
     /// Add an agent: writes it to agentcom.toml and, if the hub is running,
     /// spawns it live immediately
+    ///
+    /// Examples:
+    ///   agentcom agent add qa --role "writes and runs tests" --provider claude
+    ///   agentcom agent add coder --role "implements features" --model claude-sonnet-4-6 --budget 5.00
     Add {
         /// Agent name (lowercase letters, digits, '-', '_')
         name: String,
@@ -199,7 +212,13 @@ pub struct UpArgs {
 
 /// Run a client-mode command against the running hub and print the result.
 pub async fn run_client(command: Command) -> Result<()> {
-    let mut client = Client::connect().await?;
+    let mut client = match Client::connect().await {
+        Ok(c) => c,
+        Err(_) => {
+            eprintln!("hub not running — start it with: agentcom up");
+            return Ok(());
+        }
+    };
     match command {
         Command::Status => {
             let resp = client.request(&Request::Status).await?;
@@ -444,12 +463,16 @@ fn print_status(resp: Response) -> Result<()> {
                 agents.len()
             );
             if let Some(free) = free {
-                println!("  FREE MODE · {free}");
+                println!("  FREE MODE  {free}");
             }
+            println!(
+                "\n  {:<14} {:<8} {:<13} {:<9} {}",
+                "NAME", "PROVIDER", "STATE", "COST", "TURNS"
+            );
             for a in agents {
-                let detail = a.detail.map(|d| format!(" — {d}")).unwrap_or_default();
+                let detail = a.detail.map(|d| format!("\n    {d}")).unwrap_or_default();
                 println!(
-                    "  {:<14} {:<6} {:<13} ${:<8.2} {} turns{detail}",
+                    "  {:<14} {:<8} {:<13} ${:<8.2} {} turns{detail}",
                     a.name, a.provider, a.state, a.spent_usd, a.turns
                 );
             }
@@ -460,6 +483,7 @@ fn print_status(resp: Response) -> Result<()> {
 }
 
 fn print_tasks(tasks: &[crate::store::Task]) {
+    use crate::store::TaskStatus;
     if tasks.is_empty() {
         println!("no tasks");
         return;
@@ -508,4 +532,9 @@ fn print_tasks(tasks: &[crate::store::Task]) {
             }
         }
     }
+    let open = tasks.iter().filter(|t| t.status == TaskStatus::Open).count();
+    let claimed = tasks.iter().filter(|t| t.status == TaskStatus::Claimed).count();
+    let done = tasks.iter().filter(|t| t.status == TaskStatus::Done).count();
+    let blocked = tasks.iter().filter(|t| t.status == TaskStatus::Blocked).count();
+    println!("\n{open} open · {claimed} claimed · {done} done · {blocked} blocked");
 }
