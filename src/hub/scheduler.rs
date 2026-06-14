@@ -164,5 +164,35 @@ impl Hub {
                 self.start_interrupt(&name);
             }
         }
+
+        // Check per-task timeouts: auto-block claimed tasks whose timeout_mins has elapsed.
+        if let Ok(timed_out) = self.store.timed_out_tasks() {
+            for task in timed_out {
+                let task_id = task.id;
+                let timeout_mins = task.timeout_mins.unwrap_or(0);
+                let agent_name = task.claimed_by.clone().unwrap_or_default();
+                let reason = format!("timed out after {}min", timeout_mins);
+                if let Err(e) = self.store.task_block(task_id, &agent_name, &reason) {
+                    tracing::warn!("failed to auto-block timed-out task #{task_id}: {e}");
+                    continue;
+                }
+                self.log(format!(
+                    "TIMEOUT: task #{task_id} '{}' auto-blocked after {timeout_mins}min (agent: {agent_name})",
+                    task.title
+                ));
+                if !agent_name.is_empty() {
+                    let _ = self.store.msg_send(
+                        "hub",
+                        &[agent_name],
+                        &format!(
+                            "Task #{task_id} '{}' was auto-blocked: timed out after {timeout_mins} minutes. \
+                            If you are still working on it, reopen and continue.",
+                            task.title
+                        ),
+                        true,
+                    );
+                }
+            }
+        }
     }
 }
