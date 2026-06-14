@@ -101,6 +101,13 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&cfg)?);
             Ok(())
         }
+        Command::Config(cli::ConfigCmd::Set { key, value }) => {
+            let cwd = std::env::current_dir()?;
+            let project_root = paths::find_project_root(&cwd)
+                .context("no agentcom.toml found — run `agentcom init` first")?;
+            config::config_set(&project_root, &key, &value)?;
+            Ok(())
+        }
         Command::Version => {
             println!("agentcom {}", env!("CARGO_PKG_VERSION"));
             println!("git commit:  {}", option_env!("GIT_HASH").unwrap_or("unknown"));
@@ -110,6 +117,7 @@ async fn main() -> Result<()> {
         }
         Command::Task(cli::TaskCmd::Export { format }) => run_task_export(&format),
         Command::Task(cli::TaskCmd::Stats { json }) => run_task_stats(json),
+        Command::Task(cli::TaskCmd::Watch { no_color }) => run_task_watch(no_color),
         other => cli::run_client(other).await,
     }
 }
@@ -762,6 +770,80 @@ fn run_task_stats(json: bool) -> Result<()> {
         println!("Top contributors");
         for (agent, count) in claimant_vec.iter().take(10) {
             println!("  {:<20} {} task{}", agent, count, if *count == 1 { "" } else { "s" });
+        }
+    }
+    Ok(())
+}
+
+fn run_task_watch(no_color: bool) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let project_root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+    let db = paths::db_path(&project_root)?;
+    if !db.exists() {
+        anyhow::bail!("no hub data found — run `agentcom up` first");
+    }
+    let store = store::Store::open(&db)?;
+
+    // Set up Ctrl-C handler
+    let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let r = running.clone();
+    ctrlc::set_handler(move || {
+        r.store(false, std::sync::atomic::Ordering::SeqCst);
+    })
+    .map_err(|e| anyhow::anyhow!("failed to set Ctrl-C handler: {e}"))?;
+
+    // Determine clear sequence
+    let clear = if no_color {
+        "\n"
+    } else {
+        "\x1b[2J\x1b[H" // ANSI clear screen + cursor home
+    };
+
+    while running.load(std::sync::atomic::Ordering::SeqCst) {
+        print!("{clear}");
+        match store.task_list(None, None) {
+            Ok(tasks) => {
+                if no_color {
+                    // Simple text output without ANSI
+                    let open = tasks.iter().filter(|t| t.status == store::TaskStatus::Open).count();
+                    let claimed = tasks.iter().filter(|t| t.status == store::TaskStatus::Claimed).count();
+                    let done = tasks.iter().filter(|t| t.status == store::TaskStatus::Done).count();
+                    let blocked = tasks.iter().filter(|t| t.status == store::TaskStatus::Blocked).count();
+                    let total = tasks.len();
+                    println!("Task board — {total} tasks | {open} open · {claimed} claimed · {done} done · {blocked} blocked");
+                    println!("---");
+                    for t in &tasks {
+                        let who = t.claimed_by.as_deref().map(|w| format!(" @{w}")).unwrap_or_default();
+                        let deps = if t.depends_on.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" deps:[{}]", t.depends_on.iter().map(|d| format!("#{d}")).collect::<Vec<_>>().join(","))
+                        };
+                        let extra = match t.status {
+                            store::TaskStatus::Blocked => t.blocked_reason.as_deref().map(|r| format!(" — blocked: {r}")).unwrap_or_default(),
+                            store::TaskStatus::Done => t.note.as_deref().map(|n| format!(" — {n}")).unwrap_or_default(),
+                            _ => String::new(),
+                        };
+                        println!("#{:<4} p{} {:<8}{who}{deps} {}{extra}", t.id, t.priority, t.status.as_str(), t.title);
+                    }
+                } else {
+                    cli::print_tasks(&tasks);
+                }
+            }
+            Err(e) => {
+                eprintln!("error reading tasks: {e}");
+            }
+        }
+        if !running.load(std::sync::atomic::Ordering::SeqCst) {
+            break;
+        }
+        // Use 1-second sleeps with atomic check to ensure responsive Ctrl-C
+        for _ in 0..2 {
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            if !running.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
         }
     }
     Ok(())

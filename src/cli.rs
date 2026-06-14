@@ -734,7 +734,7 @@ fn print_status(resp: Response) -> Result<()> {
     }
 }
 
-fn print_tasks(tasks: &[crate::store::Task]) {
+pub fn print_tasks(tasks: &[crate::store::Task]) {
     if *JSON_MODE.get().unwrap_or(&false) {
         println!(
             "{}",
