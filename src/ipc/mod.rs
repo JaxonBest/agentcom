@@ -217,6 +217,39 @@ pub struct AgentStatusRow {
     pub turns: u64,
 }
 
+impl Request {
+    /// Construct a TaskAdd request with all optional fields defaulted.
+    pub fn task_add(
+        title: impl Into<String>,
+        description: impl Into<String>,
+        priority: i64,
+        depends_on: Vec<i64>,
+    ) -> Self {
+        Request::TaskAdd {
+            title: title.into(),
+            description: description.into(),
+            priority,
+            depends_on,
+            timeout_mins: None,
+        }
+    }
+
+    /// Construct a TaskList request with all optional filters defaulted to None.
+    pub fn task_list(status: Option<String>, search: Option<String>, tag: Option<String>) -> Self {
+        Request::TaskList { status, search, tag }
+    }
+
+    /// Construct a TaskEdit request (PATCH — None fields are unchanged).
+    pub fn task_edit(
+        id: i64,
+        title: Option<String>,
+        description: Option<String>,
+        priority: Option<i64>,
+    ) -> Self {
+        Request::TaskEdit { id, title, description, priority }
+    }
+}
+
 impl Response {
     pub fn err(msg: impl Into<String>) -> Self {
         Response::Err {
