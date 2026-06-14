@@ -1574,16 +1574,17 @@ fn cost_command() {
     assert!(ok, "cost exits 0: stderr={stderr}");
     assert!(stdout.contains("spender"), "cost shows agent name: {stdout}");
 
-    // JSON output should be a valid JSON array.
+    // JSON output is an object with total_cost_usd and agents array.
     let (ok, stdout, stderr) = cli_split(&project, &["cost", "--json"]);
     assert!(ok, "cost --json exits 0: stderr={stderr}");
     let v: serde_json::Value =
         serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("valid JSON: {e}\n{stdout}"));
-    assert!(v.is_array(), "cost --json returns array: {stdout}");
-    let arr = v.as_array().unwrap();
-    assert!(!arr.is_empty(), "at least one agent row: {stdout}");
-    assert!(arr[0]["agent"].is_string(), "agent field present: {stdout}");
-    assert!(arr[0]["total_cost_usd"].is_number(), "total_cost_usd field: {stdout}");
+    assert!(v.is_object(), "cost --json returns object: {stdout}");
+    assert!(v["total_cost_usd"].is_number(), "total_cost_usd present: {stdout}");
+    let agents = v["agents"].as_array().expect("agents field is array");
+    assert!(!agents.is_empty(), "at least one agent entry: {stdout}");
+    assert!(agents[0]["agent"].is_string(), "agent field present: {stdout}");
+    assert!(agents[0]["total_cost_usd"].is_number(), "per-agent cost present: {stdout}");
 }
 
 #[test]
@@ -1608,5 +1609,50 @@ fn agent_inspect_command() {
     assert!(
         stdout.contains("hub not running") || stdout.contains("runtime"),
         "mentions runtime section: {stdout}"
+    );
+}
+
+#[test]
+fn task_save_and_from_template() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    let scripts = tmp.path().join("scripts");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+
+    write_config(&project, &[("templater", "templates tasks")], "");
+    // Agent: claim and complete a task, then save it as a template, then create
+    // another task from the template — all while the hub is running so IPC works.
+    std::fs::write(
+        scripts.join("templater.ndjson"),
+        r#"{"run": ["agentcom task claim 1", "agentcom task done 1 --note tpl-done", "agentcom task save-template 1 mytemplate", "agentcom task from-template mytemplate --title \"from-template task\""], "text": "done"}
+"#,
+    )
+    .unwrap();
+
+    let hub = start_hub(&project, &scripts, &["original task"], &[]);
+    wait_for(
+        &project,
+        &["task", "list", "--status", "done"],
+        Duration::from_secs(20),
+        |out| out.contains("tpl-done"),
+    );
+    drop(hub);
+
+    // Template file should exist.
+    let tpl_path = project.join(".agentcom").join("task-templates.toml");
+    assert!(tpl_path.exists(), "template file created at {:?}", tpl_path);
+    let tpl_content = std::fs::read_to_string(&tpl_path).unwrap();
+    assert!(
+        tpl_content.contains("mytemplate"),
+        "template file contains name: {tpl_content}"
+    );
+
+    // The task created from the template should be in the DB (done or open).
+    let (ok, export_out, stderr) = cli_split(&project, &["task", "export", "--format", "json"]);
+    assert!(ok, "task export exits 0: stderr={stderr}");
+    assert!(
+        export_out.contains("from-template task"),
+        "templated task present in DB: {export_out}"
     );
 }
