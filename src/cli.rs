@@ -691,6 +691,7 @@ pub async fn run_client(command: Command) -> Result<()> {
                     depends_on,
                     timeout_mins: timeout,
                     requires,
+                    recur: None,
                 },
                 TaskCmd::Due { .. } | TaskCmd::Graph => unreachable!("handled in main"),
                 TaskCmd::List { status, search, tag } => Request::TaskList { status, search, tag },
