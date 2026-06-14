@@ -215,8 +215,16 @@ pub enum TaskCmd {
         #[arg(long, default_value = "7d")]
         before: String,
     },
-    /// Dump the task board as a Markdown checklist (no hub needed)
-    Export,
+    /// Dump the task board without a running hub
+    ///
+    /// Examples:
+    ///   agentcom task export
+    ///   agentcom task export --format json | jq '.[] | select(.status=="open") | .title'
+    Export {
+        /// Output format: md (default) or json
+        #[arg(long, default_value = "md")]
+        format: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -365,7 +373,7 @@ pub async fn run_client(command: Command) -> Result<()> {
                         .ok_or_else(|| anyhow::anyhow!("invalid duration {:?} — use e.g. 7d, 24h, 90m, 60s", before))?;
                     Request::TaskPrune { before_secs }
                 }
-                TaskCmd::Export => unreachable!("handled in main"),
+                TaskCmd::Export { .. } => unreachable!("handled in main"),
             };
             let resp = client.request(&req).await?;
             match resp {

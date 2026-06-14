@@ -64,7 +64,7 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&cfg)?);
             Ok(())
         }
-        Command::Task(cli::TaskCmd::Export) => run_task_export(),
+        Command::Task(cli::TaskCmd::Export { format }) => run_task_export(&format),
         other => cli::run_client(other).await,
     }
 }
@@ -492,7 +492,7 @@ fn run_budget() -> Result<()> {
     Ok(())
 }
 
-fn run_task_export() -> Result<()> {
+fn run_task_export(format: &str) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let project_root = paths::find_project_root(&cwd)
         .context("no agentcom.toml found — run `agentcom init` first")?;
@@ -502,6 +502,12 @@ fn run_task_export() -> Result<()> {
     }
     let store = store::Store::open(&db)?;
     let tasks = store.task_list(None, None)?;
+
+    if format == "json" {
+        println!("{}", serde_json::to_string_pretty(&tasks)?);
+        return Ok(());
+    }
+
     if tasks.is_empty() {
         println!("no tasks");
         return Ok(());
