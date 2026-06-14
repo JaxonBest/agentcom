@@ -289,17 +289,18 @@ async fn run_doctor() -> Result<()> {
         }
     }
 
-    // 2. codex CLI (optional)
-    match std::process::Command::new("codex")
-        .arg("--version")
-        .output()
+    // 2. codex CLI (optional) — prefer the desktop app bundle via resolve_codex_exe()
+    match agent::spawn::resolve_codex_exe()
+        .ok()
+        .and_then(|exe| std::process::Command::new(exe).arg("--version").output().ok())
+        .filter(|o| o.status.success())
     {
-        Ok(out) if out.status.success() => {
+        Some(out) => {
             let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
             println!("  {GREEN}✓{RESET} codex CLI         {ver}");
             ok += 1;
         }
-        _ => {
+        None => {
             println!("  {YELLOW}○{RESET} codex CLI         not found (optional — only needed for codex agents)");
             warn += 1;
         }
@@ -314,9 +315,14 @@ async fn run_doctor() -> Result<()> {
         warn += 1;
     }
 
-    // 4. OPENAI_API_KEY (used by codex)
-    if std::env::var("OPENAI_API_KEY").is_ok() {
+    // 4. codex auth: OPENAI_API_KEY or ~/.codex/auth.json OAuth tokens
+    let has_api_key = std::env::var("OPENAI_API_KEY").is_ok();
+    let has_oauth = codex_oauth_credentials_present();
+    if has_api_key {
         println!("  {GREEN}✓{RESET} OPENAI_API_KEY    set");
+        ok += 1;
+    } else if has_oauth {
+        println!("  {GREEN}✓{RESET} codex auth         ~/.codex/auth.json (OAuth)");
         ok += 1;
     } else {
         println!("  {YELLOW}○{RESET} OPENAI_API_KEY    not set (only needed for codex agents)");
@@ -385,6 +391,21 @@ async fn run_doctor() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Returns true if ~/.codex/auth.json exists and contains non-null OAuth tokens,
+/// meaning the Codex desktop app is authenticated without needing OPENAI_API_KEY.
+fn codex_oauth_credentials_present() -> bool {
+    let path = std::env::var_os("HOME")
+        .map(|h| std::path::PathBuf::from(h).join(".codex").join("auth.json"))
+        .filter(|p| p.exists());
+    let Some(path) = path else { return false };
+    let Ok(contents) = std::fs::read_to_string(path) else { return false };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&contents) else { return false };
+    v.get("tokens")
+        .and_then(|t| t.get("access_token"))
+        .map(|t| !t.is_null())
+        .unwrap_or(false)
 }
 
 fn run_logs(agent_filter: Option<String>, lines: usize, follow: bool) -> Result<()> {

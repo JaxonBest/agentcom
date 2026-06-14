@@ -18,11 +18,16 @@ pub fn resolve_claude_exe() -> Result<PathBuf> {
 
 /// Resolve the Codex executable used by the adapter.
 /// `AGENTCOM_CODEX_EXE` overrides the PATH lookup.
+/// On macOS the desktop app bundle is preferred over the PATH codex because
+/// it carries its own OAuth credentials and tends to be more up-to-date.
 pub fn resolve_codex_exe() -> Result<PathBuf> {
     if let Ok(p) = std::env::var("AGENTCOM_CODEX_EXE") {
         return Ok(PathBuf::from(p));
     }
     if let Some(p) = windows_codex_app_exe() {
+        return Ok(p);
+    }
+    if let Some(p) = macos_codex_app_exe() {
         return Ok(p);
     }
     which::which("codex")
@@ -49,6 +54,17 @@ fn windows_codex_app_exe() -> Option<PathBuf> {
 
 #[cfg(not(windows))]
 fn windows_codex_app_exe() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn macos_codex_app_exe() -> Option<PathBuf> {
+    let p = PathBuf::from("/Applications/Codex.app/Contents/Resources/codex");
+    p.exists().then_some(p)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn macos_codex_app_exe() -> Option<PathBuf> {
     None
 }
 
