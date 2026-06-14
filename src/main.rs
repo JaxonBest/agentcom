@@ -1680,7 +1680,6 @@ fn run_snapshot(out_file: Option<std::path::PathBuf>) -> Result<()> {
 }
 
 fn run_restore(snap_file: std::path::PathBuf) -> Result<()> {
-    use std::io::Read;
     let cwd = std::env::current_dir()?;
     let project_root = paths::find_project_root(&cwd)
         .context("no agentcom.toml found — run `agentcom init` first")?;
