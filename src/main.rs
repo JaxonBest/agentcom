@@ -64,6 +64,7 @@ async fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&cfg)?);
             Ok(())
         }
+        Command::Task(cli::TaskCmd::Export) => run_task_export(),
         other => cli::run_client(other).await,
     }
 }
@@ -488,6 +489,47 @@ fn run_budget() -> Result<()> {
     }
     println!("{}", "-".repeat(36));
     println!("{:<14} ${:>9.4}  {:>8}", "TOTAL", total_cost, total_turns);
+    Ok(())
+}
+
+fn run_task_export() -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let project_root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+    let db = paths::db_path(&project_root)?;
+    if !db.exists() {
+        anyhow::bail!("no hub data found — run `agentcom up` first");
+    }
+    let store = store::Store::open(&db)?;
+    let tasks = store.task_list(None, None)?;
+    if tasks.is_empty() {
+        println!("no tasks");
+        return Ok(());
+    }
+    let open: Vec<_> = tasks.iter().filter(|t| t.status == store::TaskStatus::Open).collect();
+    let claimed: Vec<_> = tasks.iter().filter(|t| t.status == store::TaskStatus::Claimed).collect();
+    let done: Vec<_> = tasks.iter().filter(|t| t.status == store::TaskStatus::Done).collect();
+    let blocked: Vec<_> = tasks.iter().filter(|t| t.status == store::TaskStatus::Blocked).collect();
+
+    let print_section = |header: &str, prefix: &str, items: &[&store::Task]| {
+        if items.is_empty() {
+            return;
+        }
+        println!("## {header}");
+        for t in items {
+            let suffix = t.blocked_reason.as_deref()
+                .or(t.note.as_deref())
+                .map(|s| format!(" — {}", s.chars().take(60).collect::<String>()))
+                .unwrap_or_default();
+            println!("{prefix} #{} {}{suffix}", t.id, t.title);
+        }
+        println!();
+    };
+
+    print_section("Open", "- [ ]", &open);
+    print_section("In Progress", "- [~]", &claimed);
+    print_section("Blocked", "- [~]", &blocked);
+    print_section("Done", "- [x]", &done);
     Ok(())
 }
 

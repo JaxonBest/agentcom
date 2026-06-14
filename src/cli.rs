@@ -205,6 +205,18 @@ pub enum TaskCmd {
     Show { id: i64 },
     /// Permanently delete a task (only open/done/blocked — not claimed)
     Remove { id: i64 },
+    /// Delete old done/blocked tasks to keep the board tidy
+    ///
+    /// Examples:
+    ///   agentcom task prune
+    ///   agentcom task prune --before 1d
+    Prune {
+        /// Remove tasks not updated in this long (e.g. 7d, 24h, 90m)
+        #[arg(long, default_value = "7d")]
+        before: String,
+    },
+    /// Dump the task board as a Markdown checklist (no hub needed)
+    Export,
 }
 
 #[derive(Subcommand)]
@@ -348,11 +360,21 @@ pub async fn run_client(command: Command) -> Result<()> {
                 },
                 TaskCmd::Show { id } => Request::TaskGet { id },
                 TaskCmd::Remove { id } => Request::TaskDelete { id },
+                TaskCmd::Prune { before } => {
+                    let before_secs = parse_duration_secs(&before)
+                        .ok_or_else(|| anyhow::anyhow!("invalid duration {:?} — use e.g. 7d, 24h, 90m, 60s", before))?;
+                    Request::TaskPrune { before_secs }
+                }
+                TaskCmd::Export => unreachable!("handled in main"),
             };
             let resp = client.request(&req).await?;
             match resp {
                 Response::Tasks { tasks } => {
                     print_tasks(&tasks);
+                    Ok(())
+                }
+                Response::Pruned { count } => {
+                    println!("pruned {count} task(s)");
                     Ok(())
                 }
                 other => print_simple(other),
@@ -665,5 +687,22 @@ fn print_json(resp: Response) -> Result<()> {
             Ok(())
         }
         other => print_simple(other),
+    }
+}
+
+/// Parse a human duration string like "7d", "24h", "90m", "60s" to seconds.
+/// Plain integers are treated as seconds.
+pub fn parse_duration_secs(s: &str) -> Option<i64> {
+    let s = s.trim();
+    if let Some(n) = s.strip_suffix('d') {
+        n.parse::<i64>().ok().map(|v| v * 86400)
+    } else if let Some(n) = s.strip_suffix('h') {
+        n.parse::<i64>().ok().map(|v| v * 3600)
+    } else if let Some(n) = s.strip_suffix('m') {
+        n.parse::<i64>().ok().map(|v| v * 60)
+    } else if let Some(n) = s.strip_suffix('s') {
+        n.parse::<i64>().ok()
+    } else {
+        s.parse::<i64>().ok()
     }
 }

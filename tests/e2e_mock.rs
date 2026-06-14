@@ -832,3 +832,71 @@ fn logs_command() {
     assert!(ok, "logs --agent filter succeeds: {out}");
     let _ = out;
 }
+
+#[test]
+fn shell_completions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("agentcom.toml"), "project_name = \"test\"\n[[agent]]\nname = \"w\"\nrole = \"worker\"\n").unwrap();
+
+    // bash completions should produce non-empty output without a hub.
+    let (_, stdout, stderr) = cli_split(&project, &["completions", "bash"]);
+    assert!(!stdout.is_empty(), "bash completions non-empty: stderr={stderr}");
+    assert!(stdout.contains("agentcom"), "completions mention the binary: {stdout}");
+
+    // zsh completions also work.
+    let (_, stdout, _) = cli_split(&project, &["completions", "zsh"]);
+    assert!(!stdout.is_empty(), "zsh completions non-empty");
+}
+
+#[test]
+fn budget_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    let scripts = tmp.path().join("scripts");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+
+    write_config(&project, &[("spender", "does work and accrues cost")], "");
+    // Agent completes a task, creating a runs entry with cost.
+    std::fs::write(
+        scripts.join("spender.ndjson"),
+        r#"{"run": ["agentcom task claim 1", "agentcom task done 1 --note spent"], "text": "done", "cost": 0.05}
+"#,
+    )
+    .unwrap();
+
+    let mut hub = start_hub(&project, &scripts, &["cost-tracking task"], &[]);
+    wait_for(
+        &project,
+        &["task", "list", "--status", "done"],
+        Duration::from_secs(20),
+        |out| out.contains("spent"),
+    );
+
+    // Graceful stop so runs are finalized in the DB.
+    let _ = Command::new(agentcom_bin())
+        .args(["stop"])
+        .current_dir(&project)
+        .env_remove("AGENTCOM_PORT")
+        .env_remove("AGENTCOM_TOKEN")
+        .env_remove("AGENTCOM_AGENT")
+        .output();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if matches!(hub.child.try_wait(), Ok(Some(_))) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    // agentcom budget reads the DB without a running hub.
+    let (_, stdout, stderr) = cli_split(&project, &["budget"]);
+    assert!(!stdout.is_empty(), "budget produces output: stderr={stderr}");
+    assert!(stdout.contains("spender"), "budget shows agent name: {stdout}");
+    assert!(
+        stdout.contains("COST") || stdout.contains("$"),
+        "budget shows cost column: {stdout}"
+    );
+}
