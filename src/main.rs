@@ -33,12 +33,14 @@ async fn main() -> Result<()> {
             for_,
             budget,
             usage,
+            finish_tasks,
         } => {
             let free_mode = match (&free, &for_, &usage) {
                 (Some(goal), _, _) => Some(config::FreeMode {
                     goal: goal.clone(),
                     duration: for_.as_deref().map(config::parse_duration).transpose()?,
                     usage_pct: usage,
+                    finish_tasks,
                 }),
                 (None, Some(_), _) | (None, None, Some(_)) => {
                     anyhow::bail!("--for/--usage require --free \"<goal>\"")
@@ -48,7 +50,7 @@ async fn main() -> Result<()> {
             run_up(agents, tasks, headless, free_mode, budget).await
         }
         Command::Agent(cmd) => cli::run_agent_cmd(cmd).await,
-        Command::Doctor => run_doctor(),
+        Command::Doctor => run_doctor().await,
         Command::Logs { agent, lines, follow } => run_logs(agent, lines, follow),
         Command::Completions { shell } => {
             use clap::CommandFactory;
@@ -62,6 +64,13 @@ async fn main() -> Result<()> {
                 .context("no agentcom.toml found — run `agentcom init` first")?;
             let cfg = config::HubConfig::load(&project_root)?;
             println!("{}", serde_json::to_string_pretty(&cfg)?);
+            Ok(())
+        }
+        Command::Version => {
+            println!("agentcom {}", env!("CARGO_PKG_VERSION"));
+            println!("git commit:  {}", env!("GIT_HASH"));
+            println!("build time:  {}", env!("BUILD_TIME"));
+            println!("rustc:       {}", env!("RUSTC_VERSION"));
             Ok(())
         }
         Command::Task(cli::TaskCmd::Export { format }) => run_task_export(&format),
@@ -246,7 +255,7 @@ fn stage_runtime_binaries(exe: &std::path::Path, stable_dir: &std::path::Path) -
     Ok(())
 }
 
-fn run_doctor() -> Result<()> {
+async fn run_doctor() -> Result<()> {
     const GREEN: &str = "\x1b[32m";
     const YELLOW: &str = "\x1b[33m";
     const RED: &str = "\x1b[31m";
@@ -329,6 +338,30 @@ fn run_doctor() -> Result<()> {
                         toml_path.display()
                     );
                     errors += 1;
+                }
+            }
+
+            // 6. hub.json — detect running or stale hub
+            if let Ok(hub_json_path) = paths::hub_json_path(&root) {
+                if hub_json_path.exists() {
+                    if let Ok(info) = ipc::client::read_hub_json(&hub_json_path) {
+                        match ipc::client::Client::connect_to(
+                            info.port,
+                            &info.token,
+                            "human",
+                        ).await {
+                            Ok(_) => {
+                                println!("  {GREEN}✓{RESET} hub               running (pid {})", info.pid);
+                                ok += 1;
+                            }
+                            Err(_) => {
+                                println!(
+                                    "  {YELLOW}!{RESET} hub               stale hub.json found (hub crashed or was killed) — run `agentcom stop` to clean it up"
+                                );
+                                warn += 1;
+                            }
+                        }
+                    }
                 }
             }
         }

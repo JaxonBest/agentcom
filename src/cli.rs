@@ -65,6 +65,10 @@ pub enum Command {
         /// Stop when the 5-hour usage limit reaches this percent (0-100)
         #[arg(long, value_name = "PERCENT")]
         usage: Option<f64>,
+        /// In free mode, let agents finish their current task before stopping
+        /// (instead of killing them immediately when the time/usage limit fires)
+        #[arg(long)]
+        finish_tasks: bool,
     },
     /// Show hub and agent status
     Status,
@@ -137,6 +141,8 @@ pub enum Command {
     },
     /// Show per-agent spend and turn counts from the local DB (no hub needed)
     Budget,
+    /// Print version and build metadata (git commit, build time, rustc version)
+    Version,
     /// Read the loaded agentcom.toml config
     #[command(subcommand)]
     Config(ConfigCmd),
@@ -283,6 +289,14 @@ pub enum AgentCmd {
     },
     /// List configured agents (with live state if the hub is running)
     List,
+    /// Remove an agent from config (and stop it in the hub if running)
+    Remove {
+        /// Agent name to remove
+        name: String,
+        /// Update config only; don't stop the agent in a running hub
+        #[arg(long)]
+        no_stop: bool,
+    },
 }
 
 #[derive(Args, Clone)]
@@ -450,6 +464,7 @@ pub async fn run_client(command: Command) -> Result<()> {
         | Command::Logs { .. }
         | Command::Completions { .. }
         | Command::Budget
+        | Command::Version
         | Command::Config(_) => {
             unreachable!("handled in main")
         }
@@ -542,6 +557,29 @@ pub async fn run_agent_cmd(cmd: AgentCmd) -> Result<()> {
             for (name, r) in &live {
                 if cfg.agent(name).is_none() {
                     println!("{:<14} {} (hub only)", name, r.state);
+                }
+            }
+            Ok(())
+        }
+        AgentCmd::Remove { name, no_stop } => {
+            crate::config::remove_agent(&project_root, &name)?;
+            println!("removed {name:?} from agentcom.toml");
+            if !no_stop {
+                if let Ok(mut client) = Client::connect().await {
+                    let resp = client
+                        .request(&Request::Stop {
+                            agent: Some(name.clone()),
+                        })
+                        .await?;
+                    match resp {
+                        Response::Ok { message } => {
+                            println!("{}", message.unwrap_or_else(|| format!("{name} stopped")));
+                        }
+                        Response::Err { message } => {
+                            eprintln!("hub: {message}");
+                        }
+                        _ => {}
+                    }
                 }
             }
             Ok(())

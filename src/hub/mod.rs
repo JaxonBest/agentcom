@@ -456,6 +456,16 @@ impl Hub {
             return;
         }
         if self.shutting_down || rt.state == AgentState::Stopped {
+            // During a graceful shutdown (finish_tasks=true), a working agent
+            // that finishes its current turn is moved to Stopped so the hub
+            // can eventually exit. Idle agents were already stopped by
+            // begin_graceful_shutdown; working ones reach here naturally.
+            if self.shutting_down && rt.is_running() {
+                rt.state = AgentState::Stopped;
+                rt.state_detail = None;
+                self.emit_state(agent);
+                self.log(format!("{agent}: finished task, shutting down"));
+            }
             return;
         }
 
@@ -608,7 +618,11 @@ impl Hub {
                     "free mode: time limit ({}m) reached — shutting down",
                     limit.as_secs() / 60
                 ));
-                self.begin_shutdown();
+                if free.finish_tasks {
+                    self.begin_graceful_shutdown();
+                } else {
+                    self.begin_shutdown();
+                }
                 return;
             }
         }
@@ -617,7 +631,11 @@ impl Hub {
                 self.log(format!(
                     "free mode: 5h usage limit at {observed:.0}% (threshold {threshold:.0}%) — shutting down"
                 ));
-                self.begin_shutdown();
+                if free.finish_tasks {
+                    self.begin_graceful_shutdown();
+                } else {
+                    self.begin_shutdown();
+                }
                 return;
             }
         }
@@ -1001,6 +1019,23 @@ impl Hub {
         let names: Vec<String> = self.agents.keys().cloned().collect();
         for name in names {
             if self.agents[&name].is_running() {
+                self.stop_agent(&name);
+            }
+        }
+    }
+
+    /// Graceful shutdown: set `shutting_down` but only stop idle agents.
+    /// Working agents are allowed to finish their current turn; they will
+    /// be stopped automatically in `handle_turn_end` when they next complete.
+    fn begin_graceful_shutdown(&mut self) {
+        if self.shutting_down {
+            return;
+        }
+        self.shutting_down = true;
+        self.log("free mode: stopping idle agents, letting working agents finish their current task".to_string());
+        let names: Vec<String> = self.agents.keys().cloned().collect();
+        for name in names {
+            if self.agents[&name].state == AgentState::Idle && self.agents[&name].is_running() {
                 self.stop_agent(&name);
             }
         }

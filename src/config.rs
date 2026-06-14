@@ -90,6 +90,10 @@ pub struct FreeMode {
     pub duration: Option<std::time::Duration>,
     /// Stop when the 5-hour usage limit reaches this percentage (0-100).
     pub usage_pct: Option<f64>,
+    /// If true, let running agents finish their current task before stopping
+    /// (instead of killing them immediately). Idle agents are still stopped
+    /// right away since they have no work in progress.
+    pub finish_tasks: bool,
 }
 
 /// Parse "2h", "90m", "1h30m", "45s", or plain seconds ("3600").
@@ -402,6 +406,21 @@ pub fn render_with_agent(project_root: &Path, agent: &AgentConfig) -> Result<(Pa
     let combined: HubConfig = toml::from_str(&text).context("config invalid after adding agent")?;
     combined.validate()?;
     Ok((path, text))
+}
+
+/// Remove a named agent from agentcom.toml and re-write it. Comments in the
+/// original file are lost (toml round-trip); all data is preserved.
+pub fn remove_agent(project_root: &Path, name: &str) -> Result<()> {
+    let path = project_root.join(crate::paths::CONFIG_FILE);
+    let mut cfg = HubConfig::load(project_root)?;
+    let before = cfg.agents.len();
+    cfg.agents.retain(|a| a.name != name);
+    if cfg.agents.len() == before {
+        bail!("agent {name:?} not found in agentcom.toml");
+    }
+    cfg.validate()?;
+    std::fs::write(&path, toml::to_string_pretty(&cfg)?)?;
+    Ok(())
 }
 
 pub fn write_example_template(
