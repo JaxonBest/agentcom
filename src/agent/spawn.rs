@@ -210,10 +210,10 @@ pub fn spawn_agent(spec: &SpawnSpec) -> Result<Child> {
     }
 
     cmd.current_dir(&cwd)
+        .envs(&spec.agent_cfg.env) // user env first so hub vars below always win
         .env("AGENTCOM_PORT", spec.ipc_port.to_string())
         .env("AGENTCOM_TOKEN", spec.ipc_token)
         .env("AGENTCOM_AGENT", &spec.agent_cfg.name)
-        .envs(&spec.agent_cfg.env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -270,10 +270,10 @@ fn spawn_codex_agent(spec: &SpawnSpec, cwd: &Path) -> Result<Child> {
     }
 
     cmd.current_dir(cwd)
+        .envs(&spec.agent_cfg.env) // user env first so hub vars below always win
         .env("AGENTCOM_PORT", spec.ipc_port.to_string())
         .env("AGENTCOM_TOKEN", spec.ipc_token)
         .env("AGENTCOM_AGENT", &spec.agent_cfg.name)
-        .envs(&spec.agent_cfg.env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -335,10 +335,10 @@ fn spawn_deepseek_agent(spec: &SpawnSpec, cwd: &Path) -> Result<Child> {
     }
 
     cmd.current_dir(cwd)
+        .envs(&spec.agent_cfg.env) // user env first so hub vars below always win
         .env("AGENTCOM_PORT", spec.ipc_port.to_string())
         .env("AGENTCOM_TOKEN", spec.ipc_token)
         .env("AGENTCOM_AGENT", &spec.agent_cfg.name)
-        .envs(&spec.agent_cfg.env)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
