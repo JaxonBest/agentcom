@@ -129,6 +129,28 @@ impl std::fmt::Display for AgentProvider {
     }
 }
 
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            role: String::new(),
+            cwd: None,
+            provider: None,
+            model: None,
+            allowed_tools: None,
+            permission_mode: default_permission_mode(),
+            max_turns_per_prompt: None,
+            max_budget_usd: None,
+            auto_restart: true,
+            auto_commit_author_name: None,
+            auto_commit_author_email: None,
+            auto_commit: None,
+            max_rpm: None,
+            env: BTreeMap::new(),
+        }
+    }
+}
+
 pub const COMPOSER_NAME: &str = "composer";
 
 /// Free mode: a standing goal the fleet keeps working toward until a
@@ -189,19 +211,11 @@ pub fn composer_default(default_model: Option<&str>) -> AgentConfig {
                recruit and direct worker agents, prevent conflicting edits, and report progress. \
                You never edit code yourself."
             .to_string(),
-        cwd: None,
-        provider: None,
         model: default_model.map(str::to_string),
         allowed_tools: Some(["Bash", "Read", "Glob", "Grep"].map(String::from).to_vec()),
         permission_mode: "acceptEdits".to_string(),
         max_turns_per_prompt: Some(30),
-        max_budget_usd: None,
-        auto_restart: true,
-        auto_commit_author_name: None,
-        auto_commit_author_email: None,
-        auto_commit: None,
-        max_rpm: None,
-        env: BTreeMap::new(),
+        ..Default::default()
     }
 }
 
@@ -828,9 +842,11 @@ mod config_set_tests {
         assert!(infer_toml_value("42").as_integer() == Some(42));
         assert!(infer_toml_value("-1").as_integer() == Some(-1));
 
-        // Floats
+        // Floats — use a value that isn't an approximation of a named constant
         let f = infer_toml_value("3.14");
-        assert!((f.as_float().unwrap() - 3.14).abs() < 1e-10);
+        #[allow(clippy::approx_constant)]
+        let expected = 3.14_f64;
+        assert!((f.as_float().unwrap() - expected).abs() < 1e-10);
 
         // Strings
         assert!(infer_toml_value("hello").as_str() == Some("hello"));
