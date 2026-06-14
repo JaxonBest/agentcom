@@ -212,8 +212,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
             .file_claims
             .iter()
             .map(|c| {
-                let path = c.path.trim_start_matches("src/");
-                let label = format!(" {path}");
+                let label = format!(" {}", c.path);
                 ListItem::new(Line::from(vec![
                     Span::styled(label, Style::default().fg(Color::Yellow)),
                     Span::styled(
