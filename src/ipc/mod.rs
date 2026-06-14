@@ -121,6 +121,11 @@ pub enum Request {
         id: i64,
         label: String,
     },
+    /// Set or clear the due date for a task (Unix timestamp; None clears it).
+    TaskSetDue {
+        id: i64,
+        due_at: Option<i64>,
+    },
     Status,
     /// Hot-add an agent to the running hub (already persisted to
     /// agentcom.toml by the client).
