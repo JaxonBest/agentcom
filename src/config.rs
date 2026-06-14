@@ -386,6 +386,16 @@ impl HubConfig {
                 );
             }
         }
+        if let Some(url) = &self.webhook_url {
+            let is_local = url.starts_with("http://localhost")
+                || url.starts_with("http://127.0.0.1")
+                || url.starts_with("http://[::1]");
+            if !url.starts_with("https://") && !is_local {
+                bail!(
+                    "webhook_url must use HTTPS to protect the webhook secret (got: {url:?})"
+                );
+            }
+        }
         let mut seen = std::collections::HashSet::new();
         for a in &self.agents {
             validate_agent_name(&a.name)?;
@@ -1311,6 +1321,49 @@ role = "builder"
 "#
         );
         let cfg: HubConfig = toml::from_str(&text).unwrap();
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn webhook_url_http_fails_validation() {
+        let text = r#"
+project_name = "test"
+webhook_url = "http://example.com/hook"
+[[agent]]
+name = "builder"
+role = "builder"
+"#;
+        let cfg: HubConfig = toml::from_str(text).unwrap();
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("webhook_url must use HTTPS"),
+            "expected HTTPS error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn webhook_url_https_passes_validation() {
+        let text = r#"
+project_name = "test"
+webhook_url = "https://hooks.example.com/events"
+[[agent]]
+name = "builder"
+role = "builder"
+"#;
+        let cfg: HubConfig = toml::from_str(text).unwrap();
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn webhook_url_localhost_http_passes_validation() {
+        let text = r#"
+project_name = "test"
+webhook_url = "http://localhost:8080/hook"
+[[agent]]
+name = "builder"
+role = "builder"
+"#;
+        let cfg: HubConfig = toml::from_str(text).unwrap();
         cfg.validate().unwrap();
     }
 }

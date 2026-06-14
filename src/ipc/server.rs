@@ -97,7 +97,7 @@ impl IpcServer {
     pub async fn run(self) {
         loop {
             match self.listener.accept().await {
-                Ok((stream, _addr)) => {
+                Ok((stream, addr)) => {
                     let count = self.conn_count.fetch_add(1, Ordering::Relaxed) + 1;
                     if count > MAX_CONNECTIONS {
                         self.conn_count.fetch_sub(1, Ordering::Relaxed);
@@ -115,7 +115,7 @@ impl IpcServer {
                     let conn_count = self.conn_count.clone();
                     tokio::spawn(async move {
                         if let Err(e) =
-                            handle_conn(stream, token, hub_tx, buffers, ui_rx).await
+                            handle_conn(stream, addr, token, hub_tx, buffers, ui_rx).await
                         {
                             tracing::debug!(error = %e, "ipc connection ended with error");
                         }
@@ -161,6 +161,7 @@ async fn read_line_bounded(
 
 async fn handle_conn(
     stream: TcpStream,
+    peer: std::net::SocketAddr,
     token: String,
     hub_tx: mpsc::Sender<IpcMsg>,
     buffers: Buffers,
@@ -173,11 +174,13 @@ async fn handle_conn(
     let identity = match read_line_bounded(&mut lines).await? {
         Some(line) => match serde_json::from_str::<Request>(&line) {
             Ok(Request::Hello { token: t, identity }) if ct_eq(&t, &token) => identity,
-            Ok(Request::Hello { .. }) => {
+            Ok(Request::Hello { identity, .. }) => {
+                tracing::warn!(peer = %peer, identity = %identity, "ipc: rejected connection with invalid token");
                 write_frame(&mut write_half, &Response::err("invalid token")).await?;
                 return Ok(());
             }
             _ => {
+                tracing::warn!(peer = %peer, "ipc: rejected connection — expected Hello frame");
                 write_frame(&mut write_half, &Response::err("expected hello frame")).await?;
                 return Ok(());
             }
