@@ -122,7 +122,12 @@ async fn main() -> Result<()> {
         Command::Task(cli::TaskCmd::Export { format, output }) => run_task_export(&format, output.as_deref()),
         Command::Task(cli::TaskCmd::Import { file }) => run_task_import(&file),
         Command::Task(cli::TaskCmd::Stats { json }) => run_task_stats(json),
-        Command::Task(cli::TaskCmd::Watch { no_color }) => run_task_watch(no_color),
+        Command::Task(cli::TaskCmd::Watch { id: Some(task_id), interval, .. }) => {
+            run_task_watch_single(task_id, interval.unwrap_or(5))
+        }
+        Command::Task(cli::TaskCmd::Watch { id: None, no_color, interval }) => {
+            run_task_watch_board(no_color, interval.unwrap_or(2))
+        }
         Command::Task(cli::TaskCmd::Trace { id }) => run_task_trace(id),
         Command::Task(cli::TaskCmd::Deps { id }) => run_task_deps(id),
         Command::Task(cli::TaskCmd::Graph) => run_task_graph(),
@@ -130,6 +135,7 @@ async fn main() -> Result<()> {
         Command::Task(cli::TaskCmd::Add { title, description, priority, depends_on, timeout, requires, nl: true }) => {
             run_task_add_nl(title, description, priority, depends_on, timeout, requires).await
         }
+        Command::Metrics { agent, json } => run_metrics(agent, json),
         Command::Audit { event, agent, since, count, json } => run_audit(event, agent, since, count, json),
         other => cli::run_client(other).await,
     }
@@ -1216,7 +1222,7 @@ fn run_task_stats(json: bool) -> Result<()> {
     Ok(())
 }
 
-fn run_task_watch(no_color: bool) -> Result<()> {
+fn run_task_watch_board(no_color: bool, interval: u64) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let project_root = paths::find_project_root(&cwd)
         .context("no agentcom.toml found — run `agentcom init` first")?;
@@ -1226,7 +1232,6 @@ fn run_task_watch(no_color: bool) -> Result<()> {
     }
     let store = store::Store::open(&db)?;
 
-    // Set up Ctrl-C handler
     let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
     let r = running.clone();
     ctrlc::set_handler(move || {
@@ -1234,19 +1239,13 @@ fn run_task_watch(no_color: bool) -> Result<()> {
     })
     .map_err(|e| anyhow::anyhow!("failed to set Ctrl-C handler: {e}"))?;
 
-    // Determine clear sequence
-    let clear = if no_color {
-        "\n"
-    } else {
-        "\x1b[2J\x1b[H" // ANSI clear screen + cursor home
-    };
+    let clear = if no_color { "\n" } else { "\x1b[2J\x1b[H" };
 
     while running.load(std::sync::atomic::Ordering::SeqCst) {
         print!("{clear}");
         match store.task_list(None, None) {
             Ok(tasks) => {
                 if no_color {
-                    // Simple text output without ANSI
                     let open = tasks.iter().filter(|t| t.status == store::TaskStatus::Open).count();
                     let claimed = tasks.iter().filter(|t| t.status == store::TaskStatus::Claimed).count();
                     let done = tasks.iter().filter(|t| t.status == store::TaskStatus::Done).count();
@@ -1272,19 +1271,178 @@ fn run_task_watch(no_color: bool) -> Result<()> {
                     cli::print_tasks(&tasks);
                 }
             }
-            Err(e) => {
-                eprintln!("error reading tasks: {e}");
-            }
+            Err(e) => eprintln!("error reading tasks: {e}"),
         }
         if !running.load(std::sync::atomic::Ordering::SeqCst) {
             break;
         }
-        // Use 1-second sleeps with atomic check to ensure responsive Ctrl-C
-        for _ in 0..2 {
+        for _ in 0..interval {
             std::thread::sleep(std::time::Duration::from_millis(1000));
             if !running.load(std::sync::atomic::Ordering::SeqCst) {
                 break;
             }
+        }
+    }
+    Ok(())
+}
+
+fn run_task_watch_single(task_id: i64, interval: u64) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let project_root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+    let db = paths::db_path(&project_root)?;
+    if !db.exists() {
+        anyhow::bail!("no hub data found — run `agentcom up` first");
+    }
+    let store = store::Store::open(&db)?;
+
+    let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let r = running.clone();
+    ctrlc::set_handler(move || {
+        r.store(false, std::sync::atomic::Ordering::SeqCst);
+    })
+    .map_err(|e| anyhow::anyhow!("failed to set Ctrl-C handler: {e}"))?;
+
+    let mut last_status = String::new();
+    println!("watching task #{task_id} (Ctrl-C to stop)");
+
+    while running.load(std::sync::atomic::Ordering::SeqCst) {
+        match store.task_get(task_id) {
+            Ok(Some(task)) => {
+                let status = task.status.as_str().to_string();
+                if status != last_status {
+                    let who = task.claimed_by.as_deref().map(|w| format!(" @{w}")).unwrap_or_default();
+                    let extra = match task.status {
+                        store::TaskStatus::Blocked => task.blocked_reason.as_deref().map(|r| format!(" — {r}")).unwrap_or_default(),
+                        store::TaskStatus::Done => task.note.as_deref().map(|n| format!(" — {n}")).unwrap_or_default(),
+                        _ => String::new(),
+                    };
+                    println!("[{}] #{} {} — {}{}{extra}", fmt_unix_ts(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64), task.id, status, task.title, who);
+                    last_status = status.clone();
+                    if matches!(task.status, store::TaskStatus::Done | store::TaskStatus::Blocked) {
+                        break;
+                    }
+                }
+            }
+            Ok(None) => {
+                eprintln!("task #{task_id} not found");
+                break;
+            }
+            Err(e) => eprintln!("error: {e}"),
+        }
+        for _ in 0..interval {
+            std::thread::sleep(std::time::Duration::from_millis(1000));
+            if !running.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_metrics(agent_filter: Option<String>, json_out: bool) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let project_root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+    let db = paths::db_path(&project_root)?;
+    if !db.exists() {
+        anyhow::bail!("no hub data found — run `agentcom up` first");
+    }
+    let conn = rusqlite::Connection::open(&db)?;
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
+    let hour_ago = now_secs - 3600;
+
+    let sql = "SELECT agent, started_at, ended_at, cost_usd FROM runs WHERE ended_at IS NOT NULL ORDER BY agent, started_at";
+    let mut stmt = conn.prepare(sql)?;
+    struct Row { agent: String, dur_secs: f64, cost: f64, started_at: i64 }
+    let mut rows: Vec<Row> = Vec::new();
+    {
+        let iter = stmt.query_map([], |row| {
+            let agent: String = row.get(0)?;
+            let started: i64 = row.get(1)?;
+            let ended: i64 = row.get(2)?;
+            let cost: f64 = row.get::<_, Option<f64>>(3)?.unwrap_or(0.0);
+            Ok((agent, started, ended, cost))
+        })?;
+        for item in iter {
+            let (agent, started, ended, cost) = item?;
+            rows.push(Row { agent, dur_secs: (ended - started).max(0) as f64, cost, started_at: started });
+        }
+    }
+
+    // Group by agent
+    let mut agents: Vec<String> = rows.iter().map(|r| r.agent.clone()).collect();
+    agents.sort();
+    agents.dedup();
+
+    if let Some(ref f) = agent_filter {
+        agents.retain(|a| a == f);
+        if agents.is_empty() {
+            anyhow::bail!("no runs found for agent '{f}'");
+        }
+    }
+
+    struct AgentStats {
+        name: String,
+        total_turns: usize,
+        avg_dur: f64,
+        min_dur: f64,
+        max_dur: f64,
+        avg_cost: f64,
+        turns_last_hour: usize,
+        cost_per_hour: f64,
+    }
+
+    let mut stats: Vec<AgentStats> = Vec::new();
+    for agent in &agents {
+        let agent_rows: Vec<&Row> = rows.iter().filter(|r| &r.agent == agent).collect();
+        if agent_rows.is_empty() { continue; }
+        let total_turns = agent_rows.len();
+        let avg_dur = agent_rows.iter().map(|r| r.dur_secs).sum::<f64>() / total_turns as f64;
+        let min_dur = agent_rows.iter().map(|r| r.dur_secs).fold(f64::INFINITY, f64::min);
+        let max_dur = agent_rows.iter().map(|r| r.dur_secs).fold(0.0_f64, f64::max);
+        let total_cost: f64 = agent_rows.iter().map(|r| r.cost).sum();
+        let avg_cost = total_cost / total_turns as f64;
+        let turns_last_hour = agent_rows.iter().filter(|r| r.started_at >= hour_ago).count();
+        let cost_last_hour: f64 = agent_rows.iter().filter(|r| r.started_at >= hour_ago).map(|r| r.cost).sum();
+        stats.push(AgentStats {
+            name: agent.clone(),
+            total_turns,
+            avg_dur,
+            min_dur,
+            max_dur,
+            avg_cost,
+            turns_last_hour,
+            cost_per_hour: cost_last_hour,
+        });
+    }
+
+    if stats.is_empty() {
+        println!("no completed runs found");
+        return Ok(());
+    }
+
+    if json_out {
+        println!("[");
+        for (i, s) in stats.iter().enumerate() {
+            let comma = if i + 1 < stats.len() { "," } else { "" };
+            println!(
+                r#"  {{"agent":"{}", "total_turns":{}, "avg_dur_secs":{:.1}, "min_dur_secs":{:.1}, "max_dur_secs":{:.1}, "avg_cost_usd":{:.6}, "turns_last_hour":{}, "cost_per_hour_usd":{:.6}}}{comma}"#,
+                s.name, s.total_turns, s.avg_dur, s.min_dur, s.max_dur, s.avg_cost, s.turns_last_hour, s.cost_per_hour
+            );
+        }
+        println!("]");
+    } else {
+        println!("{:<24} {:>6} {:>8} {:>8} {:>8} {:>10} {:>8} {:>10}",
+            "agent", "turns", "avg(s)", "min(s)", "max(s)", "avg$/turn", "last-hr", "$/hr");
+        println!("{}", "-".repeat(90));
+        for s in &stats {
+            println!("{:<24} {:>6} {:>8.1} {:>8.1} {:>8.1} {:>10.6} {:>8} {:>10.6}",
+                s.name, s.total_turns, s.avg_dur, s.min_dur, s.max_dur, s.avg_cost, s.turns_last_hour, s.cost_per_hour);
         }
     }
     Ok(())

@@ -197,6 +197,19 @@ pub enum Command {
     /// Read the loaded agentcom.toml config
     #[command(subcommand)]
     Config(ConfigCmd),
+    /// Per-agent performance metrics: turn duration, cost/turn, hourly burn rate
+    ///
+    /// Examples:
+    ///   agentcom metrics
+    ///   agentcom metrics builder
+    ///   agentcom metrics --json
+    Metrics {
+        /// Show only this agent (default: all agents)
+        agent: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Browse the security audit log offline (no hub needed)
     ///
     /// Examples:
@@ -356,12 +369,18 @@ pub enum TaskCmd {
         #[arg(long)]
         json: bool,
     },
-    /// Watch the task board live (polls DB every 2s, Ctrl-C to exit)
+    /// Watch the task board live, or poll a single task until done (Ctrl-C to exit)
     ///
     /// Examples:
-    ///   agentcom task watch
-    ///   agentcom task watch --no-color
+    ///   agentcom task watch            (full board, refreshes every 2s)
+    ///   agentcom task watch 42         (single task, polls every 5s)
+    ///   agentcom task watch 42 --interval 2
     Watch {
+        /// Watch only this task id (omit for full board)
+        id: Option<i64>,
+        /// Poll interval in seconds (default: 2 for board, 5 for single task)
+        #[arg(long, short = 'i')]
+        interval: Option<u64>,
         /// Disable ANSI color in output
         #[arg(long)]
         no_color: bool,
@@ -766,6 +785,7 @@ pub async fn run_client(command: Command) -> Result<()> {
         | Command::Messages { .. }
         | Command::Replay { .. }
         | Command::Audit { .. }
+        | Command::Metrics { .. }
         | Command::Version
         | Command::Config(_) => {
             unreachable!("handled in main")
