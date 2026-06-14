@@ -322,6 +322,16 @@ impl Store {
         Ok(self.task_get(id)?.expect("just assigned"))
     }
 
+    /// Clone a task: copy title, description, and priority into a new open task.
+    /// The clone has no claimed_by, no note, and no dependencies.
+    pub fn task_clone(&self, id: i64, created_by: &str) -> Result<Task> {
+        let src = self
+            .task_get(id)?
+            .ok_or_else(|| anyhow::anyhow!("task #{id} does not exist"))?;
+        let new_id = self.task_add(&src.title, &src.description, src.priority, &[], created_by)?;
+        Ok(self.task_get(new_id)?.expect("just created"))
+    }
+
     pub fn task_done(&self, id: i64, agent: &str, note: Option<&str>) -> Result<Task> {
         let conn = self.conn.lock().unwrap();
         let updated = conn.execute(
