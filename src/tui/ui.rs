@@ -519,6 +519,9 @@ fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
         .tasks
         .iter()
         .filter(|t| {
+            if app.hide_done_tasks && t.status == TaskStatus::Done {
+                return false;
+            }
             if filter.is_empty() {
                 return true;
             }
@@ -583,12 +586,24 @@ fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
             .style(Style::default().add_modifier(Modifier::BOLD)),
     )
     .block(Block::default().borders(Borders::ALL).title({
-        if filter.is_empty() {
-            format!(" task board ({}) ", app.tasks.len())
+        let open = app.tasks.iter().filter(|t| t.status == TaskStatus::Open).count();
+        let claimed = app.tasks.iter().filter(|t| t.status == TaskStatus::Claimed).count();
+        let done = app.tasks.iter().filter(|t| t.status == TaskStatus::Done).count();
+        let blocked = app.tasks.iter().filter(|t| t.status == TaskStatus::Blocked).count();
+        let counts = format!("open:{open} wip:{claimed} done:{done} blocked:{blocked}");
+        if filter.is_empty() && !app.hide_done_tasks {
+            format!(" tasks — {counts} ")
         } else {
+            let mut extras = Vec::new();
+            if !filter.is_empty() {
+                extras.push(format!("filter:\"{}\"", app.task_filter));
+            }
+            if app.hide_done_tasks {
+                extras.push("-done".into());
+            }
             format!(
-                " task board — filter: \"{}\" ({}/{}) ",
-                app.task_filter,
+                " tasks — {counts} | {} ({}/{}) ",
+                extras.join(" "),
                 visible.len(),
                 app.tasks.len()
             )
@@ -682,6 +697,7 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
         ("m",          "message agent",       "u",           "interrupt agent"),
         ("M",          "broadcast all",       "a",           "add task"),
         ("/",          "filter tasks",        "F",           "clear task filter"),
+        ("d",          "toggle done tasks",   "",            ""),
         ("p",          "pause/resume agent",  "s",           "stop agent"),
         ("PgUp/PgDn",  "scroll output",       "End",         "follow live"),
         ("Enter",      "send chat message",   "?",           "toggle this help"),

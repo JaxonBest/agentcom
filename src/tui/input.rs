@@ -104,6 +104,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
             app.task_filter.clear();
             app.flash = Some("filter cleared".into());
         }
+        KeyCode::Char('d') => {
+            app.hide_done_tasks = !app.hide_done_tasks;
+            app.flash = Some(if app.hide_done_tasks {
+                "hiding done tasks".into()
+            } else {
+                "showing all tasks".into()
+            });
+        }
         KeyCode::Char('p') => {
             if let Some(name) = app.selected_agent().map(str::to_string) {
                 let paused = app
