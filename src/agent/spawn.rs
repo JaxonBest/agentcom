@@ -133,17 +133,21 @@ pub struct SpawnSpec<'a> {
     pub cargo_target_dir: Option<&'a Path>,
 }
 
-pub fn spawn_agent(spec: &SpawnSpec) -> Result<Child> {
+/// Spawn an agent process. Returns the child process and, for Codex/Deepseek
+/// agents, the path to the temp system-prompt file (caller must delete on exit).
+pub fn spawn_agent(spec: &SpawnSpec) -> Result<(Child, Option<std::path::PathBuf>)> {
     let cwd = spec.hub_cfg.agent_cwd(spec.agent_cfg, spec.project_root);
     std::fs::create_dir_all(&cwd)
         .with_context(|| format!("creating agent cwd {}", cwd.display()))?;
 
     let provider = spec.hub_cfg.agent_provider(spec.agent_cfg);
     if provider == AgentProvider::Codex {
-        return spawn_codex_agent(spec, &cwd);
+        let (child, path) = spawn_codex_agent(spec, &cwd)?;
+        return Ok((child, Some(path)));
     }
     if provider == AgentProvider::Deepseek {
-        return spawn_deepseek_agent(spec, &cwd);
+        let (child, path) = spawn_deepseek_agent(spec, &cwd)?;
+        return Ok((child, Some(path)));
     }
 
     // .cmd/.bat shims can't be CreateProcess'd directly on Windows.
@@ -239,11 +243,13 @@ pub fn spawn_agent(spec: &SpawnSpec) -> Result<Child> {
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
     }
 
-    cmd.spawn()
-        .with_context(|| format!("spawning claude for agent {:?}", spec.agent_cfg.name))
+    let child = cmd.spawn()
+        .with_context(|| format!("spawning claude for agent {:?}", spec.agent_cfg.name))?;
+    Ok((child, None))
 }
 
-fn spawn_codex_agent(spec: &SpawnSpec, cwd: &Path) -> Result<Child> {
+fn spawn_codex_agent(spec: &SpawnSpec, cwd: &Path) -> Result<(Child, std::path::PathBuf)> {
+    let prompt_path = write_temp_prompt(&spec.agent_cfg.name, spec.system_prompt_append)?;
     let mut cmd = Command::new(spec.codex_adapter_exe);
     cmd.arg("--codex-exe")
         .arg(spec.codex_exe)
@@ -252,10 +258,7 @@ fn spawn_codex_agent(spec: &SpawnSpec, cwd: &Path) -> Result<Child> {
         .arg("--session-id")
         .arg(spec.session_id)
         .arg("--system-prompt-file")
-        .arg(write_temp_prompt(
-            &spec.agent_cfg.name,
-            spec.system_prompt_append,
-        )?);
+        .arg(&prompt_path);
 
     if let Some(model) = spec
         .agent_cfg
@@ -295,21 +298,21 @@ fn spawn_codex_agent(spec: &SpawnSpec, cwd: &Path) -> Result<Child> {
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
     }
 
-    cmd.spawn()
-        .with_context(|| format!("spawning codex adapter for agent {:?}", spec.agent_cfg.name))
+    let child = cmd
+        .spawn()
+        .with_context(|| format!("spawning codex adapter for agent {:?}", spec.agent_cfg.name))?;
+    Ok((child, prompt_path))
 }
 
-fn spawn_deepseek_agent(spec: &SpawnSpec, cwd: &Path) -> Result<Child> {
+fn spawn_deepseek_agent(spec: &SpawnSpec, cwd: &Path) -> Result<(Child, std::path::PathBuf)> {
+    let prompt_path = write_temp_prompt(&spec.agent_cfg.name, spec.system_prompt_append)?;
     let mut cmd = Command::new(spec.deepseek_adapter_exe);
     cmd.arg("--cwd")
         .arg(cwd)
         .arg("--session-id")
         .arg(spec.session_id)
         .arg("--system-prompt-file")
-        .arg(write_temp_prompt(
-            &spec.agent_cfg.name,
-            spec.system_prompt_append,
-        )?);
+        .arg(&prompt_path);
 
     if let Some(model) = spec
         .agent_cfg
@@ -360,12 +363,13 @@ fn spawn_deepseek_agent(spec: &SpawnSpec, cwd: &Path) -> Result<Child> {
         cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
     }
 
-    cmd.spawn().with_context(|| {
+    let child = cmd.spawn().with_context(|| {
         format!(
             "spawning deepseek adapter for agent {:?}",
             spec.agent_cfg.name
         )
-    })
+    })?;
+    Ok((child, prompt_path))
 }
 
 /// Point an agent's `cargo` at an isolated target dir so building/testing the

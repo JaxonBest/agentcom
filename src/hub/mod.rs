@@ -36,6 +36,8 @@ pub struct Hub {
     codex_adapter_exe: PathBuf,
     deepseek_adapter_exe: PathBuf,
     agents: HashMap<String, AgentRuntime>,
+    /// Temp system-prompt files created for Codex/Deepseek agents — deleted on exit.
+    temp_prompt_paths: HashMap<String, std::path::PathBuf>,
     /// Cumulative cost/turn baselines: `total_cost_usd` in result events is
     /// cumulative per session, so per-agent totals are base + latest.
     session_base: HashMap<String, (f64, u64)>,
@@ -158,6 +160,7 @@ impl Hub {
             codex_adapter_exe,
             deepseek_adapter_exe,
             agents,
+            temp_prompt_paths: HashMap::new(),
             session_base: HashMap::new(),
             buffers,
             bus_tx,
@@ -263,7 +266,7 @@ impl Hub {
                 .map(|d| d.join("agent-target"))
         };
 
-        let child = spawn::spawn_agent(&spawn::SpawnSpec {
+        let (child, temp_path) = spawn::spawn_agent(&spawn::SpawnSpec {
             hub_cfg: &self.cfg,
             agent_cfg: &agent_cfg,
             claude_exe: &self.claude_exe,
@@ -279,6 +282,9 @@ impl Hub {
             agentcom_dir: agentcom_dir.as_deref(),
             cargo_target_dir: cargo_target_dir.as_deref(),
         })?;
+        if let Some(p) = temp_path {
+            self.temp_prompt_paths.insert(name.to_string(), p);
+        }
 
         let rt = self.agents.get_mut(name).expect("agent exists");
         let base = (rt.spent_usd, rt.turns);
@@ -596,6 +602,10 @@ impl Hub {
 
     fn handle_exit(&mut self, agent: &str, code: Option<i32>) {
         self.stop_deadlines.remove(agent);
+        // Clean up the temp system-prompt file used by Codex/Deepseek agents.
+        if let Some(path) = self.temp_prompt_paths.remove(agent) {
+            let _ = std::fs::remove_file(&path);
+        }
         let Some(rt) = self.agents.get_mut(agent) else {
             return;
         };
@@ -1107,7 +1117,11 @@ impl Hub {
             },
             Request::Status => self.status_response(),
             Request::AgentAdd { config, .. } => self.add_agent_live(identity, config),
-            Request::FilesClaim { paths, .. } => match self.store.files_claim(identity, &paths) {
+            Request::FilesClaim { paths, .. } => {
+                if let Err(e) = crate::store::Store::validate_claim_paths(&paths) {
+                    return Response::err(e.to_string());
+                }
+                match self.store.files_claim(identity, &paths) {
                 Ok(()) => {
                     self.audit.write("file_claim", identity, serde_json::json!({"paths": paths}));
                     self.fire_webhook(
@@ -1126,6 +1140,7 @@ impl Hub {
                         "claim rejected — already held: {}. Coordinate with the holder via `agentcom send` before touching these files.",
                         detail.join(", ")
                     ))
+                }
                 }
             },
             Request::FilesRelease { paths, all, .. } => {
