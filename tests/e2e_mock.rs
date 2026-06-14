@@ -1137,3 +1137,179 @@ fn task_deps_command() {
         "deps shows child task: {stdout}"
     );
 }
+
+#[test]
+fn task_graph_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    let scripts = tmp.path().join("scripts");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+
+    write_config(&project, &[("w", "worker")], "");
+    std::fs::write(
+        scripts.join("w.ndjson"),
+        r#"{"run": ["agentcom task add \"child task\" --dep 1", "agentcom task claim 1", "agentcom task done 1 --note graph-done"], "text": "done"}
+"#,
+    )
+    .unwrap();
+
+    let hub = start_hub(&project, &scripts, &["root task"], &[]);
+    wait_for(
+        &project,
+        &["task", "list", "--status", "done"],
+        Duration::from_secs(20),
+        |out| out.contains("graph-done"),
+    );
+    drop(hub);
+
+    let (ok, stdout, stderr) = cli_split(&project, &["task", "graph"]);
+    assert!(ok, "task graph exits 0: stderr={stderr}");
+    assert!(stdout.contains("mermaid"), "graph output is Mermaid: {stdout}");
+    assert!(stdout.contains("graph TD"), "graph has Mermaid direction: {stdout}");
+    assert!(stdout.contains("root task"), "graph includes root task title: {stdout}");
+    assert!(stdout.contains("child task"), "graph includes child task title: {stdout}");
+    assert!(
+        stdout.contains("N1") && stdout.contains("N2"),
+        "graph has node references: {stdout}"
+    );
+}
+
+#[test]
+fn config_set_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("agentcom.toml"),
+        "project_name = \"myproj\"\n[[agent]]\nname = \"w\"\nrole = \"worker\"\n",
+    )
+    .unwrap();
+
+    let (ok, _, stderr) = cli_split(&project, &["config", "set", "project_name", "renamed"]);
+    assert!(ok, "config set exits 0: stderr={stderr}");
+    let cfg = std::fs::read_to_string(project.join("agentcom.toml")).unwrap();
+    assert!(cfg.contains("renamed"), "config set persisted: {cfg}");
+    assert!(!cfg.contains("myproj"), "old value replaced: {cfg}");
+
+    let (ok, stdout, stderr) = cli_split(&project, &["config", "show"]);
+    assert!(ok, "config show exits 0: stderr={stderr}");
+    let v: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("valid JSON: {e}\n{stdout}"));
+    assert_eq!(v["project_name"], "renamed", "show reflects set value: {stdout}");
+}
+
+#[test]
+fn summary_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    let scripts = tmp.path().join("scripts");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+
+    write_config(&project, &[("worker", "does tasks")], "");
+    std::fs::write(
+        scripts.join("worker.ndjson"),
+        r#"{"run": ["agentcom task claim 1", "agentcom task done 1 --note summary-done"], "text": "done", "cost": 0.03}
+"#,
+    )
+    .unwrap();
+
+    let hub = start_hub(&project, &scripts, &["summary test task"], &[]);
+    wait_for(
+        &project,
+        &["task", "list", "--status", "done"],
+        Duration::from_secs(20),
+        |out| out.contains("summary-done"),
+    );
+    drop(hub);
+
+    let (ok, stdout, stderr) = cli_split(&project, &["summary"]);
+    assert!(ok, "summary exits 0: stderr={stderr}");
+    assert!(stdout.contains("cost"), "summary shows cost: {stdout}");
+    assert!(stdout.contains("tasks"), "summary shows task counts: {stdout}");
+
+    let (ok, stdout, stderr) = cli_split(&project, &["summary", "--json"]);
+    assert!(ok, "summary --json exits 0: stderr={stderr}");
+    let v: serde_json::Value =
+        serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("valid JSON: {e}\n{stdout}"));
+    assert!(v["tasks_done"].as_u64().unwrap_or(0) >= 1, "tasks_done >= 1: {stdout}");
+    assert!(v["tasks_total"].as_u64().unwrap_or(0) >= 1, "tasks_total >= 1: {stdout}");
+    assert!(v["total_cost_usd"].is_number(), "total_cost_usd is number: {stdout}");
+}
+
+#[test]
+fn task_comment_and_clone() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    let scripts = tmp.path().join("scripts");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+
+    write_config(&project, &[("commenter", "comments on tasks")], "");
+    std::fs::write(
+        scripts.join("commenter.ndjson"),
+        r#"{"run": ["agentcom task claim 1", "agentcom task comment 1 \"progress note\"", "agentcom task clone 1", "agentcom task done 1 --note commented-done"], "text": "done"}
+"#,
+    )
+    .unwrap();
+
+    let _hub = start_hub(&project, &scripts, &["comment test task"], &[]);
+    wait_for(
+        &project,
+        &["task", "list", "--status", "done"],
+        Duration::from_secs(20),
+        |out| out.contains("commented-done"),
+    );
+
+    let (ok, out) = cli(&project, &["task", "list"]);
+    assert!(ok, "task list: {out}");
+    assert!(
+        out.contains("comment test task"),
+        "cloned task has same title: {out}"
+    );
+
+    let (ok, out) = cli(&project, &["task", "show", "1"]);
+    assert!(ok, "task show: {out}");
+    assert!(
+        out.contains("progress note") || out.contains("commented"),
+        "task show includes comment: {out}"
+    );
+}
+
+#[test]
+fn task_pin_and_tag_filter() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    let scripts = tmp.path().join("scripts");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+
+    write_config(&project, &[("tagger", "tags and pins tasks")], "");
+    std::fs::write(
+        scripts.join("tagger.ndjson"),
+        r#"{"run": ["agentcom task add \"tagged task\"", "agentcom task add \"pinned task\"", "agentcom task tag 2 urgent", "agentcom task pin 3", "agentcom task claim 1", "agentcom task done 1 --note tag-pin-done"], "text": "done"}
+"#,
+    )
+    .unwrap();
+
+    let _hub = start_hub(&project, &scripts, &["seed task"], &[]);
+    wait_for(
+        &project,
+        &["task", "list", "--status", "done"],
+        Duration::from_secs(20),
+        |out| out.contains("tag-pin-done"),
+    );
+
+    let (ok, out) = cli(&project, &["task", "list", "--tag", "urgent"]);
+    assert!(ok, "task list --tag: {out}");
+    assert!(out.contains("tagged task"), "tag filter shows tagged task: {out}");
+    assert!(!out.contains("pinned task"), "tag filter excludes untagged: {out}");
+
+    let (ok, out) = cli(&project, &["task", "show", "3"]);
+    assert!(ok, "task show pinned: {out}");
+    assert!(
+        out.contains("pinned") || out.contains("PIN"),
+        "task show reflects pin state: {out}"
+    );
+}

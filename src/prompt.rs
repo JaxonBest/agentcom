@@ -211,21 +211,10 @@ mod tests {
             description: "desc".into(),
             status: TaskStatus::Open,
             priority: 1,
-            claimed_by: None,
-            blocked_reason: None,
-            note: None,
-            tags: vec![],
-            pinned: false,
             created_by: "human".into(),
             created_at: 0,
             updated_at: 0,
-            depends_on: vec![],
-            requires: vec![],
-            due_at: None,
-            timeout_mins: None,
-            is_archived: false,
-            recur: None,
-            next_run_at: None,
+            ..Default::default()
         }
     }
 
