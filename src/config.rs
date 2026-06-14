@@ -56,6 +56,17 @@ pub struct HubConfig {
     /// Defaults to ["agentcom.toml", ".agentcom/**"] to protect hub state files.
     #[serde(default = "default_commit_exclude_patterns", skip_serializing_if = "Vec::is_empty")]
     pub commit_exclude_patterns: Vec<String>,
+    /// Automatically push to the remote after each auto-commit. Off by default.
+    /// Requires the working tree to have a configured remote.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_push: bool,
+    /// Warn (log + webhook) when an agent reaches this percentage of its
+    /// max_budget_usd. Range 0–100. Default: 80.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_warn_pct: Option<f64>,
+    /// Remote name to push to when `auto_push = true`. Defaults to "origin".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_push_remote: Option<String>,
     #[serde(default, rename = "agent")]
     pub agents: Vec<AgentConfig>,
 }
@@ -109,6 +120,11 @@ pub struct AgentConfig {
     /// Example: env = { ANTHROPIC_API_KEY = "sk-...", DEBUG = "1" }
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+    /// Optional kickoff message sent as the first user turn immediately after
+    /// spawning. Lets you target a one-shot agent without waiting for the
+    /// composer. Example: initial_prompt = "Fix the login bug in auth.rs."
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initial_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
@@ -147,6 +163,7 @@ impl Default for AgentConfig {
             auto_commit: None,
             max_rpm: None,
             env: BTreeMap::new(),
+            initial_prompt: None,
         }
     }
 }
@@ -366,6 +383,11 @@ pub fn render_example_config(project_name: &str, template: ConfigTemplate) -> St
          # `agentcom agent add`; this cap (plus budgets) bounds that.\n\
          # Values: any positive integer               Default: 8\n\
          # max_agents = 8\n\
+         \n\
+         # Automatically push to the remote after each auto-commit.\n\
+         # Values: true | false                       Default: false\n\
+         # auto_push = false\n\
+         # auto_push_remote = \"origin\"\n\
          \n\
          # ── AGENT FLEET ─────────────────────────────────────────────\n\
          #\n\
@@ -1070,6 +1092,34 @@ edition = "2021"
             summary.contains("No README.md found"),
             "Expected 'No README.md found' in summary, got: {summary}"
         );
+    }
+
+    #[test]
+    fn auto_push_defaults_false() {
+        let toml = r#"
+project_name = "x"
+[[agent]]
+name = "worker"
+role = "does things"
+"#;
+        let cfg: HubConfig = toml::from_str(toml).unwrap();
+        assert!(!cfg.auto_push);
+        assert!(cfg.auto_push_remote.is_none());
+    }
+
+    #[test]
+    fn auto_push_remote_configurable() {
+        let toml = r#"
+project_name = "x"
+auto_push = true
+auto_push_remote = "upstream"
+[[agent]]
+name = "worker"
+role = "does things"
+"#;
+        let cfg: HubConfig = toml::from_str(toml).unwrap();
+        assert!(cfg.auto_push);
+        assert_eq!(cfg.auto_push_remote.as_deref(), Some("upstream"));
     }
 
     #[test]

@@ -3,6 +3,7 @@
 //! loop is the only writer of `HubState`, so there are no locks on the hot
 //! path (ring buffers are the one shared structure, owned by reader tasks).
 
+pub mod audit;
 pub mod events;
 pub mod interrupt;
 pub mod scheduler;
@@ -62,6 +63,7 @@ pub struct Hub {
     usage_observed_pct: Option<f64>,
     /// Per-agent sliding window of prompt-send Instants for RPM tracking.
     rpm_window: HashMap<String, std::collections::VecDeque<Instant>>,
+    audit: audit::AuditLog,
 }
 
 impl Hub {
@@ -134,6 +136,10 @@ impl Hub {
             agents.insert(a.name.clone(), AgentRuntime::new(a.clone(), buf));
         }
 
+        let data_dir = crate::paths::data_dir(&project_root)
+            .unwrap_or_else(|_| project_root.join(".agentcom"));
+        let audit = audit::AuditLog::new(&data_dir);
+
         Ok(Self {
             cfg,
             project_root,
@@ -162,6 +168,7 @@ impl Hub {
             last_nudge: Instant::now(),
             usage_observed_pct: None,
             rpm_window: HashMap::new(),
+            audit,
         })
     }
 
@@ -262,6 +269,7 @@ impl Hub {
         );
         rt.stdin_tx = Some(handles.stdin_tx);
         rt.child_pid = handles.pid;
+        self.audit.write("agent_spawn", name, serde_json::json!({"session_id": &session_id}));
         rt.session_id = Some(session_id);
         rt.state = AgentState::Idle;
         rt.state_detail = Some(match &resume {
@@ -270,6 +278,11 @@ impl Hub {
         });
         self.emit_state(name);
         self.log(format!("spawned agent {name}"));
+        // If configured, queue the initial_prompt as the agent's first inbox
+        // message so it starts working on a specific goal immediately.
+        if let Some(prompt) = agent_cfg.initial_prompt.as_deref() {
+            let _ = self.store.msg_send("hub", &[name.to_string()], prompt, false);
+        }
         // Feed eagerly: the child emits nothing (not even init) until its
         // first user message, so gating on init would deadlock.
         self.try_feed(name);
@@ -416,6 +429,14 @@ impl Hub {
         total_cost_usd: Option<f64>,
         num_turns: Option<u64>,
     ) {
+        // Extract config values and clone the ui_tx sender BEFORE the mutable
+        // borrow of self.agents — calling self.log() inside a get_mut block
+        // would borrow &self while self.agents is already mutably borrowed.
+        let warn_pct = self.cfg.budget_warn_pct.unwrap_or(80.0);
+        let webhook_url = self.cfg.webhook_url.clone();
+        let webhook_secret = self.cfg.webhook_secret.clone();
+        let ui_tx = self.ui_tx.clone();
+
         let base = self.session_base.get(agent).copied().unwrap_or((0.0, 0));
         let Some(rt) = self.agents.get_mut(agent) else {
             return;
@@ -423,6 +444,28 @@ impl Hub {
 
         if let Some(cost) = total_cost_usd {
             rt.spent_usd = base.0 + cost;
+            // Per-agent budget warning: fire once when spend crosses the threshold.
+            if let Some(max_budget) = rt.cfg.max_budget_usd {
+                let pct = (rt.spent_usd / max_budget) * 100.0;
+                if pct >= warn_pct && !rt.budget_warn_fired {
+                    rt.budget_warn_fired = true;
+                    let spent = rt.spent_usd;
+                    let msg = format!(
+                        "budget warning: {agent} at {pct:.0}% of ${max_budget:.2} budget (spent ${spent:.4})"
+                    );
+                    tracing::info!("{msg}");
+                    let _ = ui_tx.send(UiEvent::HubLog(msg));
+                    if let Some(url) = webhook_url {
+                        webhook::fire(
+                            url,
+                            webhook_secret.clone(),
+                            webhook::Payload::new(webhook::Event::BudgetWarning)
+                                .with_agent(agent)
+                                .with_budget(spent, max_budget, pct),
+                        );
+                    }
+                }
+            }
         }
         if let Some(turns) = num_turns {
             rt.turns = base.1 + turns;
@@ -530,6 +573,7 @@ impl Hub {
         self.log(format!(
             "{agent}: process exited unexpectedly (code {code:?})"
         ));
+        self.audit.write("agent_crash", agent, serde_json::json!({"exit_code": code}));
         self.fire_webhook(
             webhook::Payload::new(webhook::Event::AgentCrash).with_agent(agent),
         );
@@ -627,6 +671,7 @@ impl Hub {
         }
 
         self.free_mode_tick();
+        self.check_stalls();
     }
 
     /// Free mode: enforce time/usage stop conditions; when the whole fleet
@@ -748,7 +793,7 @@ impl Hub {
                 }
                 Err(e) => Response::err(e.to_string()),
             },
-            Request::TaskList { status, search } => {
+            Request::TaskList { status, search, tag } => {
                 let status = match status.as_deref() {
                     None => None,
                     Some(s) => match crate::store::TaskStatus::parse(s) {
@@ -756,7 +801,7 @@ impl Hub {
                         None => return Response::err(format!("unknown status {s:?}")),
                     },
                 };
-                match self.store.task_list(status, search.as_deref()) {
+                match self.store.task_list_filtered(status, search.as_deref(), tag.as_deref()) {
                     Ok(tasks) => Response::Tasks { tasks },
                     Err(e) => Response::err(e.to_string()),
                 }
@@ -765,6 +810,7 @@ impl Hub {
                 Ok(t) => {
                     self.clear_declined(id);
                     self.log(format!("{identity} claimed task #{} — {}", t.id, t.title));
+                    self.audit.write("task_claim", identity, serde_json::json!({"task_id": t.id, "title": t.title}));
                     let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
                     Response::ok_msg(format!("claimed task #{} — {}", t.id, t.title))
                 }
@@ -774,6 +820,7 @@ impl Hub {
                 match self.store.task_done(id, identity, note.as_deref()) {
                     Ok(t) => {
                         self.log(format!("{identity} completed task #{} — {}", t.id, t.title));
+                        self.audit.write("task_done", identity, serde_json::json!({"task_id": t.id, "title": t.title}));
                         self.fire_webhook(
                             webhook::Payload::new(webhook::Event::TaskDone)
                                 .with_agent(identity)
@@ -808,6 +855,7 @@ impl Hub {
                 match self.store.task_block(id, identity, &reason) {
                     Ok(t) => {
                         self.log(format!("{identity} blocked task #{}: {reason}", t.id));
+                        self.audit.write("task_blocked", identity, serde_json::json!({"task_id": t.id, "reason": reason}));
                         self.fire_webhook(
                             webhook::Payload::new(webhook::Event::TaskBlocked)
                                 .with_agent(identity)
@@ -885,10 +933,54 @@ impl Hub {
                 Ok(count) => Response::Pruned { count },
                 Err(e) => Response::err(e.to_string()),
             },
+            Request::TaskComment { id, body } => {
+                match self.store.task_comment(id, identity, &body) {
+                    Ok(_) => {
+                        let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
+                        Response::ok_msg(format!("comment added to task #{id}"))
+                    }
+                    Err(e) => Response::err(e.to_string()),
+                }
+            }
+            Request::TaskComments { id } => match self.store.task_comments(id) {
+                Ok(comments) => Response::Comments { comments },
+                Err(e) => Response::err(e.to_string()),
+            },
+            Request::TaskPin { id } => match self.store.task_pin(id) {
+                Ok(()) => {
+                    let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
+                    Response::ok_msg(format!("task #{id} pinned"))
+                }
+                Err(e) => Response::err(e.to_string()),
+            },
+            Request::TaskUnpin { id } => match self.store.task_unpin(id) {
+                Ok(()) => {
+                    let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
+                    Response::ok_msg(format!("task #{id} unpinned"))
+                }
+                Err(e) => Response::err(e.to_string()),
+            },
+            Request::TaskTag { id, label } => match self.store.task_tag(id, &label) {
+                Ok(()) => {
+                    let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
+                    Response::ok_msg(format!("tagged task #{id} with {label:?}"))
+                }
+                Err(e) => Response::err(e.to_string()),
+            },
+            Request::TaskUntag { id, label } => match self.store.task_untag(id, &label) {
+                Ok(()) => {
+                    let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
+                    Response::ok_msg(format!("removed tag {label:?} from task #{id}"))
+                }
+                Err(e) => Response::err(e.to_string()),
+            },
             Request::Status => self.status_response(),
             Request::AgentAdd { config } => self.add_agent_live(identity, config),
             Request::FilesClaim { paths } => match self.store.files_claim(identity, &paths) {
-                Ok(()) => Response::ok_msg(format!("claimed {} file(s)", paths.len())),
+                Ok(()) => {
+                    self.audit.write("file_claim", identity, serde_json::json!({"paths": paths}));
+                    Response::ok_msg(format!("claimed {} file(s)", paths.len()))
+                }
                 Err(conflicts) => {
                     let detail: Vec<String> = conflicts
                         .iter()
@@ -918,6 +1010,7 @@ impl Hub {
                         if effective_auto_commit && !claimed_paths.is_empty() {
                             self.auto_commit_changes(identity, &claimed_paths);
                         }
+                        self.audit.write("file_release", identity, serde_json::json!({"count": n}));
                         self.log(format!("{identity}: released {n} file claim(s)"));
                         Response::ok_msg(format!("released {n} file claim(s)"))
                     }
@@ -1265,6 +1358,31 @@ impl Hub {
                 self.log(format!(
                     "auto-commit [{hash}]: {summary} (author: {author})"
                 ));
+                if self.cfg.auto_push {
+                    let remote = self.cfg.auto_push_remote.as_deref().unwrap_or("origin");
+                    match Command::new("git")
+                        .args(["push", remote])
+                        .current_dir(&self.project_root)
+                        .output()
+                    {
+                        Ok(po) if po.status.success() => {
+                            self.log(format!(
+                                "auto-push: pushed [{hash}] to {remote}"
+                            ));
+                        }
+                        Ok(po) => {
+                            let stderr = String::from_utf8_lossy(&po.stderr);
+                            self.log(format!(
+                                "auto-push: push to {remote} failed for {agent}: {stderr}"
+                            ));
+                        }
+                        Err(e) => {
+                            self.log(format!(
+                                "auto-push: failed to run git push for {agent}: {e}"
+                            ));
+                        }
+                    }
+                }
             }
             Ok(o) => {
                 let stderr = String::from_utf8_lossy(&o.stderr);

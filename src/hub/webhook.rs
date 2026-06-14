@@ -25,6 +25,7 @@ pub enum Event {
     TaskDone,
     TaskBlocked,
     AgentCrash,
+    BudgetWarning,
 }
 
 /// JSON body sent to the webhook endpoint.
@@ -38,6 +39,15 @@ pub struct Payload {
     pub task_id: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub task_title: Option<String>,
+    /// For BudgetWarning: USD spent so far.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub spent_usd: Option<f64>,
+    /// For BudgetWarning: configured max budget.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_usd: Option<f64>,
+    /// For BudgetWarning: percentage of budget used (0–100).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub budget_pct: Option<f64>,
 }
 
 impl Payload {
@@ -51,7 +61,17 @@ impl Payload {
             agent: None,
             task_id: None,
             task_title: None,
+            spent_usd: None,
+            max_usd: None,
+            budget_pct: None,
         }
+    }
+
+    pub fn with_budget(mut self, spent: f64, max: f64, pct: f64) -> Self {
+        self.spent_usd = Some(spent);
+        self.max_usd = Some(max);
+        self.budget_pct = Some(pct);
+        self
     }
 
     pub fn with_agent(mut self, agent: impl Into<String>) -> Self {

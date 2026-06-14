@@ -4,6 +4,7 @@
 project_name = "agentcom-src"
 default_provider = "claude"
 default_model = "sonnet"
+auto_commit = true
 # max_total_budget_usd = 20.0
 
 [[agent]]
@@ -14,6 +15,7 @@ role = "Implements features and fixes. Owns src/. Coordinates with reviewer befo
 # are always allowed regardless.) Narrow Bash rules like "Bash(npm test:*)"
 # work too.
 allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+model = "claude-sonnet-4-6"
 # cwd = "."                      # working dir, relative to this file
 # provider = "claude"            # or "codex" or "deepseek"
 # model = "sonnet"
@@ -45,7 +47,22 @@ auto_restart = true
 
 [[agent]]
 name = "software-engineer"
-role = "A simple software engineer"
+role = "A software engineer who is designed to pick up any task that requires simple or basic implementation."
+allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+permission_mode = "acceptEdits"
+auto_restart = true
+
+[[agent]]
+name = "junior-developer-assistant"
+role = "Junior developers backup coder. Only claim if Junior Developer is busy, AND if the task is a <=6/10 difficulty to implement. It must not contain anything to do with security."
+allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+permission_mode = "acceptEdits"
+provider = "deepseek"
+auto_restart = true
+
+[[agent]]
+name = "security"
+role = "Designed to pick up any task involving security."
 allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
 permission_mode = "acceptEdits"
 auto_restart = true
