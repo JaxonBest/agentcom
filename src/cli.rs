@@ -5,6 +5,9 @@ use crate::ipc::client::Client;
 use crate::ipc::{Request, Response};
 use anyhow::{bail, Result};
 use clap::{Args, Parser, Subcommand};
+use std::sync::OnceLock;
+
+pub static JSON_MODE: OnceLock<bool> = OnceLock::new();
 
 #[derive(Parser)]
 #[command(
@@ -13,6 +16,10 @@ use clap::{Args, Parser, Subcommand};
     about = "Local coordination hub for mixed Claude Code, Codex, and DeepSeek coding-agent fleets."
 )]
 pub struct Cli {
+    /// Output JSON instead of human-readable text for status and task list
+    #[arg(long, global = true)]
+    pub json: bool,
+
     #[command(subcommand)]
     pub command: Command,
 }
@@ -101,6 +108,33 @@ pub enum Command {
     Resume { agent: String },
     /// Pre-flight check for all providers and config — no hub required
     Doctor,
+    /// Read hub log files without needing a running hub
+    ///
+    /// Examples:
+    ///   agentcom logs
+    ///   agentcom logs -n 200
+    ///   agentcom logs --agent builder
+    ///   agentcom logs --follow
+    Logs {
+        /// Filter lines to those containing this agent name (case-insensitive substring)
+        #[arg(long)]
+        agent: Option<String>,
+        /// Number of most-recent lines to show
+        #[arg(short = 'n', long, default_value_t = 100)]
+        lines: usize,
+        /// Follow the log live (like tail -f), Ctrl+C to stop
+        #[arg(short, long)]
+        follow: bool,
+    },
+    /// Generate shell completion scripts
+    ///
+    /// Examples:
+    ///   agentcom completions bash >> ~/.bash_completion
+    ///   agentcom completions zsh > ~/.zfunc/_agentcom
+    ///   agentcom completions fish > ~/.config/fish/completions/agentcom.fish
+    Completions {
+        shell: clap_complete::Shell,
+    },
 }
 
 #[derive(Subcommand)]
@@ -126,6 +160,9 @@ pub enum TaskCmd {
         /// Filter: open | claimed | done | blocked
         #[arg(long)]
         status: Option<String>,
+        /// Filter by keyword in title/description (case-insensitive)
+        #[arg(short, long)]
+        search: Option<String>,
     },
     /// Claim an open task
     Claim { id: i64 },
@@ -143,6 +180,20 @@ pub enum TaskCmd {
     },
     /// Reopen a blocked (or stuck-claimed) task
     Reopen { id: i64 },
+    /// Edit a task's title, description, and/or priority
+    Edit {
+        id: i64,
+        #[arg(short, long)]
+        title: Option<String>,
+        #[arg(short, long)]
+        description: Option<String>,
+        #[arg(short, long)]
+        priority: Option<i64>,
+    },
+    /// Show a single task by id
+    Show { id: i64 },
+    /// Permanently delete a task (only open/done/blocked — not claimed)
+    Remove { id: i64 },
 }
 
 #[derive(Subcommand)]
@@ -268,11 +319,24 @@ pub async fn run_client(command: Command) -> Result<()> {
                     priority,
                     depends_on,
                 },
-                TaskCmd::List { status } => Request::TaskList { status },
+                TaskCmd::List { status, search } => Request::TaskList { status, search },
                 TaskCmd::Claim { id } => Request::TaskClaim { id },
                 TaskCmd::Done { id, note } => Request::TaskDone { id, note },
                 TaskCmd::Block { id, reason } => Request::TaskBlock { id, reason },
                 TaskCmd::Reopen { id } => Request::TaskReopen { id },
+                TaskCmd::Edit {
+                    id,
+                    title,
+                    description,
+                    priority,
+                } => Request::TaskEdit {
+                    id,
+                    title,
+                    description,
+                    priority,
+                },
+                TaskCmd::Show { id } => Request::TaskGet { id },
+                TaskCmd::Remove { id } => Request::TaskDelete { id },
             };
             let resp = client.request(&req).await?;
             match resp {
@@ -338,7 +402,12 @@ pub async fn run_client(command: Command) -> Result<()> {
             let resp = client.request(&Request::Resume { agent }).await?;
             print_simple(resp)
         }
-        Command::Init { .. } | Command::Up { .. } | Command::Agent(_) | Command::Doctor => {
+        Command::Init { .. }
+        | Command::Up { .. }
+        | Command::Agent(_)
+        | Command::Doctor
+        | Command::Logs { .. }
+        | Command::Completions { .. } => {
             unreachable!("handled in main")
         }
     }
@@ -449,6 +518,9 @@ fn print_simple(resp: Response) -> Result<()> {
 }
 
 fn print_status(resp: Response) -> Result<()> {
+    if *JSON_MODE.get().unwrap_or(&false) {
+        return print_json(resp);
+    }
     match resp {
         Response::Status {
             project,
@@ -483,6 +555,13 @@ fn print_status(resp: Response) -> Result<()> {
 }
 
 fn print_tasks(tasks: &[crate::store::Task]) {
+    if *JSON_MODE.get().unwrap_or(&false) {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(tasks).unwrap_or_else(|_| "[]".into())
+        );
+        return;
+    }
     use crate::store::TaskStatus;
     if tasks.is_empty() {
         println!("no tasks");
@@ -537,4 +616,41 @@ fn print_tasks(tasks: &[crate::store::Task]) {
     let done = tasks.iter().filter(|t| t.status == TaskStatus::Done).count();
     let blocked = tasks.iter().filter(|t| t.status == TaskStatus::Blocked).count();
     println!("\n{open} open · {claimed} claimed · {done} done · {blocked} blocked");
+}
+
+fn print_json(resp: Response) -> Result<()> {
+    match resp {
+        Response::Status {
+            project,
+            agents,
+            open_tasks,
+            pending_msgs,
+            total_cost_usd,
+            free,
+        } => {
+            #[derive(serde::Serialize)]
+            struct JsonStatus<'a> {
+                project: &'a str,
+                agents: Vec<&'a crate::ipc::AgentStatusRow>,
+                open_tasks: u64,
+                pending_msgs: u64,
+                total_cost_usd: f64,
+                free: Option<&'a str>,
+            }
+            let s = JsonStatus {
+                project: &project,
+                agents: agents.iter().collect(),
+                open_tasks,
+                pending_msgs,
+                total_cost_usd,
+                free: free.as_deref(),
+            };
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&s).unwrap_or_else(|_| "{}".into())
+            );
+            Ok(())
+        }
+        other => print_simple(other),
+    }
 }

@@ -16,6 +16,7 @@ use cli::{Cli, Command};
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let _ = cli::JSON_MODE.set(cli.json);
     match cli.command {
         Command::Init { force, template } => {
             let cwd = std::env::current_dir()?;
@@ -48,6 +49,12 @@ async fn main() -> Result<()> {
         }
         Command::Agent(cmd) => cli::run_agent_cmd(cmd).await,
         Command::Doctor => run_doctor(),
+        Command::Logs { agent, lines, follow } => run_logs(agent, lines, follow),
+        Command::Completions { shell } => {
+            use clap::CommandFactory;
+            clap_complete::generate(shell, &mut Cli::command(), "agentcom", &mut std::io::stdout());
+            Ok(())
+        }
         other => cli::run_client(other).await,
     }
 }
@@ -330,6 +337,114 @@ fn run_doctor() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn run_logs(agent_filter: Option<String>, lines: usize, follow: bool) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let project_root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+
+    let log_dir = paths::log_dir(&project_root)?;
+
+    // Collect hub.log* files sorted by mtime ascending (oldest first) so we
+    // can read them in order and take the last N lines across all files.
+    let mut entries: Vec<(std::path::PathBuf, std::time::SystemTime)> = std::fs::read_dir(&log_dir)
+        .with_context(|| format!("reading log dir {}", log_dir.display()))?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("hub.log"))
+        .filter_map(|e| {
+            let mtime = e.metadata().ok()?.modified().ok()?;
+            Some((e.path(), mtime))
+        })
+        .collect();
+
+    if entries.is_empty() {
+        anyhow::bail!("no hub log files found in {}", log_dir.display());
+    }
+
+    // Oldest first so we can stream them in order and take last N overall.
+    entries.sort_by(|a, b| a.1.cmp(&b.1));
+
+    let filter = agent_filter.as_deref().map(|s| s.to_lowercase());
+
+    let line_matches = |line: &str| -> bool {
+        match &filter {
+            Some(f) => line.to_lowercase().contains(f.as_str()),
+            None => true,
+        }
+    };
+
+    // Read all files in chronological order, collect matching lines, then
+    // show the last N. This handles daily-rotated files transparently.
+    let mut all_lines: Vec<String> = Vec::new();
+    for (path, _) in &entries {
+        let content = std::fs::read_to_string(path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        for line in content.lines() {
+            if line_matches(line) {
+                all_lines.push(line.to_owned());
+            }
+        }
+    }
+
+    let start = all_lines.len().saturating_sub(lines);
+    for line in &all_lines[start..] {
+        println!("{line}");
+    }
+
+    if follow {
+        // Follow the most-recent file (last in ascending-mtime sort).
+        let mut current_path = entries.last().unwrap().0.clone();
+        let mut pos = std::fs::metadata(&current_path)
+            .map(|m| m.len())
+            .unwrap_or(0);
+
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+
+            // Check for a newer file (daily rollover).
+            let newest = most_recent_hub_log(&log_dir);
+            if let Some(ref new_path) = newest {
+                if new_path != &current_path {
+                    current_path = new_path.clone();
+                    pos = 0;
+                }
+            }
+
+            let new_len = std::fs::metadata(&current_path)
+                .map(|m| m.len())
+                .unwrap_or(pos);
+            if new_len > pos {
+                use std::io::{Read, Seek};
+                let mut file = std::fs::File::open(&current_path)
+                    .with_context(|| format!("opening {}", current_path.display()))?;
+                file.seek(std::io::SeekFrom::Start(pos))?;
+                let mut buf = String::new();
+                file.read_to_string(&mut buf)?;
+                pos = new_len;
+                for line in buf.lines() {
+                    if line_matches(line) {
+                        println!("{line}");
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn most_recent_hub_log(log_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    std::fs::read_dir(log_dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().starts_with("hub.log"))
+        .filter_map(|e| {
+            let mtime = e.metadata().ok()?.modified().ok()?;
+            Some((e.path(), mtime))
+        })
+        .max_by_key(|(_, mtime)| *mtime)
+        .map(|(path, _)| path)
 }
 
 fn init_logging(project_root: &std::path::Path, headless: bool) -> Result<()> {
