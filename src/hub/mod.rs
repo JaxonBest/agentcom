@@ -6,6 +6,7 @@
 pub mod audit;
 pub mod events;
 pub mod interrupt;
+pub mod rest;
 pub mod scheduler;
 pub mod webhook;
 
@@ -130,6 +131,12 @@ impl Hub {
             .write_hub_json(&hub_json)
             .context("writing hub.json")?;
         tokio::spawn(server.run());
+
+        // Optional REST API server (127.0.0.1 only, Bearer token auth).
+        if let Some(rest_port) = cfg.rest_api_port {
+            let rest_token = ipc_token.clone();
+            tokio::spawn(rest::serve(rest_port, ipc_port, rest_token));
+        }
 
         let mut agents = HashMap::new();
         for a in &cfg.agents {
@@ -751,6 +758,7 @@ impl Hub {
         self.check_stalls();
         self.check_config_reload();
         self.check_deadlock();
+        self.check_priority_escalation();
     }
 
     /// Free mode: enforce time/usage stop conditions; when the whole fleet
@@ -862,6 +870,7 @@ impl Hub {
                 depends_on,
                 timeout_mins: _,
                 requires,
+                ..
             } => match self
                 .store
                 .task_add(&title, &description, priority, &depends_on, identity)
@@ -1483,6 +1492,25 @@ impl Hub {
         }
     }
 
+    fn check_priority_escalation(&mut self) {
+        let Some(hours) = self.cfg.priority_escalate_after_hours else {
+            return;
+        };
+        let threshold_secs = hours * 3600;
+        match self.store.escalate_stale_tasks(threshold_secs) {
+            Ok(ids) if !ids.is_empty() => {
+                for id in &ids {
+                    self.log(format!(
+                        "priority escalation: task #{id} priority bumped (open >{hours}h)"
+                    ));
+                }
+                let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("priority escalation failed: {e}"),
+        }
+    }
+
     /// Re-read agentcom.toml when its mtime changes. Spawns new agents; updates
     /// existing agent configs in memory. Does NOT stop removed agents (logs warning).
     fn check_config_reload(&mut self) {
@@ -1711,6 +1739,9 @@ impl Hub {
         if self.cfg.auto_commit_skip_hooks {
             commit_cmd.arg("--no-verify");
         }
+        // Scope the commit to ONLY the agent's files — prevents sweeping up other
+        // agents' staged changes that happen to be in the index.
+        commit_cmd.arg("--").args(unique.iter().map(|p| **p));
 
         match commit_cmd.output() {
             Ok(o) if o.status.success() => {
