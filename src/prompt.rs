@@ -41,6 +41,7 @@ You coordinate through the `agentcom` CLI (run it with your Bash tool):
 - `agentcom task edit <id> [--title "..."] [--description "..."] [--priority N]` — update a task's fields (PATCH: omitted fields unchanged)
 - `agentcom task show <id>` — show a single task's full details
 - `agentcom task remove <id>` — delete a task that is no longer needed (cannot remove claimed tasks)
+- `agentcom task prune [--before <duration>]` — prune (delete) old done/blocked tasks that are past the given duration (e.g. "7d", "24h"); if omitted, defaults to pruning all done/blocked tasks
 - `agentcom send <agent|all> "<msg>"` — message a teammate; delivered when their current turn ends
 - `agentcom interrupt <agent> "<msg>"` — URGENT: aborts their in-progress work immediately. Use ONLY to stop wasted or conflicting work (e.g. you're both editing the same files). Prefer `send`.
 - `agentcom send human "<msg>"` — report to the human (shows in their chat). Use for questions, decisions you can't make alone, and milestone updates.
