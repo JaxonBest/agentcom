@@ -157,6 +157,11 @@ pub enum Request {
     Resume {
         agent: String,
     },
+    /// Update an agent's model on next restart without stopping it now.
+    AgentSwapModel {
+        agent: String,
+        model: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1126,6 +1126,21 @@ impl Hub {
                     self.resume_agent(&agent)
                 }
             }
+            Request::AgentSwapModel { agent, model, .. } => {
+                if let Some(rt) = self.agents.get_mut(&agent) {
+                    let old_model = rt.cfg.model.clone().unwrap_or_else(|| "default".to_string());
+                    rt.cfg.model = Some(model.clone());
+                    let msg = format!(
+                        "Your model has been swapped from '{old_model}' to '{model}'. \
+                        The new model takes effect on your next restart."
+                    );
+                    let _ = self.store.msg_send("hub", &[agent.clone()], &msg, false);
+                    self.log(format!("{agent}: model swapped {old_model} → {model}"));
+                    Response::ok_msg(format!("{agent}: model will be '{model}' on next restart"))
+                } else {
+                    Response::err(format!("unknown agent {agent:?}"))
+                }
+            }
             Request::Tail { .. } => Response::err("tail is handled by the ipc server"),
         }
     }
