@@ -1123,22 +1123,33 @@ impl Hub {
         let agent_cfg = self.cfg.agents.iter().find(|a| a.name == agent);
         let author_name = agent_cfg
             .and_then(|a| a.auto_commit_author_name.as_deref())
-            .or_else(|| self.cfg.auto_commit_author_name.as_deref())
+            .or(self.cfg.auto_commit_author_name.as_deref())
             .unwrap_or(agent);
         let default_email = format!("{agent}@agentcom.local");
         let author_email = agent_cfg
             .and_then(|a| a.auto_commit_author_email.as_deref())
-            .or_else(|| self.cfg.auto_commit_author_email.as_deref())
+            .or(self.cfg.auto_commit_author_email.as_deref())
             .unwrap_or(&default_email);
         let author = format!("{author_name} <{author_email}>");
 
-        // Build a commit message
+        // Build a commit message — include claimed task title when available
         let file_count = unique.len();
-        let summary = if file_count == 1 {
-            format!("{agent}: {file_count} file changed")
+        let files_str = if file_count == 1 {
+            "1 file changed".to_string()
         } else {
-            format!("{agent}: {file_count} files changed")
+            format!("{file_count} files changed")
         };
+        let task_prefix = self
+            .store
+            .claimed_task(agent)
+            .ok()
+            .flatten()
+            .map(|t| {
+                let title: String = t.title.chars().take(60).collect();
+                format!("task #{} {} — ", t.id, title)
+            })
+            .unwrap_or_default();
+        let summary = format!("{agent}: {task_prefix}{files_str}");
 
         let mut commit_cmd = Command::new("git");
         commit_cmd
