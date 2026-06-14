@@ -234,6 +234,16 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Session summary: total cost, commits, tasks completed (no hub needed)
+    ///
+    /// Examples:
+    ///   agentcom summary
+    ///   agentcom summary --json
+    Summary {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -786,6 +796,7 @@ pub async fn run_client(command: Command) -> Result<()> {
         | Command::Replay { .. }
         | Command::Audit { .. }
         | Command::Metrics { .. }
+        | Command::Summary { .. }
         | Command::Version
         | Command::Config(_) => {
             unreachable!("handled in main")

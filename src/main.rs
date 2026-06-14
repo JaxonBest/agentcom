@@ -136,6 +136,7 @@ async fn main() -> Result<()> {
             run_task_add_nl(title, description, priority, depends_on, timeout, requires).await
         }
         Command::Metrics { agent, json } => run_metrics(agent, json),
+        Command::Summary { json } => run_summary(json),
         Command::Audit { event, agent, since, count, json } => run_audit(event, agent, since, count, json),
         other => cli::run_client(other).await,
     }
@@ -1506,6 +1507,69 @@ fn fmt_unix_ts(ts: i64) -> String {
     let min = (secs_of_day % 3600) / 60;
     let s = secs_of_day % 60;
     format!("{y:04}-{m:02}-{d:02} {h:02}:{min:02}:{s:02}")
+}
+
+fn run_summary(json_out: bool) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let project_root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+
+    // Total cost from runs table
+    let total_cost_usd: f64;
+    let total_turns: i64;
+    let agent_count: i64;
+    let tasks_done: i64;
+    let tasks_total: i64;
+
+    let db = paths::db_path(&project_root)?;
+    if db.exists() {
+        let conn = rusqlite::Connection::open(&db)?;
+        total_cost_usd = conn
+            .query_row("SELECT COALESCE(SUM(cost_usd),0.0) FROM runs", [], |r| r.get(0))
+            .unwrap_or(0.0);
+        total_turns = conn
+            .query_row("SELECT COUNT(*) FROM runs WHERE ended_at IS NOT NULL", [], |r| r.get(0))
+            .unwrap_or(0);
+        agent_count = conn
+            .query_row("SELECT COUNT(DISTINCT agent) FROM runs", [], |r| r.get(0))
+            .unwrap_or(0);
+        tasks_done = conn
+            .query_row("SELECT COUNT(*) FROM tasks WHERE status='done'", [], |r| r.get(0))
+            .unwrap_or(0);
+        tasks_total = conn
+            .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
+            .unwrap_or(0);
+    } else {
+        total_cost_usd = 0.0;
+        total_turns = 0;
+        agent_count = 0;
+        tasks_done = 0;
+        tasks_total = 0;
+    }
+
+    // Commit count from git
+    let commit_count = std::process::Command::new("git")
+        .args(["rev-list", "--count", "HEAD"])
+        .current_dir(&project_root)
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|s| s.trim().parse::<i64>().ok())
+        .unwrap_or(0);
+
+    if json_out {
+        println!(
+            r#"{{"total_cost_usd":{total_cost_usd:.6},"total_turns":{total_turns},"active_agents":{agent_count},"commits":{commit_count},"tasks_done":{tasks_done},"tasks_total":{tasks_total}}}"#
+        );
+    } else {
+        println!("Session summary");
+        println!("  cost       ${total_cost_usd:.4} USD");
+        println!("  turns      {total_turns}");
+        println!("  agents     {agent_count}");
+        println!("  commits    {commit_count}");
+        println!("  tasks      {tasks_done}/{tasks_total} done");
+    }
+    Ok(())
 }
 
 fn run_audit(
