@@ -48,6 +48,9 @@ pub enum Request {
         status: Option<String>,
         /// Filter tasks by keyword (matches title or description, case-insensitive)
         search: Option<String>,
+        /// Filter tasks that have this label/tag (exact match).
+        #[serde(default)]
+        tag: Option<String>,
     },
     TaskClaim {
         id: i64,
