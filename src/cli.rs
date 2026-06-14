@@ -256,6 +256,24 @@ pub enum Command {
         #[arg(long)]
         agent: Option<String>,
     },
+    /// Save hub database + config to a snapshot archive (no hub needed)
+    ///
+    /// Examples:
+    ///   agentcom snapshot
+    ///   agentcom snapshot --file backup.snap
+    Snapshot {
+        /// Output file path (default: agentcom-<timestamp>.snap in current dir)
+        #[arg(long, short = 'f')]
+        file: Option<std::path::PathBuf>,
+    },
+    /// Restore hub state from a snapshot archive (no hub needed)
+    ///
+    /// Example:
+    ///   agentcom restore agentcom-2026-01-01.snap
+    Restore {
+        /// Snapshot file to restore from
+        file: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -838,6 +856,8 @@ pub async fn run_client(command: Command) -> Result<()> {
         | Command::Metrics { .. }
         | Command::Summary { .. }
         | Command::Context { .. }
+        | Command::Snapshot { .. }
+        | Command::Restore { .. }
         | Command::Version
         | Command::Config(_) => {
             unreachable!("handled in main")

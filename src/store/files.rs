@@ -6,7 +6,7 @@
 //! crashes release them automatically.
 
 use super::{now_ts, Store};
-use anyhow::Result;
+use anyhow::{bail, Result};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
@@ -24,7 +24,43 @@ fn normalize(path: &str) -> String {
     p.strip_prefix("./").unwrap_or(&p).to_string()
 }
 
+/// Reject paths that could escape the project root or reference sensitive locations.
+/// Only relative paths without traversal are allowed.
+fn validate_claim_path(path: &str) -> Result<()> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        bail!("file claim path must not be empty");
+    }
+    // Reject absolute paths on any platform.
+    if trimmed.starts_with('/') || trimmed.starts_with('~') {
+        bail!("file claim path must be relative, not absolute: {path:?}");
+    }
+    // Reject Windows absolute paths (C:\...) and UNC paths (\\...).
+    if trimmed.len() >= 2 && trimmed.as_bytes()[1] == b':' {
+        bail!("file claim path must be relative, not absolute: {path:?}");
+    }
+    if trimmed.starts_with("\\\\") {
+        bail!("file claim path must be relative, not absolute: {path:?}");
+    }
+    // Reject directory traversal segments.
+    let normalized = trimmed.replace('\\', "/");
+    if normalized.split('/').any(|seg| seg == "..") {
+        bail!("file claim path must not contain '..': {path:?}");
+    }
+    Ok(())
+}
+
 impl Store {
+    /// Validate paths before claiming — rejects traversal (`..`), absolute paths,
+    /// home-dir paths (`~`), and empty strings. Call this before `files_claim` to
+    /// surface a clear error message; hub handler updated separately.
+    pub fn validate_claim_paths(paths: &[String]) -> Result<()> {
+        for path in paths {
+            validate_claim_path(path)?;
+        }
+        Ok(())
+    }
+
     /// Claim paths for an agent. All-or-nothing: if any path is held by a
     /// different agent, nothing is claimed and the conflicts are returned
     /// as `Err`. Re-claiming your own paths is a no-op.
@@ -156,6 +192,27 @@ mod tests {
             s.files_release("alice", &["x.js".into()], false).unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn validate_claim_paths_rejects_traversal() {
+        assert!(Store::validate_claim_paths(&["../secret".into()]).is_err());
+        assert!(Store::validate_claim_paths(&["src/../../etc/passwd".into()]).is_err());
+        assert!(Store::validate_claim_paths(&["a/b/../../../c".into()]).is_err());
+    }
+
+    #[test]
+    fn validate_claim_paths_rejects_absolute() {
+        assert!(Store::validate_claim_paths(&["/etc/passwd".into()]).is_err());
+        assert!(Store::validate_claim_paths(&["~/secret".into()]).is_err());
+        assert!(Store::validate_claim_paths(&["C:\\Windows\\System32".into()]).is_err());
+    }
+
+    #[test]
+    fn validate_claim_paths_accepts_relative() {
+        assert!(Store::validate_claim_paths(&["src/main.rs".into()]).is_ok());
+        assert!(Store::validate_claim_paths(&["tests/e2e.rs".into()]).is_ok());
+        assert!(Store::validate_claim_paths(&["Cargo.toml".into()]).is_ok());
     }
 
     #[test]

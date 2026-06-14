@@ -138,6 +138,8 @@ async fn main() -> Result<()> {
         }
         Command::Metrics { agent, json } => run_metrics(agent, json),
         Command::Summary { json } => run_summary(json),
+        Command::Snapshot { file } => run_snapshot(file),
+        Command::Restore { file } => run_restore(file),
         Command::Audit { event, agent, since, count, json } => run_audit(event, agent, since, count, json),
         other => cli::run_client(other).await,
     }
@@ -1637,6 +1639,90 @@ fn run_summary(json_out: bool) -> Result<()> {
         println!("  commits    {commit_count}");
         println!("  tasks      {tasks_done}/{tasks_total} done");
     }
+    Ok(())
+}
+
+fn run_snapshot(out_file: Option<std::path::PathBuf>) -> Result<()> {
+    use std::io::Write;
+    let cwd = std::env::current_dir()?;
+    let project_root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+
+    let db_path = paths::db_path(&project_root)?;
+    let cfg_path = project_root.join(paths::CONFIG_FILE);
+
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let out_path = out_file.unwrap_or_else(|| {
+        cwd.join(format!("agentcom-{ts}.snap"))
+    });
+
+    let mut f = std::fs::File::create(&out_path)
+        .with_context(|| format!("cannot create {}", out_path.display()))?;
+
+    f.write_all(b"ACSNAP01")?;
+
+    for (label, path) in [("hub.db", &db_path), ("agentcom.toml", &cfg_path)] {
+        if path.exists() {
+            let data = std::fs::read(path)?;
+            let name = label.as_bytes();
+            f.write_all(&(name.len() as u32).to_le_bytes())?;
+            f.write_all(name)?;
+            f.write_all(&(data.len() as u64).to_le_bytes())?;
+            f.write_all(&data)?;
+        }
+    }
+
+    println!("snapshot saved to {}", out_path.display());
+    Ok(())
+}
+
+fn run_restore(snap_file: std::path::PathBuf) -> Result<()> {
+    use std::io::Read;
+    let cwd = std::env::current_dir()?;
+    let project_root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+
+    let data = std::fs::read(&snap_file)
+        .with_context(|| format!("cannot read {}", snap_file.display()))?;
+
+    if data.len() < 8 || &data[..8] != b"ACSNAP01" {
+        anyhow::bail!("not a valid agentcom snapshot file");
+    }
+
+    let mut pos = 8usize;
+    while pos < data.len() {
+        if pos + 4 > data.len() { break; }
+        let name_len = u32::from_le_bytes(data[pos..pos+4].try_into().unwrap()) as usize;
+        pos += 4;
+        if pos + name_len > data.len() { break; }
+        let name = std::str::from_utf8(&data[pos..pos+name_len])
+            .context("invalid filename in snapshot")?;
+        pos += name_len;
+        if pos + 8 > data.len() { break; }
+        let data_len = u64::from_le_bytes(data[pos..pos+8].try_into().unwrap()) as usize;
+        pos += 8;
+        if pos + data_len > data.len() { break; }
+        let content = &data[pos..pos+data_len];
+        pos += data_len;
+
+        let dest = match name {
+            "hub.db" => paths::db_path(&project_root)?,
+            "agentcom.toml" => project_root.join(paths::CONFIG_FILE),
+            _ => {
+                eprintln!("unknown file in snapshot: {name}, skipping");
+                continue;
+            }
+        };
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&dest, content)?;
+        println!("restored {name} → {}", dest.display());
+    }
+    println!("restore complete");
     Ok(())
 }
 

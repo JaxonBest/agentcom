@@ -1,13 +1,15 @@
 //! Minimal HTTP/1.1 JSON API for external dashboards and CI health checks.
 //! Acts as a thin proxy to the IPC server — no shared state needed.
 //!
-//! Endpoints (127.0.0.1 only, requires `Authorization: Bearer <token>`):
-//!   GET /status  — fleet status (agents, cost, open tasks)
-//!   GET /tasks   — task board (all statuses)
-//!   GET /agents  — agent list from status
+//! Endpoints (127.0.0.1 only):
+//!   GET /health  — no auth; returns {"status":"ok","uptime_secs":N,"version":"..."}
+//!   GET /status  — requires Bearer token; fleet status (agents, cost, open tasks)
+//!   GET /tasks   — requires Bearer token; task board (all statuses)
+//!   GET /agents  — requires Bearer token; agent list from status
 //!
 //! The token is the same IPC token used by the hub protocol.
 
+use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -23,6 +25,7 @@ pub async fn serve(port: u16, ipc_port: u16, token: String) {
             return;
         }
     };
+    let started = Instant::now();
     loop {
         let (stream, peer) = match listener.accept().await {
             Ok(s) => s,
@@ -32,8 +35,9 @@ pub async fn serve(port: u16, ipc_port: u16, token: String) {
             continue;
         }
         let token = token.clone();
+        let uptime = started.elapsed().as_secs();
         tokio::spawn(async move {
-            if let Err(e) = handle_conn(stream, ipc_port, &token).await {
+            if let Err(e) = handle_conn(stream, ipc_port, &token, uptime).await {
                 tracing::debug!("REST: {peer} error: {e}");
             }
         });
@@ -44,6 +48,7 @@ async fn handle_conn(
     stream: tokio::net::TcpStream,
     ipc_port: u16,
     token: &str,
+    uptime_secs: u64,
 ) -> anyhow::Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
@@ -68,6 +73,27 @@ async fn handle_conn(
         if let Some(rest) = line.strip_prefix("Authorization:") {
             auth_header = Some(rest.trim().to_string());
         }
+    }
+
+    // /health is unauthenticated — useful for load balancers and CI readiness checks.
+    if path == "/health" {
+        if method != "GET" {
+            writer
+                .write_all(b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\n\r\n")
+                .await?;
+            return Ok(());
+        }
+        let version = env!("CARGO_PKG_VERSION");
+        let body = format!(
+            r#"{{"status":"ok","uptime_secs":{uptime_secs},"version":"{version}"}}"#
+        );
+        let header = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            body.len()
+        );
+        writer.write_all(header.as_bytes()).await?;
+        writer.write_all(body.as_bytes()).await?;
+        return Ok(());
     }
 
     let expected = format!("Bearer {token}");
