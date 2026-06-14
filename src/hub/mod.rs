@@ -64,6 +64,8 @@ pub struct Hub {
     /// Per-agent sliding window of prompt-send Instants for RPM tracking.
     rpm_window: HashMap<String, std::collections::VecDeque<Instant>>,
     audit: audit::AuditLog,
+    /// Last observed mtime of agentcom.toml; used for hot-reload detection.
+    config_mtime: Option<std::time::SystemTime>,
 }
 
 impl Hub {
@@ -169,6 +171,7 @@ impl Hub {
             usage_observed_pct: None,
             rpm_window: HashMap::new(),
             audit,
+            config_mtime: None,
         })
     }
 
@@ -704,6 +707,7 @@ impl Hub {
 
         self.free_mode_tick();
         self.check_stalls();
+        self.check_config_reload();
     }
 
     /// Free mode: enforce time/usage stop conditions; when the whole fleet
@@ -1317,6 +1321,81 @@ impl Hub {
                 self.stop_agent(&name);
             }
         }
+    }
+
+    /// Re-read agentcom.toml when its mtime changes. Spawns new agents; updates
+    /// existing agent configs in memory. Does NOT stop removed agents (logs warning).
+    fn check_config_reload(&mut self) {
+        if !self.cfg.config_watch {
+            return;
+        }
+        let config_path = self.project_root.join("agentcom.toml");
+        let mtime = match std::fs::metadata(&config_path).and_then(|m| m.modified()) {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+        // First call: record mtime and return without reloading.
+        if self.config_mtime.is_none() {
+            self.config_mtime = Some(mtime);
+            return;
+        }
+        if self.config_mtime == Some(mtime) {
+            return;
+        }
+        self.config_mtime = Some(mtime);
+        self.apply_config_diff(&config_path);
+    }
+
+    fn apply_config_diff(&mut self, config_path: &std::path::Path) {
+        let project_root = self.project_root.clone();
+        let new_cfg = match crate::config::HubConfig::load(config_path.parent().unwrap_or(&project_root)) {
+            Ok(c) => c,
+            Err(e) => {
+                self.log(format!("config hot-reload: parse error (keeping old config): {e}"));
+                return;
+            }
+        };
+        self.log("config hot-reload: agentcom.toml changed — applying diff".to_string());
+
+        // Detect removed agents (warn only — do not stop).
+        let new_names: std::collections::HashSet<&str> =
+            new_cfg.agents.iter().map(|a| a.name.as_str()).collect();
+        for old in &self.cfg.agents {
+            if !new_names.contains(old.name.as_str()) {
+                self.log(format!(
+                    "config hot-reload: agent '{}' removed from config — still running (stop it manually)",
+                    old.name
+                ));
+            }
+        }
+
+        // Update in-memory config for existing agents; spawn new ones.
+        for new_agent in &new_cfg.agents {
+            if let Some(rt) = self.agents.get_mut(&new_agent.name) {
+                rt.cfg = new_agent.clone();
+                self.log(format!("config hot-reload: updated config for '{}'", new_agent.name));
+            } else {
+                // New agent — add to running fleet.
+                self.log(format!("config hot-reload: spawning new agent '{}'", new_agent.name));
+                let buf = Arc::new(RwLock::new(crate::tui::ringbuf::RingBuf::new()));
+                self.buffers.write().unwrap().insert(new_agent.name.clone(), buf.clone());
+                self.agents.insert(
+                    new_agent.name.clone(),
+                    crate::agent::AgentRuntime::new(new_agent.clone(), buf),
+                );
+                let name = new_agent.name.clone();
+                let _ = self.spawn_agent(&name, None);
+            }
+        }
+
+        // Preserve agents list order from new config; append any agents not in new config.
+        let mut merged = new_cfg.agents.clone();
+        for old in &self.cfg.agents {
+            if !new_names.contains(old.name.as_str()) {
+                merged.push(old.clone());
+            }
+        }
+        self.cfg = crate::config::HubConfig { agents: merged, ..new_cfg };
     }
 
     /// After an agent releases file claims, auto-commit any modified files

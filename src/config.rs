@@ -75,6 +75,12 @@ pub struct HubConfig {
     /// the commit is skipped and a warning is logged. Example: "cargo test".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_commit_test_cmd: Option<String>,
+    /// Re-read agentcom.toml while the hub is running. When the file changes,
+    /// new agents are spawned and existing agent configs are updated in memory.
+    /// Removing an agent from the file logs a warning but does not stop it.
+    /// Default: false. Set to true to enable live config reloads.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub config_watch: bool,
     #[serde(default, rename = "agent")]
     pub agents: Vec<AgentConfig>,
 }
