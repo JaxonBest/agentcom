@@ -1,6 +1,6 @@
 //! Child `claude` process construction.
 
-use crate::config::{AgentConfig, HubConfig};
+use crate::config::{AgentConfig, AgentProvider, HubConfig};
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -17,10 +17,45 @@ pub fn resolve_claude_exe() -> Result<PathBuf> {
     )
 }
 
+/// Resolve the Codex executable used by the adapter.
+/// `AGENTCOM_CODEX_EXE` overrides the PATH lookup.
+pub fn resolve_codex_exe() -> Result<PathBuf> {
+    if let Ok(p) = std::env::var("AGENTCOM_CODEX_EXE") {
+        return Ok(PathBuf::from(p));
+    }
+    which::which("codex").context(
+        "could not find `codex` on PATH — install Codex or set AGENTCOM_CODEX_EXE",
+    )
+}
+
+/// Resolve the bundled adapter binary that makes Codex look like a persistent
+/// agentcom child process.
+pub fn resolve_codex_adapter_exe(agentcom_dir: Option<&Path>) -> Result<PathBuf> {
+    if let Ok(p) = std::env::var("AGENTCOM_CODEX_ADAPTER_EXE") {
+        return Ok(PathBuf::from(p));
+    }
+    let exe_name = if cfg!(windows) {
+        "agentcom-codex-adapter.exe"
+    } else {
+        "agentcom-codex-adapter"
+    };
+    if let Some(dir) = agentcom_dir {
+        let p = dir.join(exe_name);
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+    which::which(exe_name).context(
+        "could not find `agentcom-codex-adapter` beside agentcom or on PATH",
+    )
+}
+
 pub struct SpawnSpec<'a> {
     pub hub_cfg: &'a HubConfig,
     pub agent_cfg: &'a AgentConfig,
     pub claude_exe: &'a Path,
+    pub codex_exe: &'a Path,
+    pub codex_adapter_exe: &'a Path,
     pub project_root: &'a Path,
     pub session_id: &'a str,
     /// Resume a previous session instead of starting fresh (crash restart).
@@ -37,6 +72,11 @@ pub fn spawn_agent(spec: &SpawnSpec) -> Result<Child> {
     let cwd = spec.hub_cfg.agent_cwd(spec.agent_cfg, spec.project_root);
     std::fs::create_dir_all(&cwd)
         .with_context(|| format!("creating agent cwd {}", cwd.display()))?;
+
+    let provider = spec.hub_cfg.agent_provider(spec.agent_cfg);
+    if provider == AgentProvider::Codex {
+        return spawn_codex_agent(spec, &cwd);
+    }
 
     // .cmd/.bat shims can't be CreateProcess'd directly on Windows.
     let is_shim = spec
@@ -128,6 +168,66 @@ pub fn spawn_agent(spec: &SpawnSpec) -> Result<Child> {
 
     cmd.spawn()
         .with_context(|| format!("spawning claude for agent {:?}", spec.agent_cfg.name))
+}
+
+fn spawn_codex_agent(spec: &SpawnSpec, cwd: &Path) -> Result<Child> {
+    let mut cmd = Command::new(spec.codex_adapter_exe);
+    cmd.arg("--codex-exe")
+        .arg(spec.codex_exe)
+        .arg("--cwd")
+        .arg(cwd)
+        .arg("--session-id")
+        .arg(spec.session_id)
+        .arg("--system-prompt-file")
+        .arg(write_temp_prompt(&spec.agent_cfg.name, spec.system_prompt_append)?);
+
+    if let Some(model) = spec
+        .agent_cfg
+        .model
+        .as_ref()
+        .or(spec.hub_cfg.default_model.as_ref())
+    {
+        cmd.arg("--model").arg(model);
+    }
+    if let Some(prev) = spec.resume_session {
+        cmd.arg("--resume").arg(prev);
+    }
+
+    cmd.current_dir(cwd)
+        .env("AGENTCOM_PORT", spec.ipc_port.to_string())
+        .env("AGENTCOM_TOKEN", spec.ipc_token)
+        .env("AGENTCOM_AGENT", &spec.agent_cfg.name)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    if let Some(dir) = spec.agentcom_dir {
+        let path_var = std::env::var_os("PATH").unwrap_or_default();
+        let mut paths: Vec<PathBuf> = vec![dir.to_path_buf()];
+        paths.extend(std::env::split_paths(&path_var));
+        if let Ok(joined) = std::env::join_paths(paths) {
+            cmd.env("PATH", joined);
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+    }
+
+    cmd.spawn()
+        .with_context(|| format!("spawning codex adapter for agent {:?}", spec.agent_cfg.name))
+}
+
+fn write_temp_prompt(agent: &str, prompt: &str) -> Result<PathBuf> {
+    let path = std::env::temp_dir().join(format!(
+        "agentcom-{agent}-{}-system.txt",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::write(&path, prompt)?;
+    Ok(path)
 }
 
 /// Kill a child and its entire descendant tree (claude spawns tool

@@ -10,7 +10,7 @@ use clap::{Args, Parser, Subcommand};
 #[command(
     name = "agentcom",
     version,
-    about = "Communication hub for Claude Code agent fleets: shared task board, messaging, interrupts."
+    about = "Local coordination hub for mixed Claude Code and Codex coding-agent fleets."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -158,6 +158,9 @@ pub enum AgentCmd {
         /// What this agent owns and how it should behave
         #[arg(short, long)]
         role: String,
+        /// Runtime provider: claude or codex
+        #[arg(long)]
+        provider: Option<crate::config::AgentProvider>,
         #[arg(short, long)]
         model: Option<String>,
         /// Allowed tools (comma-separated). Default: Bash,Read,Edit,Write,Glob,Grep
@@ -329,6 +332,7 @@ pub async fn run_agent_cmd(cmd: AgentCmd) -> Result<()> {
             name,
             role,
             model,
+            provider,
             tools,
             cwd,
             permission_mode,
@@ -340,6 +344,7 @@ pub async fn run_agent_cmd(cmd: AgentCmd) -> Result<()> {
                 name: name.clone(),
                 role,
                 cwd,
+                provider,
                 model,
                 allowed_tools: Some(tools.unwrap_or_else(|| {
                     ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]

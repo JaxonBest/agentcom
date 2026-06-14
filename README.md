@@ -1,97 +1,319 @@
 # agentcom
 
-A communication hub for fleets of [Claude Code](https://claude.com/claude-code) agents. agentcom spawns multiple `claude` instances as supervised child processes, gives them a **shared task board** and **inter-agent messaging** (including true mid-turn **interrupts**), and keeps them working autonomously for as long as there is work — so they can manage large codebases together.
-───────────────────────────────────────────────────┘
-```
+`agentcom` is a local coordination hub for fleets of coding agents. It can run
+Claude Code and Codex agents in the same project, gives them a shared task
+board, lets them message or interrupt each other, and provides a chat-first TUI
+where you talk to a coordinator agent called the composer.
 
-## How it works
+The core idea is simple: you describe what you want done, the composer breaks it
+into work, workers claim tasks and files, and the hub keeps everyone moving
+without letting agents silently overwrite each other.
 
-- **The hub drives the loop.** When an agent's turn ends, the hub composes its next prompt from pending inbox messages and the task board, and feeds it. Idle agents cost nothing; the hub wakes them when messages or tasks arrive. No polling, no stop-hook tricks.
-- **Agents coordinate themselves.** Each agent's system prompt teaches it the `agentcom` CLI: claim tasks before working, file follow-up tasks it discovers, message teammates when it finishes something, and *interrupt* a teammate only to stop wasted or conflicting work.
-- **The fleet scales itself — within caps.** When the board has more independent work than the team can absorb, agents may recruit teammates with `agentcom agent add` (they're taught to decompose into tasks first). The `max_agents` cap and the USD budgets keep recruitment bounded, and every recruitment is logged with who hired whom.
-- **Interrupts are real.** `agentcom interrupt <agent> "<msg>"` sends a `control_request` over the agent's stdin that aborts its in-progress turn; the urgent message is delivered the moment the aborted turn ends. If the child doesn't abort within `interrupt_timeout_secs`, the hub force-kills the process tree and restarts the session with `--resume`, delivering the message as the first prompt.
-- **Everything survives restarts.** Tasks, messages, and run history live in SQLite under `%LOCALAPPDATA%\agentcom\<project-id>\` (deliberately outside OneDrive-synced folders).
+## Current Shape
 
-## Quick start
+- **Mixed providers**: per-agent `provider = "claude"` or `provider = "codex"`.
+- **Composer-first UI**: `agentcom up` opens a chat with the composer; agent
+  output is one tab away.
+- **Shared board**: tasks are persisted in SQLite and claimed before work starts.
+- **File claims**: agents claim paths before editing so conflicting work is
+  rejected and rerouted.
+- **Self-scaling**: agents can recruit more agents with `agentcom agent add`,
+  bounded by `max_agents` and budgets.
+- **Free mode**: give the fleet a broad goal plus a stopping condition, and it
+  keeps generating useful work until the stop fires.
+- **Fresh sessions**: every `agentcom up` resets stale claimed tasks and file
+  claims before spawning agents. Done and blocked task history stays intact.
+
+## Install
+
+From this repository:
 
 ```powershell
-cargo install --path .       # or: cargo build --release
-
-cd your-project
-agentcom init                # writes agentcom.toml — edit your fleet
-agentcom up --task "Refactor the auth module; keep tests green"
+cargo install --path . --force
 ```
 
-### Free mode
-
-Give the fleet a standing goal and a stopping point, then walk away:
+If Windows says it cannot replace `agentcom.exe`, a hub is still running:
 
 ```powershell
-agentcom up --free "raise test coverage and fix what you find" --for 2h --budget 5.0
-agentcom up --free "polish the docs" --usage 80        # stop at 80% of the 5h usage limit
+agentcom stop
+cargo install --path . --force
 ```
 
-Whenever the whole fleet goes idle, the hub nudges the composer to queue the next
-most valuable work toward the goal (it's told to prefer quality over busywork and to
-say so when nothing worthwhile remains). The run ends when ANY stop condition fires:
-`--for` wall-clock time, `--budget` USD spend, or `--usage` percent of the 5-hour
-subscription limit (read from the CLI's rate-limit events; falls back to the
-warning/rejected status signals when no exact percentage is reported).
+The install includes:
 
-### The dashboard
+- `agentcom`
+- `agentcom-codex-adapter`
+- `mock-claude` and `mock-codex` for tests
 
-`agentcom up` opens the TUI dashboard: live agent output panes, the task board, the message feed, and keybindings to message (`m`), interrupt (`u`), broadcast (`M`), add tasks (`a`), pause (`p`), and stop (`s`) agents. Use `--headless` to run without it.
+## Quick Start
 
-## Configuration (`agentcom.toml`)
+In a project you want agents to work on:
+
+```powershell
+agentcom init
+agentcom up
+```
+
+Then type your request into the TUI chat. The composer receives it, plans, files
+tasks, delegates, and reports progress back to you.
+
+You can also seed work from the command line:
+
+```powershell
+agentcom up --task "Fix the failing tests and explain the root cause"
+agentcom task add "Audit src/auth for unsafe edge cases" -p 0
+```
+
+Use `--headless` when you want the hub without the TUI:
+
+```powershell
+agentcom up --headless --task "Run tests and fix failures"
+```
+
+## Configuration
+
+`agentcom.toml` lives in the project root. Commands can be run from any
+subdirectory; agentcom walks upward to find the config.
 
 ```toml
 project_name = "my-project"
+
+# Runtime for agents that do not set one directly.
+# default_provider = "claude"        # or "codex"
+
+# Model for agents that do not set one directly.
+# For Claude this is a Claude Code model name; for Codex this is a Codex model.
 # default_model = "sonnet"
-# max_total_budget_usd = 20.0      # hub shuts down when total spend crosses this
+
+# Stop all work once total tracked spend crosses this.
+# max_total_budget_usd = 20.0
+
+# Seconds to wait for an interrupt to complete before force-killing.
 # interrupt_timeout_secs = 15
+
+# Worker cap. The injected composer gets its own slot.
+# max_agents = 8
 
 [[agent]]
 name = "builder"
-role = "Implements features and fixes. Owns src/. Coordinates with reviewer before large refactors."
-# cwd = "."                        # working dir, relative to this file
+role = "Implements features and fixes. Claims files before editing and keeps tests green."
+# provider = "claude"
+# cwd = "."
 # model = "sonnet"
-# allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
 # permission_mode = "acceptEdits"
 # max_turns_per_prompt = 50
-# max_budget_usd = 10.0            # this agent pauses when it has spent this much
-# auto_restart = true              # respawn with --resume on crash
+# max_budget_usd = 10.0
+# auto_restart = true
 
 [[agent]]
 name = "reviewer"
-role = "Reviews changes made by other agents, runs tests, files follow-up tasks."
+role = "Reviews changes, runs tests, and files follow-up tasks for problems found."
+provider = "codex"
+model = "gpt-5.4"
+allowed_tools = ["Bash", "Read", "Glob", "Grep"]
 ```
 
-## CLI
+If you do not define a `composer`, `agentcom up` injects one automatically. To
+customize it, add your own:
 
-From any terminal in the project (and from the agents themselves, via their Bash tool):
+```toml
+[[agent]]
+name = "composer"
+role = "Lead engineer. Turn human goals into tasks, prevent file conflicts, recruit specialists, and report progress."
+provider = "claude"
+allowed_tools = ["Bash", "Read", "Glob", "Grep"]
+```
+
+## Mixed Claude and Codex Fleets
+
+You can mix providers freely:
+
+```toml
+default_provider = "claude"
+
+[[agent]]
+name = "builder"
+role = "Primary implementer"
+provider = "claude"
+
+[[agent]]
+name = "tester"
+role = "Independent test runner and regression hunter"
+provider = "codex"
+model = "gpt-5.4"
+
+[[agent]]
+name = "reviewer"
+role = "Reviews the final diff and checks for missed edge cases"
+provider = "codex"
+```
+
+They share the same board, message bus, file claims, composer, and TUI.
+
+Provider differences:
+
+- Claude agents run as persistent `claude -p --input-format stream-json
+  --output-format stream-json` sessions.
+- Codex agents run through `agentcom-codex-adapter`, which keeps the hub protocol
+  persistent and launches `codex exec --json` for each fed turn.
+- Claude supports native mid-turn control requests. Codex turns are stopped by
+  tree-killing the active `codex exec` process and delivering the urgent message
+  on the next turn.
+
+## TUI
+
+`agentcom up` opens the dashboard.
+
+Tabs:
+
+| Key | View |
+|---|---|
+| `1` | Chat with composer |
+| `2` or Tab | Selected agent output |
+| `3` | Task board |
+| `4` | Message feed |
+| `5` | Hub log |
+
+Common keys:
+
+| Key | Action |
+|---|---|
+| Enter in chat | Send message to composer |
+| `a` | Add a direct task |
+| `m` | Message selected agent |
+| `M` | Broadcast to all agents |
+| `u` | Interrupt selected agent |
+| `p` | Pause selected agent |
+| `s` | Stop selected agent / hub |
+| Ctrl+C | Quit / graceful shutdown |
+
+The chat view includes an activity panel so you can see what agents are doing
+while they are thinking: current state, recent tool activity, task claims,
+completions, recruitment, interrupts, and crashes.
+
+## Free Mode
+
+Free mode is for broad goals where the fleet should keep working until a limit
+is reached:
+
+```powershell
+agentcom up --free "find bugs, improve tests, and document what changed" --for 2h
+agentcom up --free "polish docs and examples" --budget 5.0
+agentcom up --free "general code health" --for 90m --budget 10 --usage 80
+```
+
+Stop conditions:
+
+- `--for 2h`, `90m`, `1h30m`, or `45s`: wall-clock limit
+- `--budget 5.0`: tracked spend limit
+- `--usage 80`: provider usage-limit percentage when available
+
+When the entire fleet is idle, the hub nudges the composer to review the goal,
+the board, and the codebase, then queue the next useful work. The composer is
+instructed to prefer valuable work over busywork and to tell you when nothing
+worth doing remains.
+
+## Sessions and Stopping Work
+
+To stop all active work:
+
+```powershell
+agentcom stop
+```
+
+On the next `agentcom up`, agentcom starts a fresh session:
+
+- claimed tasks are reset to `open`
+- file claims are cleared
+- done and blocked tasks remain as history
+
+Useful commands while running:
+
+```powershell
+agentcom status
+agentcom pause builder
+agentcom resume builder
+agentcom task list --status claimed
+agentcom task reopen 12
+agentcom files list
+```
+
+## CLI Reference
 
 | Command | What it does |
 |---|---|
-| `agentcom status` | Fleet overview: states, spend, turns, open tasks |
-| `agentcom send <agent\|all> "<msg>"` | Message an agent; delivered when its current turn ends |
-| `agentcom interrupt <agent> "<msg>"` | Abort the agent's turn and deliver immediately |
-| `agentcom inbox` | Read (and consume) your pending messages |
-| `agentcom task add "<title>" [-d desc] [-p 0-4] [--dep id]` | Add work to the board (0 = highest priority) |
-| `agentcom task list [--status open\|claimed\|done\|blocked]` | Show the board |
-| `agentcom task claim/done/block/reopen <id>` | Task lifecycle |
-| `agentcom agent add <name> --role "<role>"` | Add an agent: writes agentcom.toml and hot-spawns it if the hub is running |
-| `agentcom agent list` | Configured agents with live state |
-| `agentcom tail <agent> [-n 50] [-f]` | An agent's recent output (`-f` to follow live) |
-| `agentcom pause/resume <agent>` | Pause after the current turn / resume |
-| `agentcom stop [agent]` | Stop one agent, or the whole hub |
+| `agentcom init` | Write a starter `agentcom.toml` |
+| `agentcom up [agents...]` | Start the hub and TUI |
+| `agentcom up --headless` | Start the hub without TUI |
+| `agentcom status` | Fleet state, spend, turns, pending messages, open tasks |
+| `agentcom send <agent\|all> "<msg>"` | Queue a message for an agent |
+| `agentcom interrupt <agent> "<msg>"` | Stop current work and deliver urgent message |
+| `agentcom inbox` | Read and consume human-directed messages |
+| `agentcom task add "<title>" [-d desc] [-p 0-4] [--dep id]` | Add a task |
+| `agentcom task list [--status open\|claimed\|done\|blocked]` | List tasks |
+| `agentcom task claim <id>` | Claim a task for the current agent |
+| `agentcom task done <id> --note "<note>"` | Mark task done |
+| `agentcom task block <id> --reason "<reason>"` | Block a task |
+| `agentcom task reopen <id>` | Reopen a blocked/claimed/done task |
+| `agentcom agent add <name> --role "<role>" [--provider claude\|codex]` | Add an agent |
+| `agentcom agent list` | List configured agents and live states |
+| `agentcom files claim <paths...>` | Claim files before editing |
+| `agentcom files release <paths...>` | Release file claims |
+| `agentcom files release --all` | Release all claims for current agent |
+| `agentcom files list` | Show file claims |
+| `agentcom tail <agent> [-n 50] [-f]` | Show recent output |
+| `agentcom pause <agent>` | Pause after current turn |
+| `agentcom resume <agent>` | Resume a paused agent |
+| `agentcom stop [agent]` | Stop one agent or the entire hub |
 
-## Design notes
+## Environment Variables
 
-- Each agent is `claude -p --input-format stream-json --output-format stream-json` with stdin kept open; the hub is the single writer, so prompts and control requests never interleave.
-- The stream-json codec tolerates unknown event types, unknown fields, and unparseable lines — a Claude Code upgrade degrades gracefully instead of crashing the hub. If the interrupt subtype is ever renamed, override it without recompiling: `AGENTCOM_INTERRUPT_SUBTYPE=<name>`.
-- Agent discovery is zero-config: the hub injects `AGENTCOM_PORT` / `AGENTCOM_TOKEN` / `AGENTCOM_AGENT` into each child, so `agentcom <cmd>` invoked from an agent's Bash tool finds the hub and self-identifies. Human terminals discover via `hub.json` in the project data dir.
-- Children are spawned with `CREATE_NEW_PROCESS_GROUP` (Ctrl+C in the hub's console doesn't nuke them); shutdown closes stdin, waits 5 s, then tree-kills via `taskkill /T`.
-- `AGENTCOM_CAPTURE_RAW=<dir>` tees every raw NDJSON line from each agent to `<dir>/<agent>.ndjson` — handy for debugging and protocol fixtures.
+| Variable | Purpose |
+|---|---|
+| `AGENTCOM_CLAUDE_EXE` | Override `claude` executable path |
+| `AGENTCOM_CODEX_EXE` | Override `codex` executable path |
+| `AGENTCOM_CODEX_ADAPTER_EXE` | Override bundled Codex adapter path |
+| `AGENTCOM_INTERRUPT_SUBTYPE` | Override Claude control-request interrupt subtype |
+| `AGENTCOM_CAPTURE_RAW` | Tee raw child stdout lines to `<dir>/<agent>.ndjson` |
+| `AGENTCOM_FREE_NUDGE_SECS` | Override free-mode idle nudge delay |
+
+The hub injects these into child agents:
+
+- `AGENTCOM_PORT`
+- `AGENTCOM_TOKEN`
+- `AGENTCOM_AGENT`
+
+That is how `agentcom <cmd>` calls from an agent identify and authenticate
+against the running hub.
+
+## Data Storage
+
+Mutable runtime state is stored outside the project directory:
+
+```text
+%LOCALAPPDATA%\agentcom\data\<project-id>\
+```
+
+This keeps SQLite WAL files away from OneDrive sync. The project only needs
+`agentcom.toml`.
+
+## How This Differs From Similar Tools
+
+Tools like Claude Squad and Crystal/Nimbalyst are strong parallel session
+managers: they run multiple coding agents in isolated terminals or git
+worktrees. `agentcom` is more of a local team coordinator:
+
+- one shared task board instead of independent prompts only
+- composer agent as the front door
+- inter-agent messages and human inbox
+- advisory file claims for same-worktree coordination
+- optional mixed Claude/Codex fleet
+- free mode for broad, bounded autonomy
+
+The tradeoff: worktree isolation is harder safety; agentcom's file claims are
+advisory and rely on agent compliance. The upside is tighter collaboration in a
+single working tree.
 
 ## Testing
 
@@ -99,10 +321,10 @@ From any terminal in the project (and from the agents themselves, via their Bash
 cargo test
 ```
 
-Integration tests run a real headless hub against `mock-claude` (a scripted stream-json test double in this repo), covering the task lifecycle, message passing, interrupts, ignored-interrupt escalation (kill + resume), pause/resume, and graceful shutdown — at zero API cost. The protocol codec is additionally locked against NDJSON fixtures captured from a live claude CLI session, including a real interrupted turn.
+The test suite runs a real headless hub against zero-cost `mock-claude` and
+`mock-codex` binaries. It covers task lifecycle, message passing, interrupts,
+ignored-interrupt escalation, pause/resume, provider switching, file claims,
+free mode, recruitment, composer chat, and graceful shutdown.
 
-A cheap live test (one haiku agent, a few cents):
-
-```powershell
-agentcom init && agentcom up --headless --task "Say pong. That is the whole task."
-```
+The protocol codec is also locked against NDJSON fixtures captured from a live
+Claude Code CLI session, including a real interrupted turn.

@@ -29,6 +29,8 @@ pub struct Hub {
     pub project_root: PathBuf,
     store: Arc<Store>,
     claude_exe: PathBuf,
+    codex_exe: PathBuf,
+    codex_adapter_exe: PathBuf,
     agents: HashMap<String, AgentRuntime>,
     /// Cumulative cost/turn baselines: `total_cost_usd` in result events is
     /// cumulative per session, so per-agent totals are base + latest.
@@ -65,7 +67,32 @@ impl Hub {
         free: Option<crate::config::FreeMode>,
     ) -> Result<Self> {
         let store = Arc::new(Store::open(&crate::paths::db_path(&project_root)?)?);
-        let claude_exe = spawn::resolve_claude_exe()?;
+        let agentcom_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+        let uses_claude = cfg
+            .agents
+            .iter()
+            .any(|a| cfg.agent_provider(a) == crate::config::AgentProvider::Claude);
+        let uses_codex = cfg
+            .agents
+            .iter()
+            .any(|a| cfg.agent_provider(a) == crate::config::AgentProvider::Codex);
+        let claude_exe = if uses_claude {
+            spawn::resolve_claude_exe()?
+        } else {
+            PathBuf::from("claude")
+        };
+        let codex_exe = if uses_codex {
+            spawn::resolve_codex_exe()?
+        } else {
+            PathBuf::from("codex")
+        };
+        let codex_adapter_exe = if uses_codex {
+            spawn::resolve_codex_adapter_exe(agentcom_dir.as_deref())?
+        } else {
+            PathBuf::from("agentcom-codex-adapter")
+        };
 
         let (bus_tx, bus_rx) = mpsc::channel::<HubEvent>(1024);
         let (ipc_tx, ipc_rx) = mpsc::channel::<IpcMsg>(256);
@@ -102,6 +129,8 @@ impl Hub {
             project_root,
             store,
             claude_exe,
+            codex_exe,
+            codex_adapter_exe,
             agents,
             session_base: HashMap::new(),
             buffers,
@@ -183,6 +212,8 @@ impl Hub {
             hub_cfg: &self.cfg,
             agent_cfg: &agent_cfg,
             claude_exe: &self.claude_exe,
+            codex_exe: &self.codex_exe,
+            codex_adapter_exe: &self.codex_adapter_exe,
             project_root: &self.project_root,
             session_id: &session_id,
             resume_session: resume.as_deref(),

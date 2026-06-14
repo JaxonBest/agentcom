@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 #[serde(deny_unknown_fields)]
 pub struct HubConfig {
     pub project_name: String,
+    /// Default child runtime for agents: Claude Code or Codex.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_provider: Option<AgentProvider>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
     /// Hub-wide cumulative spend cap in USD across all agents.
@@ -40,6 +43,8 @@ pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<AgentProvider>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_tools: Option<Vec<String>>,
@@ -53,6 +58,13 @@ pub struct AgentConfig {
     pub max_budget_usd: Option<f64>,
     #[serde(default = "default_true")]
     pub auto_restart: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum AgentProvider {
+    Claude,
+    Codex,
 }
 
 pub const COMPOSER_NAME: &str = "composer";
@@ -112,6 +124,7 @@ pub fn composer_default(default_model: Option<&str>) -> AgentConfig {
                You never edit code yourself."
             .to_string(),
         cwd: None,
+        provider: None,
         model: default_model.map(str::to_string),
         allowed_tools: Some(
             ["Bash", "Read", "Glob", "Grep"].map(String::from).to_vec(),
@@ -190,6 +203,13 @@ impl HubConfig {
         self.agents.iter().find(|a| a.name == name)
     }
 
+    pub fn agent_provider(&self, agent: &AgentConfig) -> AgentProvider {
+        agent
+            .provider
+            .or(self.default_provider)
+            .unwrap_or(AgentProvider::Claude)
+    }
+
     /// Resolve an agent's cwd against the project root.
     pub fn agent_cwd(&self, agent: &AgentConfig, project_root: &Path) -> PathBuf {
         match &agent.cwd {
@@ -204,6 +224,9 @@ pub const EXAMPLE_CONFIG: &str = r#"# agentcom configuration
 # Define your agent fleet here. Run `agentcom up` to start it.
 
 project_name = "my-project"
+
+# Runtime for agents that don't set one: "claude" or "codex".
+# default_provider = "claude"
 
 # Default model for agents that don't set one. Omit to use your `claude` default.
 # default_model = "sonnet"
@@ -228,6 +251,7 @@ role = "Implements features and fixes. Owns src/. Coordinates with reviewer befo
 # work too.
 allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
 # cwd = "."                      # working dir, relative to this file
+# provider = "claude"            # or "codex"
 # model = "sonnet"
 # permission_mode = "acceptEdits"  # or "plan", "default", "bypassPermissions"
 # max_turns_per_prompt = 50

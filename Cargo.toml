@@ -2,7 +2,7 @@
 name = "agentcom"
 version = "0.1.0"
 edition = "2021"
-description = "A communication hub that lets Claude Code agents message and interrupt each other while working autonomously on large codebases"
+description = "A local coordination hub for mixed Claude Code and Codex coding-agent fleets"
 license = "MIT"
 
 [[bin]]
@@ -13,8 +13,16 @@ path = "src/main.rs"
 name = "mock-claude"
 path = "src/bin/mock_claude.rs"
 
+[[bin]]
+name = "agentcom-codex-adapter"
+path = "src/bin/codex_adapter.rs"
+
+[[bin]]
+name = "mock-codex"
+path = "src/bin/mock_codex.rs"
+
 [dependencies]
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "net", "sync", "time", "signal"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std", "net", "sync", "time", "signal"] }
 clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

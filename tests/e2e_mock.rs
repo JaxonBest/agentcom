@@ -13,6 +13,12 @@ fn agentcom_bin() -> &'static str {
 fn mock_claude_bin() -> &'static str {
     env!("CARGO_BIN_EXE_mock-claude")
 }
+fn codex_adapter_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_agentcom-codex-adapter")
+}
+fn mock_codex_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_mock-codex")
+}
 
 struct HubGuard {
     child: Child,
@@ -67,6 +73,8 @@ fn start_hub_args(
     cmd.args(extra_args);
     cmd.current_dir(project)
         .env("AGENTCOM_CLAUDE_EXE", mock_claude_bin())
+        .env("AGENTCOM_CODEX_ADAPTER_EXE", codex_adapter_bin())
+        .env("AGENTCOM_CODEX_EXE", mock_codex_bin())
         .env("MOCK_SCRIPT_DIR", script_dir)
         .env("RUST_LOG", "agentcom=debug")
         .stdout(Stdio::piped())
@@ -202,6 +210,44 @@ fn fleet_completes_task_and_passes_messages() {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+#[test]
+fn codex_provider_uses_adapter_and_completes_task() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    let scripts = tmp.path().join("scripts");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+
+    write_config(
+        &project,
+        &[("coder", "codex-backed worker")],
+        "default_provider = \"codex\"\n",
+    );
+
+    let _hub = start_hub(
+        &project,
+        &scripts,
+        &["prove codex provider works"],
+        &[(
+            "MOCK_CODEX_RUN",
+            "agentcom task claim 1;;agentcom task done 1 --note codex-finished",
+        )],
+    );
+
+    let done = wait_for(
+        &project,
+        &["task", "list", "--status", "done"],
+        Duration::from_secs(20),
+        |out| out.contains("codex-finished"),
+    );
+    assert!(done.contains("#1"), "codex-backed task completed: {done}");
+
+    let status = wait_for(&project, &["status"], Duration::from_secs(10), |out| {
+        out.contains("coder")
+    });
+    assert!(status.contains("idle"), "agent returned idle: {status}");
 }
 
 #[test]
