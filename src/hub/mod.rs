@@ -463,6 +463,16 @@ impl Hub {
             if self.shutting_down && rt.is_running() {
                 rt.state = AgentState::Stopped;
                 rt.state_detail = None;
+                // Close stdin and register a force-kill deadline so child
+                // processes are not orphaned after the hub exits.
+                if let Some(tx) = &rt.stdin_tx {
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        let _ = tx.send(WriterCmd::Close).await;
+                    });
+                }
+                self.stop_deadlines
+                    .insert(agent.to_string(), Instant::now() + STOP_GRACE);
                 self.emit_state(agent);
                 self.log(format!("{agent}: finished task, shutting down"));
             }
