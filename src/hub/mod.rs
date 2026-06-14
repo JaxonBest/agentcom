@@ -331,6 +331,7 @@ impl Hub {
 
     /// Main loop. Returns when shutdown completes.
     pub async fn run(&mut self) -> Result<()> {
+        self.audit.write("hub_start", "hub", serde_json::json!({"pid": std::process::id()}));
         self.fire_webhook(webhook::Payload::new(webhook::Event::HubStart));
 
         // agentcom.toml may contain webhook_secret; warn if others can read it.
@@ -380,6 +381,7 @@ impl Hub {
             }
         }
 
+        self.audit.write("hub_stop", "hub", serde_json::json!({}));
         self.fire_webhook(webhook::Payload::new(webhook::Event::HubStop));
         let _ = std::fs::remove_file(&self.hub_json);
         let _ = self.ui_tx.send(UiEvent::Shutdown);
@@ -647,6 +649,7 @@ impl Hub {
             rt.state_detail = Some(format!("circuit breaker: {count} crashes in {mins}min"));
             rt.paused_at = Some(now);
             self.emit_state(agent);
+            self.audit.write("circuit_breaker_triggered", agent, serde_json::json!({"crash_count": count, "window_mins": mins}));
             self.log(format!(
                 "CIRCUIT BREAKER: {agent} paused after {count} crashes in {mins}min — manual resume required"
             ));
@@ -1329,6 +1332,7 @@ impl Hub {
         if released > 0 || freed > 0 {
             self.wake_idle();
         }
+        self.audit.write("agent_stop", name, serde_json::json!({}));
         Response::ok_msg(format!("stopping {name}"))
     }
 
@@ -1341,6 +1345,7 @@ impl Hub {
                 rt.state = AgentState::Paused;
                 rt.paused_at = Some(std::time::Instant::now());
                 self.emit_state(name);
+                self.audit.write("agent_pause", name, serde_json::json!({}));
                 Response::ok_msg(format!("{name} paused"))
             }
             AgentState::Working | AgentState::Interrupting => {
@@ -1361,6 +1366,7 @@ impl Hub {
             rt.state = AgentState::Idle;
             rt.paused_at = None;
             self.emit_state(name);
+            self.audit.write("agent_resume", name, serde_json::json!({}));
             self.try_feed(name);
             Response::ok_msg(format!("{name} resumed"))
         } else {
