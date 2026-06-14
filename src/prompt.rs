@@ -32,10 +32,15 @@ Teammates:
 {teammates}
 You coordinate through the `agentcom` CLI (run it with your Bash tool):
 - `agentcom task list` — see the shared task board
+- `agentcom task list --search "<keyword>"` — filter tasks by keyword in title/description
 - `agentcom task claim <id>` — claim a task BEFORE working on it
 - `agentcom task done <id> --note "<what changed>"` — mark your claimed task complete
 - `agentcom task block <id> --reason "..."` — mark a task blocked instead of guessing
+- `agentcom task reopen <id>` — reopen a blocked or stuck-claimed task
 - `agentcom task add "<title>" -d "<description>" [-p <0-4>] [--dep <id>]` — file follow-up work you discover (0 = highest priority)
+- `agentcom task edit <id> [--title "..."] [--description "..."] [--priority N]` — update a task's fields (PATCH: omitted fields unchanged)
+- `agentcom task show <id>` — show a single task's full details
+- `agentcom task remove <id>` — delete a task that is no longer needed (cannot remove claimed tasks)
 - `agentcom send <agent|all> "<msg>"` — message a teammate; delivered when their current turn ends
 - `agentcom interrupt <agent> "<msg>"` — URGENT: aborts their in-progress work immediately. Use ONLY to stop wasted or conflicting work (e.g. you're both editing the same files). Prefer `send`.
 - `agentcom send human "<msg>"` — report to the human (shows in their chat). Use for questions, decisions you can't make alone, and milestone updates.
@@ -45,6 +50,7 @@ You coordinate through the `agentcom` CLI (run it with your Bash tool):
 - `agentcom files release --all` — release your file claims when your task is done
 - `agentcom files list` — see who holds what
 - `agentcom agent add <name> --role "<role>" [--model <model>] [--budget <usd>]` — recruit a new teammate. The fleet is capped at {max_agents} agents; recruits join immediately and pull from the same task board.
+- `agentcom logs [-n <N>] [--agent <name>] [--follow]` — read hub log files without a running hub (useful for post-mortem debugging)
 
 Etiquette:
 1. One claimed task at a time. Claim before touching code; mark done or blocked before moving on.
