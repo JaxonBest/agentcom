@@ -65,6 +65,12 @@ pub struct AgentRuntime {
     /// Restart bookkeeping for the crash-loop cap.
     pub restarts_this_hour: u32,
     pub restart_window_start: Option<Instant>,
+    /// Set once a budget-warning notification has been emitted this session.
+    pub budget_warn_fired: bool,
+    /// Timestamp when the agent last transitioned to Working. Used for stall detection.
+    pub working_since: Option<Instant>,
+    /// True once a stall warning has been logged for the current turn (reset on idle).
+    pub stall_warned: bool,
 }
 
 impl AgentRuntime {
@@ -84,6 +90,9 @@ impl AgentRuntime {
             pause_requested: false,
             restarts_this_hour: 0,
             restart_window_start: None,
+            budget_warn_fired: false,
+            working_since: None,
+            stall_warned: false,
         }
     }
 

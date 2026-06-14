@@ -93,6 +93,8 @@ impl Hub {
         let rt = self.agents.get_mut(name).expect("agent exists");
         rt.write_line(user_message(&prompt));
         rt.state = AgentState::Working;
+        rt.working_since = Some(Instant::now());
+        rt.stall_warned = false;
         rt.state_detail = claimed
             .as_ref()
             .map(|t| format!("task #{} {}", t.id, t.title));
@@ -110,6 +112,57 @@ impl Hub {
             .collect();
         for name in idle {
             self.try_feed(&name);
+        }
+    }
+
+    /// Check all Working agents for stalls. Called from the periodic hub tick.
+    /// Logs a warning once per turn when an agent has been Working for more
+    /// than STALL_WARN_SECS without completing. At STALL_INTERRUPT_SECS the
+    /// agent is interrupted so it can return to idle and pick up a fresh task.
+    pub(super) fn check_stalls(&mut self) {
+        const STALL_WARN_SECS: u64 = 10 * 60;
+        const STALL_INTERRUPT_SECS: u64 = 20 * 60;
+
+        let stalled: Vec<(String, u64)> = self
+            .agents
+            .iter()
+            .filter_map(|(name, rt)| {
+                let elapsed = rt.working_since?.elapsed().as_secs();
+                if elapsed >= STALL_WARN_SECS && rt.state == AgentState::Working {
+                    Some((name.clone(), elapsed))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        for (name, elapsed_secs) in stalled {
+            let mins = elapsed_secs / 60;
+            let rt = self.agents.get_mut(&name).expect("agent exists");
+            if !rt.stall_warned {
+                rt.stall_warned = true;
+                self.log(format!(
+                    "STALL WARNING: {name} has been Working for {mins}m without completing a turn"
+                ));
+            }
+            if elapsed_secs >= STALL_INTERRUPT_SECS {
+                self.log(format!(
+                    "STALL INTERRUPT: {name} stalled for {mins}m — interrupting to unblock"
+                ));
+                // Reset tracking so we don't fire again on the same stall.
+                if let Some(rt) = self.agents.get_mut(&name) {
+                    rt.working_since = None;
+                    rt.stall_warned = false;
+                }
+                // Queue an urgent message so the agent knows why it was interrupted.
+                let _ = self.store.msg_send(
+                    "hub",
+                    &[name.clone()],
+                    &format!("STALL DETECTED: you have been Working for {mins} minutes without completing a turn. Please finish your current turn now."),
+                    true,
+                );
+                self.start_interrupt(&name);
+            }
         }
     }
 }
