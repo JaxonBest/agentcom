@@ -144,6 +144,7 @@ async fn main() -> Result<()> {
         Command::Restore { file } => run_restore(file),
         Command::Audit { event, agent, since, count, json } => run_audit(event, agent, since, count, json),
         Command::Context { file, agent } => run_context_push(file, agent).await,
+        Command::Preflight { verbose } => run_preflight(verbose),
         other => cli::run_client(other).await,
     }
 }
@@ -1642,6 +1643,144 @@ fn run_summary(json_out: bool) -> Result<()> {
         println!("  commits    {commit_count}");
         println!("  tasks      {tasks_done}/{tasks_total} done");
     }
+    Ok(())
+}
+
+fn run_preflight(verbose: bool) -> Result<()> {
+    use std::collections::HashSet;
+
+    // Get staged diff
+    let diff_out = std::process::Command::new("git")
+        .args(["diff", "--cached", "-U0"])
+        .output()
+        .context("failed to run git diff --cached")?;
+    let diff = String::from_utf8_lossy(&diff_out.stdout);
+
+    if diff.trim().is_empty() {
+        println!("preflight: nothing staged");
+        return Ok(());
+    }
+
+    // Find struct names whose fields were added/changed.
+    // Match lines like: +    field_name: Type, (inside a struct body)
+    // We heuristically attribute them to structs whose definition changed in the same diff.
+    let mut changed_types: HashSet<String> = HashSet::new();
+
+    // Extract struct names from diff lines like: +pub struct Foo {  or  +    pub struct Foo {
+    let struct_re = regex::Regex::new(r"^\+.*\bstruct\s+(\w+)\b").unwrap();
+    // Also capture enum variants / struct patterns from +    FieldName { or +    FieldName,
+    // More importantly: track which struct blocks have field additions.
+    // Strategy: track current file being diffed, find "struct X" in context, then look for "+" field lines.
+
+    let mut current_struct: Option<String> = None;
+    let mut brace_depth: i32 = 0;
+
+    for line in diff.lines() {
+        if line.starts_with("diff --git") || line.starts_with("@@") {
+            current_struct = None;
+            brace_depth = 0;
+        }
+
+        // Detect struct definition in diff context (+ or context lines)
+        if let Some(caps) = struct_re.captures(line) {
+            current_struct = Some(caps[1].to_string());
+            brace_depth = 0;
+        }
+
+        // Track brace depth to stay inside the struct
+        if let Some(ref name) = current_struct.clone() {
+            let opens = line.chars().filter(|&c| c == '{').count() as i32;
+            let closes = line.chars().filter(|&c| c == '}').count() as i32;
+            brace_depth += opens - closes;
+            if brace_depth < 0 {
+                current_struct = None;
+                brace_depth = 0;
+            }
+
+            // A line starting with "+" inside a struct = field addition
+            if line.starts_with('+') && !line.starts_with("+++") {
+                let content = &line[1..].trim_start();
+                // Skip empty lines, comments, and closing braces
+                if !content.is_empty() && !content.starts_with("//") && *content != "}" {
+                    changed_types.insert(name.clone());
+                }
+            }
+        }
+    }
+
+    // Also pick up enum/struct names from changed impl blocks and type aliases
+    let enum_re = regex::Regex::new(r"^\+.*\benum\s+(\w+)\b").unwrap();
+    for line in diff.lines() {
+        if let Some(caps) = enum_re.captures(line) {
+            // Only include if the enum itself has additions nearby
+            changed_types.insert(caps[1].to_string());
+        }
+    }
+
+    if changed_types.is_empty() {
+        println!("preflight: no struct/enum field changes detected in staged diff");
+        return Ok(());
+    }
+
+    println!("preflight: changed types: {}", changed_types.iter().cloned().collect::<Vec<_>>().join(", "));
+    println!();
+
+    // Find all *.rs files in the repo
+    let find_out = std::process::Command::new("git")
+        .args(["ls-files", "--cached", "--others", "--exclude-standard", "*.rs"])
+        .output()
+        .context("failed to list repo files")?;
+    let all_rs: Vec<String> = String::from_utf8_lossy(&find_out.stdout)
+        .lines()
+        .map(str::to_string)
+        .collect();
+
+    let mut warned = false;
+    for type_name in &changed_types {
+        // Look for construction sites: TypeName { or TypeName:: (match but not just a comment)
+        let grep_out = std::process::Command::new("git")
+            .args(["grep", "-l", "--", &format!(r"{type_name}\s*\{{")])
+            .output();
+        let mut matching: Vec<String> = Vec::new();
+        if let Ok(out) = grep_out {
+            matching = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(str::to_string)
+                .filter(|f| f.ends_with(".rs"))
+                .collect();
+        }
+
+        // Also try struct literal pattern with grep across all rs files manually
+        if matching.is_empty() {
+            for path in &all_rs {
+                let content = std::fs::read_to_string(path).unwrap_or_default();
+                if content.contains(&format!("{type_name} {{")) || content.contains(&format!("{type_name}{{")) {
+                    matching.push(path.clone());
+                }
+            }
+        }
+
+        if matching.is_empty() {
+            if verbose {
+                println!("  {type_name}: no construction sites found");
+            }
+            continue;
+        }
+
+        println!("  {type_name}: {} file(s) construct this type — check for missing fields:", matching.len());
+        for f in &matching {
+            println!("    {f}");
+        }
+        warned = true;
+    }
+
+    if !warned {
+        println!("preflight: no other files construct the changed types — safe to commit");
+    } else {
+        println!();
+        println!("preflight: review the files above for missing fields before committing");
+    }
+
     Ok(())
 }
 

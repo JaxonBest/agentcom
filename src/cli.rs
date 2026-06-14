@@ -274,6 +274,17 @@ pub enum Command {
         /// Snapshot file to restore from
         file: std::path::PathBuf,
     },
+    /// Check staged diff for struct field changes and warn which other files may need updating
+    ///
+    /// Run before committing to catch cascade build breaks caused by partial field additions.
+    ///
+    /// Example:
+    ///   agentcom preflight
+    Preflight {
+        /// Also show files that already contain the changed type (not just construction sites)
+        #[arg(long)]
+        verbose: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -882,6 +893,7 @@ pub async fn run_client(command: Command) -> Result<()> {
         | Command::Context { .. }
         | Command::Snapshot { .. }
         | Command::Restore { .. }
+        | Command::Preflight { .. }
         | Command::Version
         | Command::Config(_) => {
             unreachable!("handled in main")
