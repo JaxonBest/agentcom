@@ -67,6 +67,31 @@ fn load_deps(conn: &Connection, task: &mut Task) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// BFS from `start` following the dep graph (task → what it depends on).
+/// Returns all task IDs reachable from `start`. Used for cycle detection.
+fn reachable_from(conn: &Connection, start: i64) -> rusqlite::Result<std::collections::HashSet<i64>> {
+    let mut visited = std::collections::HashSet::new();
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back(start);
+    while let Some(cur) = queue.pop_front() {
+        if !visited.insert(cur) {
+            continue;
+        }
+        let mut stmt = conn.prepare_cached(
+            "SELECT depends_on_id FROM task_deps WHERE task_id = ?1",
+        )?;
+        let deps = stmt
+            .query_map([cur], |r| r.get::<_, i64>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for dep in deps {
+            if !visited.contains(&dep) {
+                queue.push_back(dep);
+            }
+        }
+    }
+    Ok(visited)
+}
+
 impl Store {
     pub fn task_add(
         &self,
@@ -96,6 +121,12 @@ impl Store {
         )?;
         let id = tx.last_insert_rowid();
         for dep in depends_on {
+            // Reject any dep that would create a cycle (e.g. a self-ref introduced
+            // by a bug — for brand-new tasks this is always a no-op guard).
+            let reachable = reachable_from(&tx, *dep).unwrap_or_default();
+            if reachable.contains(&id) {
+                bail!("adding dependency #{dep} → #{id} would create a cycle");
+            }
             tx.execute(
                 "INSERT OR IGNORE INTO task_deps (task_id, depends_on_id) VALUES (?1, ?2)",
                 params![id, dep],
@@ -807,9 +838,17 @@ impl Store {
         // Second pass: wire up deps and restore tags + status.
         let conn = self.conn.lock().unwrap();
         for (snap, &new_id) in snapshots.iter().zip(new_ids.iter()) {
-            // Remap dep IDs.
+            // Remap dep IDs, rejecting any edge that would create a cycle.
             for src_dep in &snap.depends_on {
                 if let Some(&new_dep) = id_map.get(src_dep) {
+                    // Adding new_id → new_dep creates a cycle if new_dep can already reach new_id.
+                    let reachable = reachable_from(&conn, new_dep).unwrap_or_default();
+                    if reachable.contains(&new_id) {
+                        tracing::warn!(
+                            "import: skipping circular dep #{new_id} → #{new_dep} (would create cycle)"
+                        );
+                        continue;
+                    }
                     let _ = conn.execute(
                         "INSERT OR IGNORE INTO task_deps (task_id, depends_on_id) VALUES (?1, ?2)",
                         params![new_id, new_dep],
@@ -1491,5 +1530,27 @@ mod tests {
         // next_run_at should be roughly now + 7 days.
         let expected_min = super::now_ts() + 7 * 86400 - 5;
         assert!(new_task.next_run_at.unwrap() >= expected_min);
+    }
+
+    #[test]
+    fn bulk_import_skips_circular_deps() {
+        use crate::store::TaskSnapshot;
+        let s = Store::open_in_memory().unwrap();
+        // Import A (source_id=1) and B (source_id=2) where A→B and B→A.
+        let snaps = vec![
+            TaskSnapshot { title: "A".into(), source_id: Some(1), depends_on: vec![2], ..Default::default() },
+            TaskSnapshot { title: "B".into(), source_id: Some(2), depends_on: vec![1], ..Default::default() },
+        ];
+        let ids = s.bulk_import_tasks(&snaps, "human").unwrap();
+        let (id_a, id_b) = (ids[0], ids[1]);
+
+        let ta = s.task_get(id_a).unwrap().unwrap();
+        let tb = s.task_get(id_b).unwrap().unwrap();
+
+        // Exactly one direction should be preserved; the cycle-creating reverse edge is dropped.
+        let a_has_b = ta.depends_on.contains(&id_b);
+        let b_has_a = tb.depends_on.contains(&id_a);
+        assert!(a_has_b || b_has_a, "at least one dep edge must exist");
+        assert!(!(a_has_b && b_has_a), "both edges must not exist (would be a cycle)");
     }
 }
