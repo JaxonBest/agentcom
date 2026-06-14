@@ -8,7 +8,6 @@
 
 pub mod client;
 pub mod server;
-pub use client::Client;
 
 use crate::store::{Message, Task};
 use serde::{Deserialize, Serialize};
@@ -50,6 +49,9 @@ pub enum Request {
         /// Capability labels the claiming agent must have (all required).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         requires: Vec<String>,
+        /// Recurrence interval ("1d", "7d", "1h", "1w"). Hub creates a fresh copy each time done.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recur: Option<String>,
     },
     TaskList {
         status: Option<String>,
@@ -251,6 +253,7 @@ impl Request {
             depends_on,
             timeout_mins: None,
             requires: vec![],
+            recur: None,
         }
     }
 
