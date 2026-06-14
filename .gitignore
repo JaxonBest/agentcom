@@ -2,3 +2,5 @@
 .claude
 Cargo.lock
 sandbox-runs
+.agentcom
+.agentcom.toml~
