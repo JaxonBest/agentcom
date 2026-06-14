@@ -6,6 +6,7 @@ use super::events::UiEvent;
 use super::Hub;
 use crate::agent::AgentState;
 use crate::protocol::input::user_message;
+use std::time::{Duration, Instant};
 
 impl Hub {
     /// Feed an agent its next prompt if it's idle and there is work; route
@@ -28,6 +29,31 @@ impl Hub {
                 self.log(format!("{name}: paused — budget exhausted"));
                 return;
             }
+        }
+
+        // Per-agent RPM gate: sliding 60-second window of prompt sends.
+        if let Some(max_rpm) = rt.cfg.max_rpm {
+            let now = Instant::now();
+            let window = self.rpm_window.entry(name.to_string()).or_default();
+            window.retain(|&t| now.duration_since(t) < Duration::from_secs(60));
+            if window.len() >= max_rpm as usize {
+                let cooldown = window
+                    .front()
+                    .map(|&t| {
+                        60u64.saturating_sub(now.duration_since(t).as_secs())
+                    })
+                    .unwrap_or(0);
+                let rt = self.agents.get_mut(name).expect("agent exists");
+                rt.state_detail = Some(format!(
+                    "rate limited ({}/{} RPM) — {}s cooldown",
+                    window.len(),
+                    max_rpm,
+                    cooldown
+                ));
+                self.emit_state(name);
+                return;
+            }
+            window.push_back(now);
         }
 
         let inbox = self.store.msg_take_pending(name).unwrap_or_default();
