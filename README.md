@@ -1005,9 +1005,10 @@ These commands read local files directly and work without a running hub.
 | `agentcom send <agent> "<msg>" --urgent` | Queue with interrupt flag |
 | `agentcom interrupt <agent> "<msg>"` | Abort current turn and deliver message immediately |
 | `agentcom inbox` | Read and consume your pending messages |
-| `agentcom pause <agent>` | Pause after the current turn completes |
-| `agentcom resume <agent>` | Resume a paused agent |
+| `agentcom agent pause <name>` | Pause after the current turn completes |
+| `agentcom agent resume <name>` | Resume a paused agent |
 | `agentcom tail <agent> [-n 50] [-f]` | Stream recent output (follow with `-f`) |
+| `agentcom logs [-n <N>] [--agent <name>] [--follow]` | Read hub log files offline (useful for post-mortems) |
 
 ### Task board
 
@@ -1027,6 +1028,13 @@ These commands read local files directly and work without a running hub.
 | `agentcom task export [--format md\|json]` | Dump the task board offline — Markdown checklist (default) or JSON array for scripting |
 | `agentcom task stats [--json]` | Velocity metrics: avg completion time, throughput, blocked rate, top contributors |
 | `agentcom task assign <id> <agent>` | Route a task directly to a specific agent; delivers a message so they pick it up |
+| `agentcom task clone <id>` | Clone a task (copies title, description, priority into a new open task) |
+| `agentcom task pin <id>` | Pin a task so it sorts before all non-pinned tasks |
+| `agentcom task unpin <id>` | Unpin a task |
+| `agentcom task tag <id> <label>` | Add a label to a task |
+| `agentcom task untag <id> <label>` | Remove a label from a task |
+| `agentcom task comment <id> "<body>"` | Append a timestamped comment to a task's activity log |
+| `agentcom task due <id> <timestamp\|clear>` | Set or clear a due date for a task (Unix timestamp) |
 
 ### Agent fleet
 
@@ -1034,10 +1042,13 @@ These commands read local files directly and work without a running hub.
 |---|---|
 | `agentcom agent add <name> --role "<role>" [--provider claude\|codex\|deepseek] [--model <m>] [--budget <usd>]` | Add an agent to config and spawn it live |
 | `agentcom agent add <name> --role "<role>" --env KEY=VALUE` | Add agent with extra env vars (repeatable flag) |
+| `agentcom agent add <name> --role "<role>" --initial-prompt "<msg>"` | Send a kickoff message immediately after spawning |
 | `agentcom agent add <name> --role "<role>" --no-auto-restart` | Disable automatic restart on crash |
 | `agentcom agent add <name> --role "<role>" --no-spawn` | Add to config only; starts on next `agentcom up` |
 | `agentcom agent list` | List configured agents with live state |
 | `agentcom agent remove <name>` | Remove agent from config (and stop it if hub is running) |
+| `agentcom agent pause <name>` | Suspend an agent after its current turn; `resume` to wake it |
+| `agentcom agent resume <name>` | Resume a paused agent |
 
 ### File claims
 
@@ -1079,7 +1090,7 @@ These commands read local files directly and work without a running hub.
 - **Sidebar** — agent list with live state glyph (`>` working, `.` idle, `||` paused, `x` crashed) and provider badge
 - **Chat** — your conversation with the composer; unread questions shown in yellow
 - **Output** — live output stream for the selected agent; scroll with PgUp/PgDn
-- **Tasks** — the shared board with status, priority, and assignee
+- **Tasks** — the shared board with status, priority, and assignee; board title shows open/wip/done/blocked counts. Press `/` to filter by keyword, `d` to hide done tasks, `Enter` on a row to open a full-screen detail popup
 - **Messages** — full inter-agent and human message feed
 - **Hub Log** — hub-level events (starts, stops, crashes, recruits)
 
@@ -1088,8 +1099,11 @@ These commands read local files directly and work without a running hub.
 | Key | Action |
 |---|---|
 | `Tab` / `1`–`5` | Switch tabs |
-| `Up` / `Down` / `j` / `k` | Select agent in sidebar |
-| `Enter` | Send chat message (Chat tab) |
+| `Up` / `Down` / `j` / `k` | Select agent in sidebar (non-Tasks tabs) or navigate task list (Tasks tab) |
+| `Enter` | Send chat message (Chat tab) or open task detail popup (Tasks tab) |
+| `/` | Open task filter (Tasks tab) — type to search, Enter to apply, empty to clear |
+| `F` | Clear task filter immediately |
+| `d` | Toggle hiding done tasks (Tasks tab) |
 | `m` | Message selected agent |
 | `u` | Interrupt selected agent (urgent) |
 | `M` | Broadcast message to all agents |
@@ -1098,6 +1112,7 @@ These commands read local files directly and work without a running hub.
 | `s` | Stop selected agent |
 | `PgUp` / `PgDn` | Scroll agent output |
 | `End` | Jump to live output (stop scrolling) |
+| `Esc` | Close task detail popup / clear chat input / cancel modal |
 | `?` | Toggle this keybinding help overlay |
 | `q` / `Ctrl+C` | Quit (prompts for confirmation) |
 
@@ -1129,6 +1144,8 @@ agentcom up --free "refactor the payment module" --for 1h --budget 8
 
 The composer is instructed to prefer high-value work and to report when nothing worth doing remains, preventing busy-work loops.
 
+**Stall detection:** The hub monitors every Working agent. If an agent stays in the Working state for 10 minutes without completing a turn, a warning is logged. At 20 minutes the hub sends an urgent interrupt — "STALL DETECTED: finish your current turn now" — so the agent returns to idle and can pick up fresh work. Stall timers reset on each new turn.
+
 > **Tip:** Pair free mode with **[Recipe 4 — Overnight audit fleet](#recipe-4--overnight-audit-fleet-4-agents-all-read-only)** for a zero-risk, finding-only run. Wake up to a triaged backlog with no surprise edits.
 
 ---
@@ -1138,9 +1155,17 @@ The composer is instructed to prefer high-value work and to report when nothing 
 When an agent runs `agentcom files release --all`, the hub automatically stages and commits any files they modified, using the agent's name as the git author:
 
 ```
-builder: task #12 implement rate limiting — 3 files changed
+builder: task #12 implement rate limiting — src/auth.rs, src/config.rs, src/main.rs
 Author: builder <builder@agentcom.local>
+
+  src/auth.rs
+  src/config.rs
+  src/main.rs
+
+Task: add per-route token expiry and refresh logic
 ```
+
+The commit subject includes the task number and title (truncated to 60 chars) followed by the changed file names. The body lists each path on its own line and appends the first line of the task description. New and untracked files are staged automatically alongside modified files.
 
 **Configuration:**
 
