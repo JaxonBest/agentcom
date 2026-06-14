@@ -34,6 +34,11 @@ pub fn draw(f: &mut Frame, app: &App) {
     if app.show_help {
         draw_help_overlay(f, f.area());
     }
+    if let Some(id) = app.task_detail_id {
+        if let Some(task) = app.tasks.iter().find(|t| t.id == id) {
+            draw_task_detail(f, task, f.area());
+        }
+    }
 }
 
 fn state_style(state: &str) -> Style {
@@ -534,9 +539,11 @@ fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
                     .unwrap_or(false)
         })
         .collect();
+    let cursor = app.task_cursor.min(visible.len().saturating_sub(1));
     let rows: Vec<Row> = visible
         .iter()
-        .map(|t| {
+        .enumerate()
+        .map(|(i, t)| {
             let row_style = match t.status {
                 TaskStatus::Claimed => Style::default().fg(Color::Green),
                 TaskStatus::Open => Style::default(),
@@ -559,6 +566,12 @@ fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
             } else {
                 format!("{} {}", t.title, dep_marker)
             };
+            let selected = i == cursor;
+            let base_style = if selected {
+                row_style.add_modifier(Modifier::REVERSED)
+            } else {
+                row_style
+            };
             Row::new(vec![
                 Cell::from(format!("#{}", t.id)),
                 Cell::from(format!("p{}", t.priority)).style(priority_style(t.priority)),
@@ -567,7 +580,7 @@ fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
                 Cell::from(title_with_deps),
                 Cell::from(extra),
             ])
-            .style(row_style)
+            .style(base_style)
         })
         .collect();
     let table = Table::new(
@@ -697,7 +710,7 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
         ("m",          "message agent",       "u",           "interrupt agent"),
         ("M",          "broadcast all",       "a",           "add task"),
         ("/",          "filter tasks",        "F",           "clear task filter"),
-        ("d",          "toggle done tasks",   "",            ""),
+        ("d",          "toggle done tasks",   "Enter",       "task detail popup"),
         ("p",          "pause/resume agent",  "s",           "stop agent"),
         ("PgUp/PgDn",  "scroll output",       "End",         "follow live"),
         ("Enter",      "send chat message",   "?",           "toggle this help"),
@@ -734,6 +747,64 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
                 Block::default()
                     .borders(Borders::ALL)
                     .title(" keybindings ")
+                    .title_alignment(Alignment::Center)
+                    .style(Style::default().bg(Color::Indexed(235))),
+            ),
+        popup,
+    );
+}
+
+fn draw_task_detail(f: &mut Frame, task: &crate::store::Task, area: Rect) {
+    let popup = centered_rect(80, 22, area);
+    f.render_widget(ratatui::widgets::Clear, popup);
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Header row
+    lines.push(Line::from(vec![
+        Span::styled(format!("#{} ", task.id), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::styled(task.title.clone(), Style::default().add_modifier(Modifier::BOLD)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled(format!("status: {}", task.status.as_str()), Style::default().fg(Color::Cyan)),
+        Span::raw(format!("  priority: p{}", task.priority)),
+        Span::raw(task.claimed_by.as_deref().map(|a| format!("  agent: {a}")).unwrap_or_default()),
+    ]));
+    if !task.depends_on.is_empty() {
+        let deps = task.depends_on.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join(", ");
+        lines.push(Line::from(Span::styled(format!("depends on: {deps}"), Style::default().fg(Color::DarkGray))));
+    }
+    lines.push(Line::from(""));
+
+    // Description
+    if !task.description.is_empty() {
+        for desc_line in task.description.lines() {
+            lines.push(Line::from(Span::raw(desc_line.to_string())));
+        }
+    } else {
+        lines.push(Line::from(Span::styled("(no description)", Style::default().fg(Color::DarkGray))));
+    }
+
+    // Note / blocked reason
+    if let Some(note) = &task.note {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(format!("note: {note}"), Style::default().fg(Color::Green))));
+    }
+    if let Some(reason) = &task.blocked_reason {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(format!("blocked: {reason}"), Style::default().fg(Color::Yellow))));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("Esc — close", Style::default().fg(Color::DarkGray))));
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(format!(" task #{} ", task.id))
                     .title_alignment(Alignment::Center)
                     .style(Style::default().bg(Color::Indexed(235))),
             ),

@@ -46,6 +46,14 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    // Task detail popup: Esc closes it.
+    if app.task_detail_id.is_some() {
+        if key.code == KeyCode::Esc {
+            app.task_detail_id = None;
+        }
+        return;
+    }
+
     match key.code {
         KeyCode::Char('q') => app.confirm_quit = true,
         KeyCode::Tab => {
@@ -58,15 +66,51 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('4') => app.tab = Tab::Messages,
         KeyCode::Char('5') => app.tab = Tab::HubLog,
         KeyCode::Up | KeyCode::Char('k') => {
-            if app.selected > 0 {
-                app.selected -= 1;
-                app.scroll_back = None;
+            if app.tab == Tab::Tasks {
+                if app.task_cursor > 0 {
+                    app.task_cursor -= 1;
+                }
+            } else {
+                if app.selected > 0 {
+                    app.selected -= 1;
+                    app.scroll_back = None;
+                }
             }
         }
         KeyCode::Down | KeyCode::Char('j') => {
-            if app.selected + 1 < app.agent_names.len() {
-                app.selected += 1;
-                app.scroll_back = None;
+            if app.tab == Tab::Tasks {
+                let n = visible_task_count(app);
+                if app.task_cursor + 1 < n {
+                    app.task_cursor += 1;
+                }
+            } else {
+                if app.selected + 1 < app.agent_names.len() {
+                    app.selected += 1;
+                    app.scroll_back = None;
+                }
+            }
+        }
+        KeyCode::Enter if app.tab == Tab::Tasks => {
+            let filter = app.task_filter.to_lowercase();
+            let visible: Vec<i64> = app
+                .tasks
+                .iter()
+                .filter(|t| {
+                    if app.hide_done_tasks && t.status == crate::store::TaskStatus::Done {
+                        return false;
+                    }
+                    if filter.is_empty() {
+                        return true;
+                    }
+                    t.title.to_lowercase().contains(&filter)
+                        || t.description.to_lowercase().contains(&filter)
+                        || t.status.as_str().contains(&filter)
+                        || t.claimed_by.as_deref().map(|s| s.to_lowercase().contains(&filter)).unwrap_or(false)
+                })
+                .map(|t| t.id)
+                .collect();
+            if let Some(&id) = visible.get(app.task_cursor) {
+                app.task_detail_id = Some(id);
             }
         }
         KeyCode::PageUp => {
@@ -172,6 +216,28 @@ fn handle_chat_key(app: &mut App, key: KeyEvent) {
         }
         _ => {}
     }
+}
+
+fn visible_task_count(app: &App) -> usize {
+    let filter = app.task_filter.to_lowercase();
+    app.tasks
+        .iter()
+        .filter(|t| {
+            if app.hide_done_tasks && t.status == crate::store::TaskStatus::Done {
+                return false;
+            }
+            if filter.is_empty() {
+                return true;
+            }
+            t.title.to_lowercase().contains(&filter)
+                || t.description.to_lowercase().contains(&filter)
+                || t.status.as_str().contains(&filter)
+                || t.claimed_by
+                    .as_deref()
+                    .map(|s| s.to_lowercase().contains(&filter))
+                    .unwrap_or(false)
+        })
+        .count()
 }
 
 fn open_modal(app: &mut App, kind: InputKind) {

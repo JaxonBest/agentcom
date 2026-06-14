@@ -75,6 +75,10 @@ pub struct App {
     pub file_claims: Vec<FileClaim>,
     pub task_filter: String,
     pub hide_done_tasks: bool,
+    /// Cursor row in the visible Tasks tab list.
+    pub task_cursor: usize,
+    /// When Some(id), show a full-screen detail popup for that task.
+    pub task_detail_id: Option<i64>,
     pub open_tasks: u64,
     pub total_cost: f64,
     /// `None` = follow live output; `Some(n)` = scrolled up by n lines.
@@ -208,6 +212,8 @@ async fn run_loop(
         file_claims: Vec::new(),
         task_filter: String::new(),
         hide_done_tasks: false,
+        task_cursor: 0,
+        task_detail_id: None,
         open_tasks: 0,
         total_cost: 0.0,
         scroll_back: None,
