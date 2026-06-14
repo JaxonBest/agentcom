@@ -633,6 +633,31 @@ mod tests {
     }
 
     #[test]
+    fn task_clone_copies_fields_and_resets_state() {
+        let s = Store::open_in_memory().unwrap();
+        let src = s.task_add("original", "desc here", 1, &[], "human").unwrap();
+        s.task_claim(src, "alice").unwrap();
+        s.task_done(src, "alice", Some("completed")).unwrap();
+
+        let cloned = s.task_clone(src, "builder").unwrap();
+
+        assert_ne!(cloned.id, src);
+        assert_eq!(cloned.title, "original");
+        assert_eq!(cloned.description, "desc here");
+        assert_eq!(cloned.priority, 1);
+        assert_eq!(cloned.status, TaskStatus::Open);
+        assert!(cloned.claimed_by.is_none());
+        assert!(cloned.note.is_none());
+        assert!(cloned.depends_on.is_empty());
+    }
+
+    #[test]
+    fn task_clone_nonexistent_errors() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(s.task_clone(9999, "builder").is_err());
+    }
+
+    #[test]
     fn task_prune_respects_deps_cleanup() {
         let s = Store::open_in_memory().unwrap();
         let now = now_ts();
