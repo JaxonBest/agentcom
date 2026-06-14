@@ -141,58 +141,23 @@ impl Store {
         status: Option<TaskStatus>,
         search: Option<&str>,
     ) -> Result<Vec<Task>> {
-        let conn = self.conn.lock().unwrap();
-        let search_clause = search
-            .filter(|s| !s.is_empty())
-            .map(|s| {
-                let pattern = format!("%{}%", s.replace('%', "%%"));
-                (pattern, "(title LIKE ? OR description LIKE ?)".to_string())
-            });
+        self.task_list_filtered(status, search, None)
+    }
 
-        let mut tasks: Vec<Task> = match status {
-            Some(s) => {
-                let mut sql = "SELECT * FROM tasks WHERE status = ?1".to_string();
-                if let Some((_, clause)) = &search_clause {
-                    sql.push_str(&format!(" AND {clause}"));
-                }
-                sql.push_str(" ORDER BY priority, id");
-                let mut stmt = conn.prepare_cached(&sql)?;
-                if let Some((pattern, _)) = search_clause.as_ref() {
-                    let rows = stmt.query_map(params![s.as_str(), pattern, pattern], task_from_row)?;
-                    rows.collect::<rusqlite::Result<Vec<_>>>()?
-                } else {
-                    let rows = stmt.query_map([s.as_str()], task_from_row)?;
-                    rows.collect::<rusqlite::Result<Vec<_>>>()?
-                }
-            }
-            None => {
-                let mut sql = String::from(
-                    "SELECT * FROM tasks ORDER BY
-                       CASE status WHEN 'claimed' THEN 0 WHEN 'open' THEN 1
-                                   WHEN 'blocked' THEN 2 ELSE 3 END,
-                       pinned DESC, priority, id",
-                );
-                if let Some((pattern, clause)) = &search_clause {
-                    // Subquery: first gather matching IDs, then sort them
-                    sql = format!(
-                        "SELECT * FROM tasks WHERE id IN (SELECT id FROM tasks WHERE {clause})
-                         ORDER BY
-                           CASE status WHEN 'claimed' THEN 0 WHEN 'open' THEN 1
-                                       WHEN 'blocked' THEN 2 ELSE 3 END,
-                           pinned DESC, priority, id",
-                    );
-                    let mut stmt = conn.prepare_cached(&sql)?;
-                    let rows = stmt.query_map(params![pattern, pattern], task_from_row)?;
-                    rows.collect::<rusqlite::Result<Vec<_>>>()?
-                } else {
-                    let mut stmt = conn.prepare_cached(&sql)?;
-                    let rows = stmt.query_map([], task_from_row)?;
-                    rows.collect::<rusqlite::Result<Vec<_>>>()?
-                }
-            }
-        };
-        for t in &mut tasks {
-            load_deps(&conn, t)?;
+    /// Like [`task_list`] but also filters by a tag label after querying.
+    /// Hub uses this when the client passes `--tag <label>`.
+    pub fn task_list_filtered(
+        &self,
+        status: Option<TaskStatus>,
+        search: Option<&str>,
+        tag: Option<&str>,
+    ) -> Result<Vec<Task>> {
+        let mut tasks = self.task_list(status, search)?;
+        if let Some(label) = tag
+            .map(|t| t.trim().to_lowercase())
+            .filter(|t| !t.is_empty())
+        {
+            tasks.retain(|t| t.tags.contains(&label));
         }
         Ok(tasks)
     }
@@ -833,6 +798,37 @@ mod tests {
     fn task_clone_nonexistent_errors() {
         let s = Store::open_in_memory().unwrap();
         assert!(s.task_clone(9999, "builder").is_err());
+    }
+
+    #[test]
+    fn tag_filter_in_task_list_filtered() {
+        let s = Store::open_in_memory().unwrap();
+        let a = s.task_add("alpha", "", 1, &[], "human").unwrap();
+        let b = s.task_add("beta", "", 1, &[], "human").unwrap();
+        let c = s.task_add("gamma", "", 1, &[], "human").unwrap();
+
+        s.task_tag(a, "bug").unwrap();
+        s.task_tag(a, "urgent").unwrap();
+        s.task_tag(b, "bug").unwrap();
+        // c has no tags
+
+        let bugs = s.task_list_filtered(None, None, Some("bug")).unwrap();
+        let ids: Vec<i64> = bugs.iter().map(|t| t.id).collect();
+        assert!(ids.contains(&a));
+        assert!(ids.contains(&b));
+        assert!(!ids.contains(&c));
+
+        let urgent = s.task_list_filtered(None, None, Some("urgent")).unwrap();
+        assert_eq!(urgent.len(), 1);
+        assert_eq!(urgent[0].id, a);
+
+        // None tag == same as task_list
+        let all = s.task_list_filtered(None, None, None).unwrap();
+        assert_eq!(all.len(), 3);
+
+        // Case-insensitive filter
+        let bugs_upper = s.task_list_filtered(None, None, Some("BUG")).unwrap();
+        assert_eq!(bugs_upper.len(), 2);
     }
 
     #[test]
