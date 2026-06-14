@@ -40,7 +40,7 @@ async fn main() -> Result<()> {
                     anyhow::bail!("{} already exists (use --force to overwrite)", dest.display());
                 }
                 if toml::from_str::<toml::Value>(&toml_str).is_ok() {
-                    std::fs::write(&dest, toml_str.as_ref())?;
+                    config::write_config_file(&dest, &toml_str)?;
                     println!("wrote {} (AI-generated)", dest.display());
                 } else {
                     eprintln!("warning: AI output was not valid TOML — falling back to template");

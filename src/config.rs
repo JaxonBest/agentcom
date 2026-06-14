@@ -659,8 +659,31 @@ pub fn write_example_template(
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("my-project");
-    std::fs::write(&path, render_example_config(project_name, template))?;
+    write_config_file(&path, &render_example_config(project_name, template))?;
     Ok(path)
+}
+
+/// Write `content` to `path` with 0600 permissions on Unix (owner-only
+/// read/write). Falls back to std::fs::write() on non-Unix platforms.
+pub fn write_config_file(path: &Path, content: &str) -> Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(content.as_bytes())?;
+        return Ok(());
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, content)?;
+        Ok(())
+    }
 }
 
 
