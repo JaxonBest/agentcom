@@ -157,4 +157,27 @@ mod tests {
             1
         );
     }
+
+    #[test]
+    fn list_for_agent_returns_only_own_claims() {
+        let s = Store::open_in_memory().unwrap();
+        s.files_claim("alice", &["src/a.rs".into(), "src/b.rs".into()])
+            .unwrap();
+        s.files_claim("bob", &["src/c.rs".into()]).unwrap();
+
+        let alice_claims = s.files_list_for_agent("alice").unwrap();
+        assert_eq!(alice_claims.len(), 2);
+        assert!(alice_claims.iter().all(|c| c.agent == "alice"));
+        let paths: Vec<&str> = alice_claims.iter().map(|c| c.path.as_str()).collect();
+        assert!(paths.contains(&"src/a.rs"));
+        assert!(paths.contains(&"src/b.rs"));
+
+        let bob_claims = s.files_list_for_agent("bob").unwrap();
+        assert_eq!(bob_claims.len(), 1);
+        assert_eq!(bob_claims[0].path, "src/c.rs");
+
+        // agent with no claims returns empty
+        let empty = s.files_list_for_agent("carol").unwrap();
+        assert!(empty.is_empty());
+    }
 }
