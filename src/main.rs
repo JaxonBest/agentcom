@@ -102,9 +102,9 @@ async fn main() -> Result<()> {
         }
         Command::Version => {
             println!("agentcom {}", env!("CARGO_PKG_VERSION"));
-            println!("git commit:  {}", env!("GIT_HASH"));
-            println!("build time:  {}", env!("BUILD_TIME"));
-            println!("rustc:       {}", env!("RUSTC_VERSION"));
+            println!("git commit:  {}", option_env!("GIT_HASH").unwrap_or("unknown"));
+            println!("build time:  {}", option_env!("BUILD_TIME").unwrap_or("unknown"));
+            println!("rustc:       {}", option_env!("RUSTC_VERSION").unwrap_or("unknown"));
             Ok(())
         }
         Command::Task(cli::TaskCmd::Export { format }) => run_task_export(&format),
