@@ -4,16 +4,31 @@
 //! response frame. `Tail` is served directly from the shared ring buffers
 //! (plus the UI broadcast for `--follow`) so per-connection streaming never
 //! touches hub state.
+//!
+//! Security hardening:
+//! - MAX_CONNECTIONS: concurrent connection cap; new connections are rejected
+//!   once the limit is hit to prevent a misbehaving agent from DoS-ing the hub.
+//! - MAX_LINE_BYTES: per-request size cap; oversized frames are rejected
+//!   immediately to prevent memory exhaustion from unbounded task descriptions.
 
 use super::{HubInfo, Request, Response};
 use crate::hub::events::{IpcMsg, UiEvent};
 use crate::tui::ringbuf::SharedRingBuf;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{broadcast, mpsc, oneshot};
+
+/// Concurrent connection cap. Rejects new connections once reached.
+/// 64 is generous for any real fleet (max 9 agents + human terminals).
+const MAX_CONNECTIONS: usize = 64;
+
+/// Maximum JSON frame size in bytes. Rejects frames that exceed this.
+/// 1 MiB is ample for any task description while preventing memory exhaustion.
+const MAX_LINE_BYTES: usize = 1 << 20; // 1 MiB
 
 /// Agent name -> live output buffer; the hub registers buffers at spawn.
 pub type Buffers = Arc<RwLock<HashMap<String, SharedRingBuf>>>;
@@ -25,6 +40,8 @@ pub struct IpcServer {
     hub_tx: mpsc::Sender<IpcMsg>,
     buffers: Buffers,
     ui_tx: broadcast::Sender<UiEvent>,
+    /// Shared counter of live connections (across tasks).
+    conn_count: Arc<AtomicUsize>,
 }
 
 impl IpcServer {
@@ -57,6 +74,7 @@ impl IpcServer {
             hub_tx,
             buffers,
             ui_tx,
+            conn_count: Arc::new(AtomicUsize::new(0)),
         })
     }
 
@@ -70,14 +88,28 @@ impl IpcServer {
         loop {
             match self.listener.accept().await {
                 Ok((stream, _addr)) => {
+                    let count = self.conn_count.fetch_add(1, Ordering::Relaxed) + 1;
+                    if count > MAX_CONNECTIONS {
+                        self.conn_count.fetch_sub(1, Ordering::Relaxed);
+                        tracing::warn!(
+                            "ipc: connection limit ({MAX_CONNECTIONS}) reached, dropping new connection"
+                        );
+                        // stream is dropped here, closing the TCP connection
+                        continue;
+                    }
+
                     let token = self.token.clone();
                     let hub_tx = self.hub_tx.clone();
                     let buffers = self.buffers.clone();
                     let ui_rx = self.ui_tx.subscribe();
+                    let conn_count = self.conn_count.clone();
                     tokio::spawn(async move {
-                        if let Err(e) = handle_conn(stream, token, hub_tx, buffers, ui_rx).await {
+                        if let Err(e) =
+                            handle_conn(stream, token, hub_tx, buffers, ui_rx).await
+                        {
                             tracing::debug!(error = %e, "ipc connection ended with error");
                         }
+                        conn_count.fetch_sub(1, Ordering::Relaxed);
                     });
                 }
                 Err(e) => {
@@ -87,6 +119,23 @@ impl IpcServer {
             }
         }
     }
+}
+
+/// Read exactly one line from `lines`, enforcing the MAX_LINE_BYTES cap.
+/// Returns None on EOF, Err on I/O error, Ok(Some(line)) on success.
+async fn read_line_bounded(
+    lines: &mut tokio::io::Lines<BufReader<tokio::net::tcp::OwnedReadHalf>>,
+) -> Result<Option<String>> {
+    let line = lines.next_line().await?;
+    if let Some(ref l) = line {
+        if l.len() > MAX_LINE_BYTES {
+            anyhow::bail!(
+                "request frame exceeds {MAX_LINE_BYTES} bytes ({} bytes)",
+                l.len()
+            );
+        }
+    }
+    Ok(line)
 }
 
 async fn handle_conn(
@@ -100,7 +149,7 @@ async fn handle_conn(
     let mut lines = BufReader::new(read_half).lines();
 
     // First frame must be a valid Hello.
-    let identity = match lines.next_line().await? {
+    let identity = match read_line_bounded(&mut lines).await? {
         Some(line) => match serde_json::from_str::<Request>(&line) {
             Ok(Request::Hello { token: t, identity }) if t == token => identity,
             Ok(Request::Hello { .. }) => {
@@ -116,7 +165,20 @@ async fn handle_conn(
     };
     write_frame(&mut write_half, &Response::ok()).await?;
 
-    while let Some(line) = lines.next_line().await? {
+    loop {
+        let line = match read_line_bounded(&mut lines).await {
+            Ok(Some(l)) => l,
+            Ok(None) => break,
+            Err(e) => {
+                write_frame(
+                    &mut write_half,
+                    &Response::err(format!("request too large: {e}")),
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+
         if line.trim().is_empty() {
             continue;
         }
