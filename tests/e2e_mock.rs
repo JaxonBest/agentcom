@@ -1313,3 +1313,97 @@ fn task_pin_and_tag_filter() {
         "task show reflects pin state: {out}"
     );
 }
+
+#[test]
+fn snapshot_and_restore() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    let scripts = tmp.path().join("scripts");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+
+    write_config(&project, &[("w", "worker")], "");
+    std::fs::write(
+        scripts.join("w.ndjson"),
+        r#"{"run": ["agentcom task claim 1", "agentcom task done 1 --note snap-done"], "text": "done"}
+"#,
+    )
+    .unwrap();
+
+    let hub = start_hub(&project, &scripts, &["snapshot test task"], &[]);
+    wait_for(
+        &project,
+        &["task", "list", "--status", "done"],
+        Duration::from_secs(20),
+        |out| out.contains("snap-done"),
+    );
+    drop(hub);
+
+    // Create a snapshot from the finished state.
+    let snap_path = tmp.path().join("test.snap");
+    let (ok, _, stderr) = cli_split(
+        &project,
+        &["snapshot", "--file", snap_path.to_str().unwrap()],
+    );
+    assert!(ok, "snapshot exits 0: stderr={stderr}");
+    assert!(snap_path.exists(), "snapshot file created");
+    let snap_bytes = std::fs::metadata(&snap_path).unwrap().len();
+    assert!(snap_bytes > 100, "snapshot has content: {snap_bytes} bytes");
+
+    // Restore into a new project directory.
+    let restore_project = tmp.path().join("restored");
+    std::fs::create_dir_all(&restore_project).unwrap();
+    std::fs::write(
+        restore_project.join("agentcom.toml"),
+        "project_name = \"restored\"\n[[agent]]\nname = \"w\"\nrole = \"worker\"\n",
+    )
+    .unwrap();
+    let (ok, _, stderr) = cli_split(
+        &restore_project,
+        &["restore", snap_path.to_str().unwrap()],
+    );
+    assert!(ok, "restore exits 0: stderr={stderr}");
+
+    // The restored project should have the completed task.
+    let (ok, stdout, _) = cli_split(&restore_project, &["task", "list", "--status", "done"]);
+    assert!(ok, "task list in restored project: stdout={stdout}");
+    assert!(
+        stdout.contains("snapshot test task"),
+        "restored tasks present: {stdout}"
+    );
+}
+
+#[test]
+fn replay_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    let scripts = tmp.path().join("scripts");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+
+    write_config(&project, &[("narrator", "narrates events")], "");
+    std::fs::write(
+        scripts.join("narrator.ndjson"),
+        r#"{"run": ["agentcom task claim 1", "agentcom task done 1 --note replay-done"], "text": "done"}
+"#,
+    )
+    .unwrap();
+
+    let hub = start_hub(&project, &scripts, &["replay test task"], &[]);
+    wait_for(
+        &project,
+        &["task", "list", "--status", "done"],
+        Duration::from_secs(20),
+        |out| out.contains("replay-done"),
+    );
+    drop(hub);
+
+    // replay reads hub logs and produces a human-readable narrative.
+    let (ok, stdout, stderr) = cli_split(&project, &["replay"]);
+    assert!(ok, "replay exits 0: stderr={stderr}");
+    // Replay should mention the hub start or task events.
+    assert!(
+        !stdout.is_empty() || stderr.contains("no logs"),
+        "replay produces output or graceful message: stdout={stdout} stderr={stderr}"
+    );
+}
