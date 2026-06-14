@@ -505,12 +505,21 @@ fn draw_output(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+fn priority_style(priority: i64) -> Style {
+    match priority {
+        0 => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+        1 => Style::default().fg(Color::Yellow),
+        2 => Style::default().fg(Color::Cyan),
+        _ => Style::default().fg(Color::DarkGray),
+    }
+}
+
 fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
     let rows: Vec<Row> = app
         .tasks
         .iter()
         .map(|t| {
-            let style = match t.status {
+            let row_style = match t.status {
                 TaskStatus::Claimed => Style::default().fg(Color::Green),
                 TaskStatus::Open => Style::default(),
                 TaskStatus::Blocked => Style::default().fg(Color::Yellow),
@@ -522,15 +531,25 @@ fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
                 _ => "",
             };
             let extra: String = extra.chars().take(35).collect();
+            let dep_marker = if !t.depends_on.is_empty() {
+                format!("[{}]", t.depends_on.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join(","))
+            } else {
+                String::new()
+            };
+            let title_with_deps = if dep_marker.is_empty() {
+                t.title.clone()
+            } else {
+                format!("{} {}", t.title, dep_marker)
+            };
             Row::new(vec![
                 Cell::from(format!("#{}", t.id)),
-                Cell::from(format!("p{}", t.priority)),
+                Cell::from(format!("p{}", t.priority)).style(priority_style(t.priority)),
                 Cell::from(t.status.as_str()),
                 Cell::from(t.claimed_by.clone().unwrap_or_default()),
-                Cell::from(t.title.clone()),
+                Cell::from(title_with_deps),
                 Cell::from(extra),
             ])
-            .style(style)
+            .style(row_style)
         })
         .collect();
     let table = Table::new(
@@ -545,7 +564,7 @@ fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
         ],
     )
     .header(
-        Row::new(vec!["id", "pr", "status", "agent", "title", "note"])
+        Row::new(vec!["id", "p", "status", "agent", "title", "note"])
             .style(Style::default().add_modifier(Modifier::BOLD)),
     )
     .block(Block::default().borders(Borders::ALL).title(" task board "));
