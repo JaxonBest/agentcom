@@ -95,6 +95,12 @@ pub struct HubConfig {
     /// Example: rest_api_port = 7071
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rest_api_port: Option<u16>,
+    /// Auto-escalate open task priority when a task has been open for longer
+    /// than this many hours. Priority is bumped by 1 (toward 0) each time the
+    /// hub's tick loop fires and the task is still open, stopping at priority 0.
+    /// Default: None (disabled).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority_escalate_after_hours: Option<u64>,
     #[serde(default, rename = "agent")]
     pub agents: Vec<AgentConfig>,
 }
