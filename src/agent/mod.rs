@@ -71,6 +71,8 @@ pub struct AgentRuntime {
     pub working_since: Option<Instant>,
     /// True once a stall warning has been logged for the current turn (reset on idle).
     pub stall_warned: bool,
+    /// Timestamp when the agent entered the Paused state. Cleared on resume.
+    pub paused_at: Option<Instant>,
 }
 
 impl AgentRuntime {
@@ -93,6 +95,7 @@ impl AgentRuntime {
             budget_warn_fired: false,
             working_since: None,
             stall_warned: false,
+            paused_at: None,
         }
     }
 
