@@ -17,6 +17,7 @@ fn task_from_row(row: &Row) -> rusqlite::Result<Task> {
     let tags_raw: String = row.get("tags").unwrap_or_default();
     let requires_raw: String = row.get("requires").unwrap_or_default();
     let pinned: i64 = row.get("pinned").unwrap_or(0);
+    let is_archived: i64 = row.get("is_archived").unwrap_or(0);
     Ok(Task {
         id: row.get("id")?,
         title: row.get("title")?,
@@ -31,6 +32,7 @@ fn task_from_row(row: &Row) -> rusqlite::Result<Task> {
         due_at: row.get("due_at").unwrap_or(None),
         timeout_mins: row.get::<_, Option<i64>>("timeout_mins").unwrap_or(None).map(|v| v as u64),
         requires: parse_tags(&requires_raw),
+        is_archived: is_archived != 0,
         created_by: row.get("created_by")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
@@ -214,6 +216,8 @@ impl Store {
             load_deps(&conn, t)?;
         }
         drop(conn);
+        // Normal listing hides archived tasks.
+        tasks.retain(|t| !t.is_archived);
         if let Some(label) = tag
             .map(|t| t.trim().to_lowercase())
             .filter(|t| !t.is_empty())
@@ -221,6 +225,47 @@ impl Store {
             tasks.retain(|t| t.tags.contains(&label));
         }
         Ok(tasks)
+    }
+
+    /// Return all archived (soft-deleted) tasks, newest first.
+    pub fn task_list_archived(&self) -> Result<Vec<Task>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "SELECT * FROM tasks WHERE is_archived = 1 ORDER BY updated_at DESC",
+        )?;
+        let mut tasks: Vec<Task> = stmt
+            .query_map([], task_from_row)?
+            .collect::<rusqlite::Result<_>>()?;
+        for t in &mut tasks {
+            load_deps(&conn, t)?;
+        }
+        Ok(tasks)
+    }
+
+    /// Soft-delete a task: hide it from normal listing until restored.
+    pub fn task_archive(&self, id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE tasks SET is_archived = 1, updated_at = ?1 WHERE id = ?2 AND is_archived = 0",
+            params![now_ts(), id],
+        )?;
+        if rows == 0 {
+            anyhow::bail!("task #{id} not found or already archived");
+        }
+        Ok(())
+    }
+
+    /// Un-soft-delete a task, making it visible again.
+    pub fn task_restore(&self, id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE tasks SET is_archived = 0, updated_at = ?1 WHERE id = ?2 AND is_archived = 1",
+            params![now_ts(), id],
+        )?;
+        if rows == 0 {
+            anyhow::bail!("task #{id} not found or not archived");
+        }
+        Ok(())
     }
 
     /// Highest-priority open task whose dependencies are all done, excluding
@@ -243,6 +288,7 @@ impl Store {
         let sql = format!(
             "SELECT * FROM tasks t
              WHERE t.status = 'open'
+               AND t.is_archived = 0
                AND NOT EXISTS (
                    SELECT 1 FROM task_deps d
                    JOIN tasks dt ON dt.id = d.depends_on_id
@@ -1247,5 +1293,45 @@ mod tests {
         s.task_set_requires(id, &[]).unwrap();
         let t = s.task_get(id).unwrap().unwrap();
         assert!(t.requires.is_empty());
+    }
+
+    #[test]
+    fn task_archive_hides_from_list() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.task_add("visible", "", 2, &[], "human").unwrap();
+        // Before archive: appears in normal list.
+        let tasks = s.task_list(None, None).unwrap();
+        assert!(tasks.iter().any(|t| t.id == id));
+
+        s.task_archive(id).unwrap();
+        // After archive: hidden from normal list.
+        let tasks = s.task_list(None, None).unwrap();
+        assert!(!tasks.iter().any(|t| t.id == id));
+        // But visible in archived list.
+        let archived = s.task_list_archived().unwrap();
+        assert!(archived.iter().any(|t| t.id == id));
+    }
+
+    #[test]
+    fn task_restore_makes_visible_again() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.task_add("work", "", 2, &[], "human").unwrap();
+        s.task_archive(id).unwrap();
+        s.task_restore(id).unwrap();
+        // After restore: appears in normal list again.
+        let tasks = s.task_list(None, None).unwrap();
+        assert!(tasks.iter().any(|t| t.id == id));
+        // And no longer in archived list.
+        let archived = s.task_list_archived().unwrap();
+        assert!(!archived.iter().any(|t| t.id == id));
+    }
+
+    #[test]
+    fn archived_task_not_claimable() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.task_add("work", "", 2, &[], "human").unwrap();
+        s.task_archive(id).unwrap();
+        // next_claimable should not return archived tasks.
+        assert!(s.next_claimable(&[], &[]).unwrap().is_none());
     }
 }

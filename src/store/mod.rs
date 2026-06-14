@@ -131,6 +131,9 @@ pub struct Task {
     /// Capability labels the claiming agent must have (all required).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requires: Vec<String>,
+    /// Soft-deleted: hidden from normal task list until restored.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_archived: bool,
     pub created_by: String,
     pub created_at: i64,
     pub updated_at: i64,
@@ -178,6 +181,7 @@ impl Default for Task {
             due_at: None,
             timeout_mins: None,
             requires: vec![],
+            is_archived: false,
             created_by: String::new(),
             created_at: 0,
             updated_at: 0,
