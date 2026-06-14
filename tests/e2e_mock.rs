@@ -900,3 +900,56 @@ fn budget_command() {
         "budget shows cost column: {stdout}"
     );
 }
+
+#[test]
+fn config_show() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("agentcom.toml"),
+        "project_name = \"myproj\"\n[[agent]]\nname = \"w\"\nrole = \"worker\"\n",
+    )
+    .unwrap();
+
+    let (ok, stdout, stderr) = cli_split(&project, &["config", "show"]);
+    assert!(ok, "config show exits 0: stderr={stderr}");
+    assert!(stdout.contains("myproj"), "config show includes project name: {stdout}");
+    // Output must be valid JSON.
+    let v: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("config show output is valid JSON: {e}\n{stdout}"));
+    assert_eq!(v["project_name"], "myproj");
+    assert!(v["agent"].is_array(), "agent field is present");
+}
+
+#[test]
+fn task_export() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    let scripts = tmp.path().join("scripts");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+
+    write_config(&project, &[("w", "worker")], "");
+    std::fs::write(
+        scripts.join("w.ndjson"),
+        r#"{"run": ["agentcom task add \"open task\"", "agentcom task claim 1", "agentcom task done 1 --note finished"], "text": "done"}
+"#,
+    )
+    .unwrap();
+
+    let mut hub = start_hub(&project, &scripts, &["seed task"], &[]);
+    wait_for(
+        &project,
+        &["task", "list", "--status", "done"],
+        Duration::from_secs(20),
+        |out| out.contains("finished"),
+    );
+    drop(hub);
+
+    // agentcom task export reads the DB without a hub.
+    let (ok, stdout, stderr) = cli_split(&project, &["task", "export"]);
+    assert!(ok, "task export exits 0: stderr={stderr}");
+    assert!(stdout.contains("##"), "export has markdown sections: {stdout}");
+    assert!(stdout.contains("- ["), "export has checklist items: {stdout}");
+}
