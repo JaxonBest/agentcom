@@ -548,6 +548,35 @@ pub enum TaskCmd {
     /// Example:
     ///   agentcom task archived
     Archived,
+    /// Save a task's title, description, and priority as a reusable named template
+    ///
+    /// Templates are stored in .agentcom/task-templates.toml and can be
+    /// reused with 'agentcom task from-template <name>'.
+    ///
+    /// Example:
+    ///   agentcom task save-template 42 "review-pr"
+    #[command(name = "save-template")]
+    SaveTemplate {
+        /// ID of the task to save
+        id: i64,
+        /// Name for the template (alphanumeric, hyphens allowed)
+        name: String,
+    },
+    /// Create a new task from a saved template
+    ///
+    /// Optionally override the title. All other fields come from the template.
+    ///
+    /// Examples:
+    ///   agentcom task from-template review-pr
+    ///   agentcom task from-template review-pr --title "Review PR #99"
+    #[command(name = "from-template")]
+    FromTemplate {
+        /// Name of the template to use
+        name: String,
+        /// Override the template title
+        #[arg(long)]
+        title: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -837,7 +866,9 @@ pub async fn run_client(command: Command) -> Result<()> {
                 | TaskCmd::Trace { .. }
                 | TaskCmd::Deps { .. }
                 | TaskCmd::BulkDone { .. }
-                | TaskCmd::BulkClaim { .. } => unreachable!("handled in main"),
+                | TaskCmd::BulkClaim { .. }
+                | TaskCmd::SaveTemplate { .. }
+                | TaskCmd::FromTemplate { .. } => unreachable!("handled in main"),
             };
             let resp = client.request(&req).await?;
             match resp {

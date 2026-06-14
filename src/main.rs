@@ -136,6 +136,12 @@ async fn main() -> Result<()> {
         Command::Task(cli::TaskCmd::Due { id, date, clear }) => run_task_due(id, date, clear).await,
         Command::Task(cli::TaskCmd::BulkDone { ids, note }) => run_bulk_done(ids, note).await,
         Command::Task(cli::TaskCmd::BulkClaim { ids }) => run_bulk_claim(ids).await,
+        Command::Task(cli::TaskCmd::SaveTemplate { id, name }) => {
+            run_task_save_template(id, name).await
+        }
+        Command::Task(cli::TaskCmd::FromTemplate { name, title }) => {
+            run_task_from_template(name, title).await
+        }
         Command::Task(cli::TaskCmd::Add { title, description, priority, depends_on, timeout, requires, nl: true }) => {
             run_task_add_nl(title, description, priority, depends_on, timeout, requires).await
         }
@@ -2006,6 +2012,13 @@ fn run_snapshot(out_file: Option<std::path::PathBuf>) -> Result<()> {
 
     f.write_all(b"ACSNAP01")?;
 
+    // Checkpoint WAL so the DB file is fully up-to-date before we copy bytes.
+    if db_path.exists() {
+        if let Ok(conn) = rusqlite::Connection::open(&db_path) {
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(FULL);");
+        }
+    }
+
     for (label, path) in [("hub.db", &db_path), ("agentcom.toml", &cfg_path)] {
         if path.exists() {
             let data = std::fs::read(path)?;
@@ -2537,4 +2550,137 @@ async fn try_expand_nl_task(text: &str) -> Option<(String, String, i64)> {
     let description = v["description"].as_str().unwrap_or("").to_string();
     let priority = v["priority"].as_i64().unwrap_or(2);
     Some((title, description, priority))
+}
+
+// ---------------------------------------------------------------------------
+// Task templates: save a task config for quick reuse
+// ---------------------------------------------------------------------------
+
+fn task_templates_path(project_root: &std::path::Path) -> std::path::PathBuf {
+    project_root.join(".agentcom").join("task-templates.toml")
+}
+
+async fn run_task_save_template(id: i64, name: String) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+    let db = paths::db_path(&root)?;
+    let store = store::Store::open(&db)?;
+
+    let task = store
+        .task_get(id)?
+        .with_context(|| format!("task #{id} not found"))?;
+
+    // Load existing templates file (or start fresh).
+    let tpl_path = task_templates_path(&root);
+    let mut doc: toml_edit::DocumentMut = if tpl_path.exists() {
+        std::fs::read_to_string(&tpl_path)?.parse()?
+    } else {
+        toml_edit::DocumentMut::new()
+    };
+
+    // Build the [[template]] entry.
+    let mut entry = toml_edit::Table::new();
+    entry.insert("name", toml_edit::value(name.clone()));
+    entry.insert("title", toml_edit::value(task.title.clone()));
+    entry.insert("description", toml_edit::value(task.description.clone()));
+    entry.insert("priority", toml_edit::value(task.priority));
+
+    // Append to the [[template]] array.
+    let arr = doc
+        .entry("template")
+        .or_insert(toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new()))
+        .as_array_of_tables_mut()
+        .context("'template' key exists but is not an array of tables")?;
+
+    // Replace existing entry with the same name, or append.
+    let existing = arr.iter().position(|t| {
+        t.get("name").and_then(|v| v.as_str()) == Some(name.as_str())
+    });
+    if let Some(idx) = existing {
+        *arr.get_mut(idx).unwrap() = entry;
+        println!("updated template '{name}' (from task #{id}: {})", task.title);
+    } else {
+        arr.push(entry);
+        println!("saved template '{name}' (from task #{id}: {})", task.title);
+    }
+
+    if let Some(parent) = tpl_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&tpl_path, doc.to_string())?;
+    Ok(())
+}
+
+async fn run_task_from_template(name: String, title_override: Option<String>) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+    let tpl_path = task_templates_path(&root);
+    anyhow::ensure!(
+        tpl_path.exists(),
+        "no task templates found — save one first with 'agentcom task save-template <id> <name>'"
+    );
+
+    let raw = std::fs::read_to_string(&tpl_path)?;
+    let doc: toml::Value = toml::from_str(&raw)?;
+    let templates = doc
+        .get("template")
+        .and_then(|v| v.as_array())
+        .context("task-templates.toml has no [[template]] entries")?;
+
+    let tpl = templates
+        .iter()
+        .find(|t| t.get("name").and_then(|v| v.as_str()) == Some(name.as_str()))
+        .with_context(|| {
+            let names: Vec<&str> = templates
+                .iter()
+                .filter_map(|t| t.get("name").and_then(|v| v.as_str()))
+                .collect();
+            format!("template '{name}' not found — available: {}", names.join(", "))
+        })?;
+
+    let title = title_override.unwrap_or_else(|| {
+        tpl.get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    });
+    let description = tpl
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let priority = tpl
+        .get("priority")
+        .and_then(|v| v.as_integer())
+        .unwrap_or(2);
+
+    let mut client = ipc::client::Client::connect()
+        .await
+        .context("hub not running — start it with: agentcom up")?;
+
+    let resp = client
+        .request(&ipc::Request::TaskAdd {
+            title: title.clone(),
+            description,
+            priority,
+            depends_on: vec![],
+            timeout_mins: None,
+            requires: vec![],
+            recur: None,
+        })
+        .await?;
+
+    match resp {
+        ipc::Response::Tasks { tasks } if !tasks.is_empty() => {
+            println!("created #{}: {} (from template '{name}')", tasks[0].id, tasks[0].title);
+        }
+        ipc::Response::Ok { message } => {
+            println!("{} (from template '{name}')", message.unwrap_or(title));
+        }
+        ipc::Response::Err { message } => anyhow::bail!("{message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+    Ok(())
 }
