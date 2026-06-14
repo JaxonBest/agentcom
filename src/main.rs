@@ -56,6 +56,14 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Budget => run_budget(),
+        Command::Config(cli::ConfigCmd::Show) => {
+            let cwd = std::env::current_dir()?;
+            let project_root = paths::find_project_root(&cwd)
+                .context("no agentcom.toml found — run `agentcom init` first")?;
+            let cfg = config::HubConfig::load(&project_root)?;
+            println!("{}", serde_json::to_string_pretty(&cfg)?);
+            Ok(())
+        }
         other => cli::run_client(other).await,
     }
 }

@@ -137,6 +137,15 @@ pub enum Command {
     },
     /// Show per-agent spend and turn counts from the local DB (no hub needed)
     Budget,
+    /// Read the loaded agentcom.toml config
+    #[command(subcommand)]
+    Config(ConfigCmd),
+}
+
+#[derive(Subcommand)]
+pub enum ConfigCmd {
+    /// Print the loaded agentcom.toml as JSON (useful for scripting and debugging)
+    Show,
 }
 
 #[derive(Subcommand)]
@@ -410,7 +419,8 @@ pub async fn run_client(command: Command) -> Result<()> {
         | Command::Doctor
         | Command::Logs { .. }
         | Command::Completions { .. }
-        | Command::Budget => {
+        | Command::Budget
+        | Command::Config(_) => {
             unreachable!("handled in main")
         }
     }
