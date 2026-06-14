@@ -1144,18 +1144,39 @@ fn run_task_import(file: &str) -> Result<()> {
     let snapshots: Vec<store::TaskSnapshot> = serde_json::from_str(&content)
         .with_context(|| format!("failed to parse {file:?} as JSON task snapshot"))?;
 
+    let total = snapshots.len();
+    let mut skipped = 0usize;
+    let valid: Vec<store::TaskSnapshot> = snapshots.into_iter().filter_map(|s| {
+        let mut s = s;
+        if s.title.trim().is_empty() {
+            eprintln!("skipping task with empty title");
+            skipped += 1;
+            return None;
+        }
+        if s.priority > 4 {
+            eprintln!("warning: task {:?} has priority {} (out of range 0-4), clamping to 4", s.title, s.priority);
+            s.priority = 4;
+        }
+        Some(s)
+    }).collect();
+
     let store = store::Store::open(&db)?;
-    let new_ids = store.bulk_import_tasks(&snapshots, "human")?;
+    let new_ids = store.bulk_import_tasks(&valid, "human")?;
 
     println!(
-        "imported {} task(s) from {file:?}: {}",
+        "imported {}/{} task(s) from {file:?}: {}",
         new_ids.len(),
+        total,
         new_ids
             .iter()
             .map(|id| format!("#{id}"))
             .collect::<Vec<_>>()
             .join(", ")
     );
+    if skipped > 0 {
+        eprintln!("{skipped} task(s) skipped");
+        anyhow::bail!("{skipped} task(s) were skipped due to validation errors");
+    }
     Ok(())
 }
 
