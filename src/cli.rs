@@ -72,6 +72,10 @@ pub enum Command {
         /// (instead of killing them immediately when the time/usage limit fires)
         #[arg(long)]
         finish_tasks: bool,
+        /// Stop a running hub first, then start a fresh one. Useful after config
+        /// changes without having to run `agentcom stop && agentcom up`.
+        #[arg(long)]
+        restart: bool,
     },
     /// Show hub and agent status
     Status,
@@ -234,6 +238,16 @@ pub enum TaskCmd {
         #[arg(long, default_value = "md")]
         format: String,
     },
+    /// Velocity metrics: completion times, throughput, top contributors
+    ///
+    /// Examples:
+    ///   agentcom task stats
+    ///   agentcom task stats --json
+    Stats {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -286,9 +300,18 @@ pub enum AgentCmd {
         /// Max turns per fed prompt
         #[arg(long)]
         max_turns: Option<u32>,
+        /// Disable automatic restart when the agent exits (default: auto-restart is on)
+        #[arg(long)]
+        no_auto_restart: bool,
         /// Only write the config; don't spawn into a running hub
         #[arg(long)]
         no_spawn: bool,
+        /// Git author name for auto-commits by this agent (default: agent name)
+        #[arg(long)]
+        auto_commit_author_name: Option<String>,
+        /// Git author email for auto-commits by this agent (default: <agent>@agentcom.local)
+        #[arg(long)]
+        auto_commit_author_email: Option<String>,
     },
     /// List configured agents (with live state if the hub is running)
     List,
@@ -390,7 +413,7 @@ pub async fn run_client(command: Command) -> Result<()> {
                         .ok_or_else(|| anyhow::anyhow!("invalid duration {:?} — use e.g. 7d, 24h, 90m, 60s", before))?;
                     Request::TaskPrune { before_secs }
                 }
-                TaskCmd::Export { .. } => unreachable!("handled in main"),
+                TaskCmd::Export { .. } | TaskCmd::Stats { .. } => unreachable!("handled in main"),
             };
             let resp = client.request(&req).await?;
             match resp {
@@ -492,7 +515,10 @@ pub async fn run_agent_cmd(cmd: AgentCmd) -> Result<()> {
             permission_mode,
             budget,
             max_turns,
+            no_auto_restart,
             no_spawn,
+            auto_commit_author_name,
+            auto_commit_author_email,
         } => {
             let config = crate::config::AgentConfig {
                 name: name.clone(),
@@ -508,7 +534,10 @@ pub async fn run_agent_cmd(cmd: AgentCmd) -> Result<()> {
                 permission_mode,
                 max_turns_per_prompt: max_turns,
                 max_budget_usd: budget,
-                auto_restart: true,
+                auto_restart: !no_auto_restart,
+                auto_commit_author_name,
+                auto_commit_author_email,
+                env: std::collections::BTreeMap::new(),
             };
             // Validate the combined config first; only persist after the
             // hub (if running) has also accepted — a cap rejection must not

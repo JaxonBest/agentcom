@@ -63,6 +63,7 @@ async fn main() -> Result<()> {
             budget,
             usage,
             finish_tasks,
+            restart,
         } => {
             let free_mode = match (&free, &for_, &usage) {
                 (Some(goal), _, _) => Some(config::FreeMode {
@@ -81,7 +82,7 @@ async fn main() -> Result<()> {
                     None
                 }
             };
-            run_up(agents, tasks, headless, free_mode, budget).await
+            run_up(agents, tasks, headless, free_mode, budget, restart).await
         }
         Command::Agent(cmd) => cli::run_agent_cmd(cmd).await,
         Command::Doctor => run_doctor().await,
@@ -108,6 +109,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Task(cli::TaskCmd::Export { format }) => run_task_export(&format),
+        Command::Task(cli::TaskCmd::Stats { json }) => run_task_stats(json),
         other => cli::run_client(other).await,
     }
 }
@@ -118,6 +120,7 @@ async fn run_up(
     headless: bool,
     free_mode: Option<config::FreeMode>,
     budget_override: Option<f64>,
+    restart: bool,
 ) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let project_root = paths::find_project_root(&cwd)
@@ -148,6 +151,32 @@ async fn run_up(
     }
 
     init_logging(&project_root, headless)?;
+
+    // --restart: stop a running hub before starting fresh
+    if restart {
+        if let Ok(info) = ipc::client::read_hub_json(&paths::hub_json_path(&project_root)?) {
+            if let Ok(mut client) = ipc::client::Client::connect_to(
+                info.port,
+                &info.token,
+                "human",
+            )
+            .await
+            {
+                println!("stopping running hub (pid {})...", info.pid);
+                let _ = client.request(&crate::ipc::Request::Stop { agent: None }).await;
+                // Wait up to 5s for the hub to shut down
+                for _ in 0..50 {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    if ipc::client::read_hub_json(&paths::hub_json_path(&project_root)?).is_err()
+                    {
+                        break;
+                    }
+                }
+                // Fall through — if the hub.json is still there the new hub will
+                // overwrite it.
+            }
+        }
+    }
 
     // Refuse to double-start against a live hub.
     if let Ok(info) = ipc::client::read_hub_json(&paths::hub_json_path(&project_root)?) {
@@ -624,6 +653,117 @@ fn run_task_export(format: &str) -> Result<()> {
     print_section("In Progress", "- [~]", &claimed);
     print_section("Blocked", "- [~]", &blocked);
     print_section("Done", "- [x]", &done);
+    Ok(())
+}
+
+fn run_task_stats(json: bool) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let project_root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+    let db = paths::db_path(&project_root)?;
+    if !db.exists() {
+        anyhow::bail!("no hub data found — run `agentcom up` first");
+    }
+    let store = store::Store::open(&db)?;
+    let tasks = store.task_list(None, None)?;
+
+    if tasks.is_empty() {
+        println!("no tasks");
+        return Ok(());
+    }
+
+    let total = tasks.len() as u64;
+    let done_tasks: Vec<_> = tasks
+        .iter()
+        .filter(|t| t.status == store::TaskStatus::Done)
+        .collect();
+    let open_count = tasks.iter().filter(|t| t.status == store::TaskStatus::Open).count() as u64;
+    let claimed_count = tasks.iter().filter(|t| t.status == store::TaskStatus::Claimed).count() as u64;
+    let blocked_count = tasks.iter().filter(|t| t.status == store::TaskStatus::Blocked).count() as u64;
+    let done_count = done_tasks.len() as u64;
+
+    // Avg completion time: updated_at - created_at for done tasks
+    let avg_completion_secs: Option<f64> = if done_count > 0 {
+        let sum: i64 = done_tasks
+            .iter()
+            .map(|t| (t.updated_at - t.created_at).max(0))
+            .sum();
+        Some(sum as f64 / done_count as f64)
+    } else {
+        None
+    };
+
+    // Throughput: done tasks per hour over the observed time span
+    let throughput_per_hour: Option<f64> = if done_count > 0 {
+        let min_created = tasks.iter().map(|t| t.created_at).min().unwrap_or(0);
+        let max_updated = done_tasks.iter().map(|t| t.updated_at).max().unwrap_or(0);
+        let span_secs = (max_updated - min_created).max(1) as f64;
+        Some(done_count as f64 / (span_secs / 3600.0))
+    } else {
+        None
+    };
+
+    // Blocked rate: blocked tasks / total
+    let blocked_rate_pct = blocked_count as f64 / total as f64 * 100.0;
+
+    // Top claimants by tasks completed
+    let mut claimants: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    for t in &done_tasks {
+        if let Some(agent) = &t.claimed_by {
+            *claimants.entry(agent.clone()).or_insert(0) += 1;
+        }
+    }
+    let mut claimant_vec: Vec<(String, u64)> = claimants.into_iter().collect();
+    claimant_vec.sort_by_key(|b| std::cmp::Reverse(b.1));
+
+    if json {
+        let obj = serde_json::json!({
+            "total": total,
+            "open": open_count,
+            "in_progress": claimed_count,
+            "done": done_count,
+            "blocked": blocked_count,
+            "avg_completion_secs": avg_completion_secs,
+            "throughput_per_hour": throughput_per_hour,
+            "blocked_rate_pct": blocked_rate_pct,
+            "top_claimants": claimant_vec.iter()
+                .map(|(a, c)| serde_json::json!({"agent": a, "tasks_done": c}))
+                .collect::<Vec<_>>(),
+        });
+        println!("{}", serde_json::to_string_pretty(&obj)?);
+        return Ok(());
+    }
+
+    let fmt_duration = |secs: f64| -> String {
+        if secs < 60.0 {
+            format!("{:.0}s", secs)
+        } else if secs < 3600.0 {
+            format!("{:.1}m", secs / 60.0)
+        } else {
+            format!("{:.1}h", secs / 3600.0)
+        }
+    };
+
+    println!("Task board — {} total", total);
+    println!("  open: {}  in-progress: {}  done: {}  blocked: {}", open_count, claimed_count, done_count, blocked_count);
+    println!();
+    println!("Velocity");
+    match avg_completion_secs {
+        Some(s) => println!("  avg completion time : {}", fmt_duration(s)),
+        None => println!("  avg completion time : n/a (no done tasks)"),
+    }
+    match throughput_per_hour {
+        Some(r) => println!("  throughput          : {:.2} tasks/hour", r),
+        None => println!("  throughput          : n/a"),
+    }
+    println!("  blocked rate        : {:.1}%", blocked_rate_pct);
+    if !claimant_vec.is_empty() {
+        println!();
+        println!("Top contributors");
+        for (agent, count) in claimant_vec.iter().take(10) {
+            println!("  {:<20} {} task{}", agent, count, if *count == 1 { "" } else { "s" });
+        }
+    }
     Ok(())
 }
 
