@@ -198,20 +198,33 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
             let provider = row.map(|r| r.provider.as_str()).unwrap_or("?");
             let cost = row.map(|r| r.spent_usd).unwrap_or(0.0);
             let turns = row.map(|r| r.turns).unwrap_or(0);
+            let detail = row.and_then(|r| r.detail.as_deref()).unwrap_or("");
             let marker = if i == app.selected { ">" } else { " " };
             let glyph = if state == "working" {
                 SPINNER[app.spin % SPINNER.len()]
             } else {
                 state_glyph(state)
             };
-            let line = Line::from(vec![
+            let main_line = Line::from(vec![
                 Span::raw(format!("{marker} ")),
                 Span::styled(format!("{glyph:<2} "), state_style(state)),
                 Span::raw(format!("{name:<10} ")),
                 provider_badge(provider),
                 Span::styled(format!(" ${cost:.2} {turns}t"), Style::default().fg(Color::DarkGray)),
             ]);
-            let item = ListItem::new(line);
+            let mut lines = vec![main_line];
+            if !detail.is_empty() {
+                let truncated = if detail.len() > 28 {
+                    format!("  {}…", &detail[..27])
+                } else {
+                    format!("  {detail}")
+                };
+                lines.push(Line::from(Span::styled(
+                    truncated,
+                    Style::default().fg(Color::Indexed(242)),
+                )));
+            }
+            let item = ListItem::new(lines);
             if i == app.selected {
                 item.style(Style::default().bg(Color::Indexed(237)))
             } else {

@@ -133,6 +133,16 @@ pub enum Request {
         id: i64,
         due_at: Option<i64>,
     },
+    /// Soft-delete a task: hide from normal listing until restored.
+    TaskArchive {
+        id: i64,
+    },
+    /// Un-soft-delete a task: make it visible in normal listing again.
+    TaskRestore {
+        id: i64,
+    },
+    /// List all archived (soft-deleted) tasks.
+    TaskListArchived,
     Status,
     /// Hot-add an agent to the running hub (already persisted to
     /// agentcom.toml by the client).

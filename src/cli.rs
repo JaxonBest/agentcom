@@ -420,6 +420,14 @@ pub enum TaskCmd {
     /// Example:
     ///   agentcom task deps 42
     Deps { id: i64 },
+    /// Append a timestamped note to a task (progress updates, hand-off notes)
+    ///
+    /// Example:
+    ///   agentcom task comment 42 "found root cause: race in session handler"
+    Comment {
+        id: i64,
+        text: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -617,7 +625,26 @@ pub async fn run_client(command: Command) -> Result<()> {
                     description,
                     priority,
                 },
-                TaskCmd::Show { id } => Request::TaskGet { id },
+                TaskCmd::Show { id } => {
+                    // Fetch task + comments in two requests, then print together.
+                    let task_resp = client.request(&Request::TaskGet { id }).await?;
+                    let task = match task_resp {
+                        Response::Tasks { tasks } if !tasks.is_empty() => tasks.into_iter().next().unwrap(),
+                        Response::Err { message } => bail!("{message}"),
+                        _ => bail!("task #{id} not found"),
+                    };
+                    print_tasks(&[task]);
+                    let comments_resp = client.request(&Request::TaskComments { id }).await?;
+                    if let Response::Comments { comments } = comments_resp {
+                        if !comments.is_empty() {
+                            println!("\nComments:");
+                            for c in &comments {
+                                println!("  [{}] {}", c.agent, c.body);
+                            }
+                        }
+                    }
+                    return Ok(());
+                }
                 TaskCmd::Remove { id } => Request::TaskDelete { id },
                 TaskCmd::Prune { before } => {
                     let before_secs = parse_duration_secs(&before)
@@ -642,6 +669,7 @@ pub async fn run_client(command: Command) -> Result<()> {
                     let resp = client.request(&Request::Send { to: agent, body, urgent: false }).await?;
                     return print_simple(resp);
                 }
+                TaskCmd::Comment { id, text } => Request::TaskComment { id, body: text },
                 TaskCmd::Assign { id, agent } => Request::TaskAssign { id, agent },
                 TaskCmd::Clone { id } => Request::TaskClone { id },
                 TaskCmd::Tag { id, label } => Request::TaskTag { id, label },

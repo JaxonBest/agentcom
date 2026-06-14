@@ -1075,6 +1075,27 @@ impl Hub {
                     Err(e) => Response::err(e.to_string()),
                 }
             }
+            Request::TaskArchive { id, .. } => match self.store.task_archive(id) {
+                Ok(()) => {
+                    self.audit.write("task_archive", identity, serde_json::json!({"task_id": id}));
+                    let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
+                    Response::ok_msg(format!("task #{id} archived"))
+                }
+                Err(e) => Response::err(e.to_string()),
+            },
+            Request::TaskRestore { id, .. } => match self.store.task_restore(id) {
+                Ok(()) => {
+                    self.audit.write("task_restore", identity, serde_json::json!({"task_id": id}));
+                    let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
+                    self.wake_idle();
+                    Response::ok_msg(format!("task #{id} restored"))
+                }
+                Err(e) => Response::err(e.to_string()),
+            },
+            Request::TaskListArchived { .. } => match self.store.task_list_archived() {
+                Ok(tasks) => Response::Tasks { tasks },
+                Err(e) => Response::err(e.to_string()),
+            },
             Request::Status => self.status_response(),
             Request::AgentAdd { config, .. } => self.add_agent_live(identity, config),
             Request::FilesClaim { paths, .. } => match self.store.files_claim(identity, &paths) {
