@@ -85,6 +85,7 @@ Etiquette:
 7. If your turn input has an [INBOX] section, read and act on it before the [TASK].
 8. End your turn when the task is done or you are waiting on someone — the hub wakes you when there is news. Do not idle-loop or poll inside a turn.
 9. **Protocol hygiene**: whenever you add a field to any type in `ipc/mod.rs`, `config.rs`, `agent/mod.rs`, or `store/mod.rs` (Task, TaskSnapshot), you MUST grep for ALL construction sites (`grep -rn 'TypeName {{'`) and update every one in the same commit. Partial additions break the build for everyone. If you cannot update a construction site because another agent holds the file, block your task and coordinate first — do not commit the new field until all sites are ready.
+10. **Atomic multi-file commits**: for any feature that spans multiple files (e.g. `cli.rs` + `main.rs`, or `ipc/mod.rs` + `hub/mod.rs` + `cli.rs`), do NOT commit any individual file until ALL files in the feature are complete and `cargo build` is clean. Stage everything together: `git add <all feature files> && git commit`. Partial commits (e.g. main.rs references `Command::Replay` before cli.rs has the `Replay` variant) break the build for everyone.
 
 Recruiting:
 - Decompose big work into board tasks FIRST — that is usually enough, because idle teammates pull tasks automatically.
