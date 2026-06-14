@@ -13,6 +13,10 @@ use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
+/// Maximum bytes accepted for any single request-line or header line.
+/// Rejects oversized lines with 400 before they can exhaust hub memory.
+const MAX_HEADER_BYTES: usize = 8 * 1024; // 8 KiB
+
 pub async fn serve(port: u16, ipc_port: u16, token: String) {
     let addr = format!("127.0.0.1:{port}");
     let listener = match TcpListener::bind(&addr).await {
@@ -37,7 +41,7 @@ pub async fn serve(port: u16, ipc_port: u16, token: String) {
         let token = token.clone();
         let uptime = started.elapsed().as_secs();
         tokio::spawn(async move {
-            if let Err(e) = handle_conn(stream, ipc_port, &token, uptime).await {
+            if let Err(e) = handle_conn(stream, peer, ipc_port, &token, uptime).await {
                 tracing::debug!("REST: {peer} error: {e}");
             }
         });
@@ -46,6 +50,7 @@ pub async fn serve(port: u16, ipc_port: u16, token: String) {
 
 async fn handle_conn(
     stream: tokio::net::TcpStream,
+    peer: std::net::SocketAddr,
     ipc_port: u16,
     token: &str,
     uptime_secs: u64,
@@ -55,6 +60,12 @@ async fn handle_conn(
 
     let mut request_line = String::new();
     reader.read_line(&mut request_line).await?;
+    if request_line.len() > MAX_HEADER_BYTES {
+        writer
+            .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+            .await?;
+        return Ok(());
+    }
     let request_line = request_line.trim();
 
     let mut parts = request_line.splitn(3, ' ');
@@ -66,6 +77,12 @@ async fn handle_conn(
     loop {
         let mut line = String::new();
         reader.read_line(&mut line).await?;
+        if line.len() > MAX_HEADER_BYTES {
+            writer
+                .write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n")
+                .await?;
+            return Ok(());
+        }
         let line = line.trim();
         if line.is_empty() {
             break;
@@ -102,6 +119,7 @@ async fn handle_conn(
         .map(|h| ct_eq(h, &expected))
         .unwrap_or(false);
     if !authed {
+        tracing::warn!(peer = %peer, path = %path, "REST: rejected unauthorized request");
         writer
             .write_all(
                 b"HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain\r\nContent-Length: 13\r\n\r\nunauthorized\n",
