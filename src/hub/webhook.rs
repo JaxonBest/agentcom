@@ -24,8 +24,20 @@ pub enum Event {
     HubStop,
     TaskDone,
     TaskBlocked,
+    /// Agent claimed a task (started working on it).
+    TaskClaim,
     AgentCrash,
+    /// Agent spawned or restarted.
+    AgentSpawn,
     BudgetWarning,
+    /// Agent claimed one or more files.
+    FileClaim,
+    /// Agent released one or more files (triggers auto-commit if enabled).
+    FileRelease,
+    /// Fleet-wide pause activated.
+    FleetPaused,
+    /// Fleet-wide resume activated.
+    FleetResumed,
 }
 
 /// JSON body sent to the webhook endpoint.
@@ -48,6 +60,9 @@ pub struct Payload {
     /// For BudgetWarning: percentage of budget used (0–100).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub budget_pct: Option<f64>,
+    /// For FileClaim/FileRelease: paths involved.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub paths: Option<Vec<String>>,
 }
 
 impl Payload {
@@ -64,6 +79,7 @@ impl Payload {
             spent_usd: None,
             max_usd: None,
             budget_pct: None,
+            paths: None,
         }
     }
 
@@ -82,6 +98,11 @@ impl Payload {
     pub fn with_task(mut self, id: i64, title: impl Into<String>) -> Self {
         self.task_id = Some(id);
         self.task_title = Some(title.into());
+        self
+    }
+
+    pub fn with_paths(mut self, paths: Vec<String>) -> Self {
+        self.paths = Some(paths);
         self
     }
 }
