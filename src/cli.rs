@@ -496,6 +496,9 @@ pub enum TaskCmd {
         /// Disable ANSI color in output
         #[arg(long)]
         no_color: bool,
+        /// Filter board to tasks claimed by this agent
+        #[arg(long)]
+        agent: Option<String>,
     },
     /// Send an inbox reminder to an agent about a specific task
     ///

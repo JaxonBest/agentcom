@@ -127,8 +127,8 @@ async fn main() -> Result<()> {
         Command::Task(cli::TaskCmd::Watch { id: Some(task_id), interval, .. }) => {
             run_task_watch_single(task_id, interval.unwrap_or(5))
         }
-        Command::Task(cli::TaskCmd::Watch { id: None, no_color, interval }) => {
-            run_task_watch_board(no_color, interval.unwrap_or(2))
+        Command::Task(cli::TaskCmd::Watch { id: None, no_color, interval, agent }) => {
+            run_task_watch_board(no_color, interval.unwrap_or(2), agent)
         }
         Command::Task(cli::TaskCmd::Trace { id }) => run_task_trace(id),
         Command::Task(cli::TaskCmd::Deps { id }) => run_task_deps(id),
@@ -1406,7 +1406,7 @@ fn run_task_stats(json: bool) -> Result<()> {
     Ok(())
 }
 
-fn run_task_watch_board(no_color: bool, interval: u64) -> Result<()> {
+fn run_task_watch_board(no_color: bool, interval: u64, agent_filter: Option<String>) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let project_root = paths::find_project_root(&cwd)
         .context("no agentcom.toml found — run `agentcom init` first")?;
@@ -1428,14 +1428,26 @@ fn run_task_watch_board(no_color: bool, interval: u64) -> Result<()> {
     while running.load(std::sync::atomic::Ordering::SeqCst) {
         print!("{clear}");
         match store.task_list(None, None) {
-            Ok(tasks) => {
+            Ok(all_tasks) => {
+                let tasks: Vec<_> = all_tasks.iter().filter(|t| {
+                    if let Some(ref name) = agent_filter {
+                        t.claimed_by.as_deref() == Some(name.as_str())
+                    } else {
+                        true
+                    }
+                }).collect();
                 if no_color {
                     let open = tasks.iter().filter(|t| t.status == store::TaskStatus::Open).count();
                     let claimed = tasks.iter().filter(|t| t.status == store::TaskStatus::Claimed).count();
                     let done = tasks.iter().filter(|t| t.status == store::TaskStatus::Done).count();
                     let blocked = tasks.iter().filter(|t| t.status == store::TaskStatus::Blocked).count();
                     let total = tasks.len();
-                    println!("Task board — {total} tasks | {open} open · {claimed} claimed · {done} done · {blocked} blocked");
+                    let header = if let Some(ref name) = agent_filter {
+                        format!("Task board (@{name}) — {total} tasks | {open} open · {claimed} claimed · {done} done · {blocked} blocked")
+                    } else {
+                        format!("Task board — {total} tasks | {open} open · {claimed} claimed · {done} done · {blocked} blocked")
+                    };
+                    println!("{header}");
                     println!("---");
                     for t in &tasks {
                         let who = t.claimed_by.as_deref().map(|w| format!(" @{w}")).unwrap_or_default();
@@ -1452,7 +1464,8 @@ fn run_task_watch_board(no_color: bool, interval: u64) -> Result<()> {
                         println!("#{:<4} p{} {:<8}{who}{deps} {}{extra}", t.id, t.priority, t.status.as_str(), t.title);
                     }
                 } else {
-                    cli::print_tasks(&tasks);
+                    let owned: Vec<store::Task> = tasks.into_iter().cloned().collect();
+                    cli::print_tasks(&owned);
                 }
             }
             Err(e) => eprintln!("error reading tasks: {e}"),
