@@ -288,8 +288,17 @@ impl Hub {
         let _ = self.ui_tx.send(UiEvent::HubLog(msg));
     }
 
+    /// Fire a webhook event if `webhook_url` is configured in agentcom.toml.
+    /// Spawns a background task — never blocks the hub loop.
+    fn fire_webhook(&self, payload: webhook::Payload) {
+        if let Some(url) = self.cfg.webhook_url.as_deref() {
+            webhook::fire(url.to_string(), self.cfg.webhook_secret.clone(), payload);
+        }
+    }
+
     /// Main loop. Returns when shutdown completes.
     pub async fn run(&mut self) -> Result<()> {
+        self.fire_webhook(webhook::Payload::new(webhook::Event::HubStart));
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -321,6 +330,7 @@ impl Hub {
             }
         }
 
+        self.fire_webhook(webhook::Payload::new(webhook::Event::HubStop));
         let _ = std::fs::remove_file(&self.hub_json);
         let _ = self.ui_tx.send(UiEvent::Shutdown);
         Ok(())
@@ -517,6 +527,9 @@ impl Hub {
         self.log(format!(
             "{agent}: process exited unexpectedly (code {code:?})"
         ));
+        self.fire_webhook(
+            webhook::Payload::new(webhook::Event::AgentCrash).with_agent(agent),
+        );
 
         // Crash-loop cap: at most 5 restarts per rolling hour.
         let now = Instant::now();
@@ -758,6 +771,11 @@ impl Hub {
                 match self.store.task_done(id, identity, note.as_deref()) {
                     Ok(t) => {
                         self.log(format!("{identity} completed task #{} — {}", t.id, t.title));
+                        self.fire_webhook(
+                            webhook::Payload::new(webhook::Event::TaskDone)
+                                .with_agent(identity)
+                                .with_task(t.id, &t.title),
+                        );
                         let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
                         // Close the loop: whoever filed the task hears that
                         // it's finished (the composer relies on this to
@@ -787,6 +805,11 @@ impl Hub {
                 match self.store.task_block(id, identity, &reason) {
                     Ok(t) => {
                         self.log(format!("{identity} blocked task #{}: {reason}", t.id));
+                        self.fire_webhook(
+                            webhook::Payload::new(webhook::Event::TaskBlocked)
+                                .with_agent(identity)
+                                .with_task(t.id, &t.title),
+                        );
                         let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
                         Response::ok_msg(format!("task #{} blocked", t.id))
                     }
@@ -799,6 +822,26 @@ impl Hub {
                     let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
                     self.wake_idle();
                     Response::ok_msg(format!("task #{} reopened", t.id))
+                }
+                Err(e) => Response::err(e.to_string()),
+            },
+            Request::TaskAssign { id, agent } => match self.store.task_assign(id, &agent) {
+                Ok(t) => {
+                    self.log(format!("{identity} assigned task #{} to {agent}", t.id));
+                    let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
+                    let msg = format!(
+                        "[INBOX] task #{} assigned to you by {identity}: {}\n{}",
+                        t.id,
+                        t.title,
+                        t.description
+                            .lines()
+                            .take(5)
+                            .collect::<Vec<_>>()
+                            .join("\n")
+                    );
+                    self.do_send("hub", &agent, &msg, false);
+                    self.wake_idle();
+                    Response::ok_msg(format!("task #{} assigned to {agent}", t.id))
                 }
                 Err(e) => Response::err(e.to_string()),
             },
@@ -853,8 +896,15 @@ impl Hub {
                     .unwrap_or_default();
                 match self.store.files_release(identity, &paths, all) {
                     Ok(n) => {
-                        // Auto-commit any changed files if enabled
-                        if self.cfg.auto_commit && !claimed_paths.is_empty() {
+                        // Agent-level auto_commit overrides the global default.
+                        let effective_auto_commit = self
+                            .cfg
+                            .agents
+                            .iter()
+                            .find(|a| a.name == identity)
+                            .and_then(|a| a.auto_commit)
+                            .unwrap_or(self.cfg.auto_commit);
+                        if effective_auto_commit && !claimed_paths.is_empty() {
                             self.auto_commit_changes(identity, &claimed_paths);
                         }
                         Response::ok_msg(format!("released {n} file claim(s)"))
@@ -1110,9 +1160,21 @@ impl Hub {
 
         // Deduplicate while preserving order
         let mut seen = std::collections::HashSet::new();
-        let unique: Vec<&&str> = all_modified
+        let deduped: Vec<&&str> = all_modified
             .iter()
             .filter(|p| seen.insert(**p))
+            .collect();
+
+        // Filter out paths matching any commit_exclude_pattern glob.
+        let unique: Vec<&&str> = deduped
+            .into_iter()
+            .filter(|p| {
+                !self.cfg.commit_exclude_patterns.iter().any(|pat| {
+                    glob::Pattern::new(pat)
+                        .map(|g| g.matches(p))
+                        .unwrap_or(false)
+                })
+            })
             .collect();
 
         // Stage the files
