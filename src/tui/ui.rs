@@ -113,13 +113,15 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         format!(" | {usage}")
     };
     let (human_pending, human_questions) = human_attention(app);
+    let working = app.agents.iter().filter(|a| a.state == "working").count();
+    let idle = app.agents.iter().filter(|a| a.state == "idle").count();
     let mut spans = vec![
         Span::styled(
             format!(" agentcom - {} ", app.project),
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!(
-            "| ${:.2} total{usage} | {} open",
+            "| ${:.2} total{usage} | {} open | {working} working / {idle} idle",
             app.total_cost, app.open_tasks
         )),
     ];
@@ -154,6 +156,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
             let state = row.map(|r| r.state.as_str()).unwrap_or("stopped");
             let provider = row.map(|r| r.provider.as_str()).unwrap_or("?");
             let cost = row.map(|r| r.spent_usd).unwrap_or(0.0);
+            let turns = row.map(|r| r.turns).unwrap_or(0);
             let marker = if i == app.selected { ">" } else { " " };
             let glyph = if state == "working" {
                 SPINNER[app.spin % SPINNER.len()]
@@ -165,7 +168,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
                 Span::styled(format!("{glyph:<2} "), state_style(state)),
                 Span::raw(format!("{name:<10} ")),
                 provider_badge(provider),
-                Span::styled(format!(" ${cost:.2}"), Style::default().fg(Color::DarkGray)),
+                Span::styled(format!(" ${cost:.2} {turns}t"), Style::default().fg(Color::DarkGray)),
             ]);
             let item = ListItem::new(line);
             if i == app.selected {
@@ -343,9 +346,10 @@ fn draw_activity(f: &mut Frame, app: &App, area: Rect) {
         } else {
             Style::default().fg(Color::Green)
         };
+        let turns = row.turns;
         lines.push(Line::from(vec![
             Span::styled(format!("{spinner} "), style),
-            Span::styled(format!("{} ", row.name), style.add_modifier(Modifier::BOLD)),
+            Span::styled(format!("{} ({turns}t) ", row.name), style.add_modifier(Modifier::BOLD)),
             provider_badge(&row.provider),
             Span::styled(format!(" {}", row.state), style),
             Span::styled(
@@ -465,12 +469,19 @@ fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
                 TaskStatus::Blocked => Style::default().fg(Color::Yellow),
                 TaskStatus::Done => Style::default().fg(Color::DarkGray),
             };
+            let extra = match t.status {
+                TaskStatus::Blocked => t.blocked_reason.as_deref().unwrap_or(""),
+                TaskStatus::Done => t.note.as_deref().unwrap_or(""),
+                _ => "",
+            };
+            let extra: String = extra.chars().take(35).collect();
             Row::new(vec![
                 Cell::from(format!("#{}", t.id)),
                 Cell::from(format!("p{}", t.priority)),
                 Cell::from(t.status.as_str()),
                 Cell::from(t.claimed_by.clone().unwrap_or_default()),
                 Cell::from(t.title.clone()),
+                Cell::from(extra),
             ])
             .style(style)
         })
@@ -483,10 +494,11 @@ fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
             Constraint::Length(8),
             Constraint::Length(10),
             Constraint::Min(20),
+            Constraint::Min(10),
         ],
     )
     .header(
-        Row::new(vec!["id", "pr", "status", "agent", "title"])
+        Row::new(vec!["id", "pr", "status", "agent", "title", "note"])
             .style(Style::default().add_modifier(Modifier::BOLD)),
     )
     .block(Block::default().borders(Borders::ALL).title(" task board "));
