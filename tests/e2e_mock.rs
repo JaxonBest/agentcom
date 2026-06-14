@@ -953,3 +953,48 @@ fn task_export() {
     assert!(stdout.contains("##"), "export has markdown sections: {stdout}");
     assert!(stdout.contains("- ["), "export has checklist items: {stdout}");
 }
+
+#[test]
+fn task_stats() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    let scripts = tmp.path().join("scripts");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+
+    write_config(&project, &[("worker", "does tasks")], "");
+    std::fs::write(
+        scripts.join("worker.ndjson"),
+        r#"{"run": ["agentcom task claim 1", "agentcom task done 1 --note done"], "text": "done"}
+"#,
+    )
+    .unwrap();
+
+    let hub = start_hub(&project, &scripts, &["a task to complete"], &[]);
+    wait_for(
+        &project,
+        &["task", "list", "--status", "done"],
+        Duration::from_secs(20),
+        |out| out.contains("done"),
+    );
+    drop(hub);
+
+    // agentcom task stats reads the DB without a hub.
+    let (ok, stdout, stderr) = cli_split(&project, &["task", "stats"]);
+    assert!(ok, "task stats exits 0: stderr={stderr}");
+    assert!(stdout.contains("total"), "stats shows total: {stdout}");
+    assert!(stdout.contains("done"), "stats shows done count: {stdout}");
+
+    // --json flag returns valid JSON with expected fields.
+    let (ok, stdout, stderr) = cli_split(&project, &["task", "stats", "--json"]);
+    assert!(ok, "task stats --json exits 0: stderr={stderr}");
+    let v: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("task stats --json is valid JSON: {e}\n{stdout}"));
+    assert!(v["total"].as_u64().unwrap_or(0) >= 1, "total >= 1: {stdout}");
+    assert_eq!(v["done"], 1, "one done task: {stdout}");
+    assert!(v["top_claimants"].is_array(), "top_claimants is array: {stdout}");
+    let claimants = v["top_claimants"].as_array().unwrap();
+    assert!(!claimants.is_empty(), "worker appears in top claimants: {stdout}");
+    assert_eq!(claimants[0]["agent"], "worker");
+    assert_eq!(claimants[0]["tasks_done"], 1);
+}

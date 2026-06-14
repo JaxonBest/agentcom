@@ -159,6 +159,21 @@ pub enum Command {
 pub enum ConfigCmd {
     /// Print the loaded agentcom.toml as JSON (useful for scripting and debugging)
     Show,
+    /// Modify a config value without manually editing agentcom.toml
+    ///
+    /// Supports top-level keys like `project_name`, `auto_commit`, `max_agents`,
+    /// and nested agent fields via dot notation: `agent.<name>.model`.
+    ///
+    /// Examples:
+    ///   agentcom config set project_name "my-app"
+    ///   agentcom config set auto_commit true
+    ///   agentcom config set agent.builder.model claude-sonnet-4-6
+    Set {
+        /// Config key path, e.g. `project_name` or `agent.builder.model`
+        key: String,
+        /// Value to set (booleans and numbers are auto-detected)
+        value: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -247,6 +262,17 @@ pub enum TaskCmd {
         /// Output as JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Send an inbox reminder to an agent about a specific task
+    ///
+    /// Examples:
+    ///   agentcom task remind 42 builder
+    ///   agentcom task remind 13 "builder-assistant"
+    Remind {
+        /// Task id
+        id: i64,
+        /// Agent to remind
+        agent: String,
     },
 }
 
@@ -418,6 +444,24 @@ pub async fn run_client(command: Command) -> Result<()> {
                         .ok_or_else(|| anyhow::anyhow!("invalid duration {:?} — use e.g. 7d, 24h, 90m, 60s", before))?;
                     Request::TaskPrune { before_secs }
                 }
+                TaskCmd::Remind { id, agent } => {
+                    // First fetch the task to get its title
+                    let get_resp = client.request(&Request::TaskGet { id }).await?;
+                    let title = match get_resp {
+                        Response::Tasks { tasks } if !tasks.is_empty() => tasks[0].title.clone(),
+                        Response::Err { message } => {
+                            eprintln!("Error: {message}");
+                            return Ok(());
+                        }
+                        _ => {
+                            eprintln!("Error: task #{id} not found");
+                            return Ok(());
+                        }
+                    };
+                    let body = format!("Reminder: task #{id} ({title}) is waiting for you");
+                    let resp = client.request(&Request::Send { to: agent, body, urgent: false }).await?;
+                    return print_simple(resp);
+                }
                 TaskCmd::Export { .. } | TaskCmd::Stats { .. } => unreachable!("handled in main"),
             };
             let resp = client.request(&req).await?;
@@ -551,7 +595,9 @@ pub async fn run_agent_cmd(cmd: AgentCmd) -> Result<()> {
                 auto_commit_author_name,
                 auto_commit_author_email,
                 auto_commit: None,
+                max_rpm: None,
                 env,
+                initial_prompt: None,
             };
             // Validate the combined config first; only persist after the
             // hub (if running) has also accepted — a cap rejection must not

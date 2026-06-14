@@ -15,6 +15,7 @@ fn parse_tags(raw: &str) -> Vec<String> {
 
 fn task_from_row(row: &Row) -> rusqlite::Result<Task> {
     let tags_raw: String = row.get("tags").unwrap_or_default();
+    let pinned: i64 = row.get("pinned").unwrap_or(0);
     Ok(Task {
         id: row.get("id")?,
         title: row.get("title")?,
@@ -25,6 +26,7 @@ fn task_from_row(row: &Row) -> rusqlite::Result<Task> {
         blocked_reason: row.get("blocked_reason")?,
         note: row.get("note")?,
         tags: parse_tags(&tags_raw),
+        pinned: pinned != 0,
         created_by: row.get("created_by")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
@@ -168,7 +170,7 @@ impl Store {
                     "SELECT * FROM tasks ORDER BY
                        CASE status WHEN 'claimed' THEN 0 WHEN 'open' THEN 1
                                    WHEN 'blocked' THEN 2 ELSE 3 END,
-                       priority, id",
+                       pinned DESC, priority, id",
                 );
                 if let Some((pattern, clause)) = &search_clause {
                     // Subquery: first gather matching IDs, then sort them
@@ -177,7 +179,7 @@ impl Store {
                          ORDER BY
                            CASE status WHEN 'claimed' THEN 0 WHEN 'open' THEN 1
                                        WHEN 'blocked' THEN 2 ELSE 3 END,
-                           priority, id",
+                           pinned DESC, priority, id",
                     );
                     let mut stmt = conn.prepare_cached(&sql)?;
                     let rows = stmt.query_map(params![pattern, pattern], task_from_row)?;
@@ -213,7 +215,7 @@ impl Store {
                    WHERE d.task_id = t.id AND dt.status != 'done'
                )
                {}
-             ORDER BY t.priority, t.id LIMIT 1",
+             ORDER BY t.pinned DESC, t.priority, t.id LIMIT 1",
             if exclude.is_empty() {
                 String::new()
             } else {
@@ -531,6 +533,32 @@ impl Store {
         Ok(())
     }
 
+    /// Pin a task so it sorts before all non-pinned tasks in suggestion order.
+    pub fn task_pin(&self, id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let updated = conn.execute(
+            "UPDATE tasks SET pinned = 1, updated_at = ?1 WHERE id = ?2",
+            params![now_ts(), id],
+        )?;
+        if updated == 0 {
+            bail!("task #{id} not found");
+        }
+        Ok(())
+    }
+
+    /// Unpin a task.
+    pub fn task_unpin(&self, id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let updated = conn.execute(
+            "UPDATE tasks SET pinned = 0, updated_at = ?1 WHERE id = ?2",
+            params![now_ts(), id],
+        )?;
+        if updated == 0 {
+            bail!("task #{id} not found");
+        }
+        Ok(())
+    }
+
     /// Return the tag list for a task.
     pub fn task_tags(&self, id: i64) -> Result<Vec<String>> {
         let conn = self.conn.lock().unwrap();
@@ -542,7 +570,17 @@ impl Store {
 
     /// Export every task as a portable snapshot (all statuses, ordered by id).
     pub fn task_export_all(&self) -> Result<Vec<TaskSnapshot>> {
-        let tasks = self.task_list(None, None)?;
+        // Use ID order for a stable, reproducible snapshot (not the display sort).
+        let conn = self.conn.lock().unwrap();
+        let mut tasks: Vec<Task> = {
+            let mut stmt = conn.prepare_cached("SELECT * FROM tasks ORDER BY id")?;
+            let rows = stmt.query_map([], task_from_row)?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for t in &mut tasks {
+            load_deps(&conn, t)?;
+        }
+        drop(conn);
         let snapshots = tasks
             .into_iter()
             .map(|t| TaskSnapshot {
@@ -793,6 +831,30 @@ mod tests {
     fn task_clone_nonexistent_errors() {
         let s = Store::open_in_memory().unwrap();
         assert!(s.task_clone(9999, "builder").is_err());
+    }
+
+    #[test]
+    fn pinned_task_sorted_first() {
+        let s = Store::open_in_memory().unwrap();
+        let normal = s.task_add("normal", "", 1, &[], "human").unwrap();
+        let pinned = s.task_add("pinned", "", 2, &[], "human").unwrap(); // lower priority
+        s.task_pin(pinned).unwrap();
+
+        // next_claimable should prefer the pinned task despite lower numeric priority.
+        let next = s.next_claimable(&[]).unwrap().unwrap();
+        assert_eq!(next.id, pinned);
+        assert!(next.pinned);
+
+        s.task_unpin(pinned).unwrap();
+        let next = s.next_claimable(&[]).unwrap().unwrap();
+        assert_eq!(next.id, normal, "after unpin, higher priority wins");
+    }
+
+    #[test]
+    fn pin_nonexistent_errors() {
+        let s = Store::open_in_memory().unwrap();
+        assert!(s.task_pin(9999).is_err());
+        assert!(s.task_unpin(9999).is_err());
     }
 
     #[test]
