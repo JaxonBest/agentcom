@@ -378,6 +378,14 @@ impl HubConfig {
                 self.max_agents
             );
         }
+        if let Some(secret) = &self.webhook_secret {
+            if secret.len() < 16 {
+                bail!(
+                    "webhook_secret is too short ({} chars) — minimum 16 characters required for adequate HMAC entropy",
+                    secret.len()
+                );
+            }
+        }
         let mut seen = std::collections::HashSet::new();
         for a in &self.agents {
             validate_agent_name(&a.name)?;
@@ -1268,5 +1276,41 @@ ANTHROPIC_API_KEY = "sk-ant-secret123"
         );
         assert!(debug.contains("ANTHROPIC_API_KEY"), "env keys should remain visible");
         assert!(debug.contains("***"), "expected *** placeholder");
+    }
+
+    #[test]
+    fn webhook_secret_too_short_fails_validation() {
+        let text = format!(
+            r#"
+project_name = "test"
+webhook_url = "https://example.com/hook"
+webhook_secret = "tooshort"
+[[agent]]
+name = "builder"
+role = "builder"
+"#
+        );
+        let cfg: HubConfig = toml::from_str(&text).unwrap();
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("webhook_secret is too short"),
+            "expected short-secret error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn webhook_secret_16_chars_passes_validation() {
+        let text = format!(
+            r#"
+project_name = "test"
+webhook_url = "https://example.com/hook"
+webhook_secret = "a_16_char_secret"
+[[agent]]
+name = "builder"
+role = "builder"
+"#
+        );
+        let cfg: HubConfig = toml::from_str(&text).unwrap();
+        cfg.validate().unwrap();
     }
 }

@@ -223,6 +223,8 @@ mod tests {
             due_at: None,
             timeout_mins: None,
             is_archived: false,
+            recur: None,
+            next_run_at: None,
         }
     }
 

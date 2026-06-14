@@ -1058,3 +1058,82 @@ fn messages_command() {
     assert_eq!(msg["to_who"], "bob");
     assert!(msg["body"].as_str().unwrap_or("").contains("hello from alice"));
 }
+
+#[test]
+fn task_trace_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    let scripts = tmp.path().join("scripts");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+
+    write_config(&project, &[("tracer", "traces tasks")], "");
+    std::fs::write(
+        scripts.join("tracer.ndjson"),
+        r#"{"run": ["agentcom task claim 1", "agentcom task done 1 --note finished-trace"], "text": "done"}
+"#,
+    )
+    .unwrap();
+
+    let hub = start_hub(&project, &scripts, &["trace test task"], &[]);
+    wait_for(
+        &project,
+        &["task", "list", "--status", "done"],
+        Duration::from_secs(20),
+        |out| out.contains("finished-trace"),
+    );
+    drop(hub);
+
+    // task trace shows task info and timeline.
+    let (ok, stdout, stderr) = cli_split(&project, &["task", "trace", "1"]);
+    assert!(ok, "task trace exits 0: stderr={stderr}");
+    assert!(stdout.contains("Task #1"), "trace shows task id: {stdout}");
+    assert!(
+        stdout.contains("trace test task"),
+        "trace shows task title: {stdout}"
+    );
+    assert!(stdout.contains("Timeline:"), "trace shows timeline section: {stdout}");
+    assert!(stdout.contains("created by"), "trace shows creator: {stdout}");
+}
+
+#[test]
+fn task_deps_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    let scripts = tmp.path().join("scripts");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+
+    write_config(&project, &[("w", "worker")], "");
+    // Agent adds a dependent task (#3 depends on #1 seed), then claims and finishes seed.
+    std::fs::write(
+        scripts.join("w.ndjson"),
+        concat!(
+            r#"{"run": ["agentcom task add \"child task\" --dep 1", "agentcom task claim 1", "agentcom task done 1 --note deps-done"], "text": "done"}
+"#
+        ),
+    )
+    .unwrap();
+
+    let hub = start_hub(&project, &scripts, &["parent task"], &[]);
+    wait_for(
+        &project,
+        &["task", "list", "--status", "done"],
+        Duration::from_secs(20),
+        |out| out.contains("deps-done"),
+    );
+    drop(hub);
+
+    // task deps on the parent shows upstream (none) and downstream (child).
+    let (ok, stdout, stderr) = cli_split(&project, &["task", "deps", "1"]);
+    assert!(ok, "task deps exits 0: stderr={stderr}");
+    assert!(
+        stdout.contains("parent task"),
+        "deps shows target task title: {stdout}"
+    );
+    // The child depends on parent, so it should appear as downstream.
+    assert!(
+        stdout.contains("child task") || stdout.contains("downstream") || stdout.contains("deps on"),
+        "deps shows child task: {stdout}"
+    );
+}
