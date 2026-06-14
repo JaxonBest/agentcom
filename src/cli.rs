@@ -666,6 +666,15 @@ pub enum AgentCmd {
         /// Agent name to inspect
         name: String,
     },
+    /// Show full config, runtime state, recent activity, and held files for an agent
+    ///
+    /// Example:
+    ///   agentcom agent inspect builder
+    #[command(alias = "info")]
+    Inspect {
+        /// Agent name
+        name: String,
+    },
 }
 
 #[derive(Args, Clone)]
@@ -1036,7 +1045,7 @@ pub async fn run_agent_cmd(cmd: AgentCmd) -> Result<()> {
             let resp = client.request(&Request::AgentSwapModel { agent: name, model }).await?;
             print_simple(resp)
         }
-        AgentCmd::Budget { .. } | AgentCmd::Capabilities { .. } => {
+        AgentCmd::Budget { .. } | AgentCmd::Capabilities { .. } | AgentCmd::Inspect { .. } => {
             unreachable!("handled in main before run_agent_cmd")
         }
         AgentCmd::Remove { name, no_stop } => {

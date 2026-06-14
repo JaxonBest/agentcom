@@ -86,6 +86,7 @@ async fn main() -> Result<()> {
         }
         Command::Agent(cli::AgentCmd::Budget { agent, json }) => run_agent_budget(agent, json),
         Command::Agent(cli::AgentCmd::Capabilities { name }) => run_agent_capabilities(name),
+        Command::Agent(cli::AgentCmd::Inspect { name }) => run_agent_inspect(name).await,
         Command::Agent(cmd) => cli::run_agent_cmd(cmd).await,
         Command::Doctor => run_doctor().await,
         Command::Check => run_check(),
@@ -872,6 +873,102 @@ fn run_agent_capabilities(name: String) -> Result<()> {
             t.requires.join(","),
             qual_str);
     }
+    Ok(())
+}
+
+async fn run_agent_inspect(name: String) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let project_root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+    let cfg = config::HubConfig::load(&project_root)?;
+
+    // --- Config section ---
+    println!("=== agent: {name} ===");
+    if let Some(agent) = cfg.agents.iter().find(|a| a.name == name) {
+        println!("  model:        {}", agent.model.as_deref().unwrap_or("<inherited>"));
+        println!("  provider:     {}", agent.provider.as_ref().map(|p| p.to_string()).unwrap_or_else(|| "<inherited>".into()));
+        if let Some(b) = agent.max_budget_usd {
+            println!("  budget:       ${b:.2}");
+        }
+        if !agent.capabilities.is_empty() {
+            println!("  capabilities: {}", agent.capabilities.join(", "));
+        }
+        if let Some(ref g) = agent.idle_goal {
+            println!("  idle_goal:    {g}");
+        }
+        if !agent.env.is_empty() {
+            let keys: Vec<_> = agent.env.keys().collect();
+            println!("  env_vars:     {}", keys.iter().map(|k| k.as_str()).collect::<Vec<_>>().join(", "));
+        }
+    } else {
+        println!("  (not found in agentcom.toml — may be a dynamic agent)");
+    }
+
+    // --- Runtime state via IPC (best-effort) ---
+    println!("\n--- runtime ---");
+    if let Ok(mut client) = ipc::client::Client::connect().await {
+        if let Ok(resp) = client.request(&ipc::Request::Status).await {
+            if let ipc::Response::Status { agents, .. } = resp {
+                if let Some(row) = agents.iter().find(|a| a.name == name) {
+                    println!("  state:   {}", row.state);
+                    println!("  turns:   {}", row.turns);
+                    println!("  cost:    ${:.4}", row.spent_usd);
+                    if let Some(ref d) = row.detail {
+                        println!("  detail:  {d}");
+                    }
+                } else {
+                    println!("  (agent not currently running)");
+                }
+            }
+        } else {
+            println!("  (hub running but status unavailable)");
+        }
+    } else {
+        println!("  (hub not running)");
+    }
+
+    // --- DB section ---
+    let db = paths::db_path(&project_root)?;
+    if !db.exists() {
+        return Ok(());
+    }
+    let conn = rusqlite::Connection::open(&db)?;
+
+    // Last 10 activity entries by this agent
+    println!("\n--- recent activity (last 10) ---");
+    let mut stmt = conn.prepare(
+        "SELECT ta.created_at, t.id, t.title, ta.body \
+         FROM task_activity ta JOIN tasks t ON ta.task_id = t.id \
+         WHERE ta.agent = ?1 ORDER BY ta.created_at DESC LIMIT 10"
+    )?;
+    let entries: Vec<(i64, i64, String, String)> = stmt.query_map([&name], |r| {
+        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+    })?.filter_map(|r| r.ok()).collect();
+
+    if entries.is_empty() {
+        println!("  (none)");
+    } else {
+        for (ts, task_id, title, body) in entries.iter().rev() {
+            let time = fmt_unix_ts(*ts);
+            let snippet = if body.len() > 60 { &body[..60] } else { body.as_str() };
+            println!("  [{time}] #{task_id} {}: {snippet}", &title[..title.len().min(30)]);
+        }
+    }
+
+    // Held file claims
+    println!("\n--- held files ---");
+    let mut stmt2 = conn.prepare(
+        "SELECT path FROM file_claims WHERE agent = ?1 ORDER BY path"
+    )?;
+    let files: Vec<String> = stmt2.query_map([&name], |r| r.get(0))?.filter_map(|r| r.ok()).collect();
+    if files.is_empty() {
+        println!("  (none)");
+    } else {
+        for f in &files {
+            println!("  {f}");
+        }
+    }
+
     Ok(())
 }
 
