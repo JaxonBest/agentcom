@@ -830,6 +830,33 @@ impl Store {
         }
         Ok(new_ids)
     }
+
+    /// Bump priority by 1 (toward 0 = highest) for open tasks that have been
+    /// sitting untouched for longer than `threshold_secs`. Stops at priority 0.
+    /// Returns the IDs of every task that was escalated.
+    pub fn escalate_stale_tasks(&self, threshold_secs: u64) -> Result<Vec<i64>> {
+        let cutoff = now_ts() - threshold_secs as i64;
+        let now = now_ts();
+        let conn = self.conn.lock().unwrap();
+        // Collect stale IDs first, dropping stmt before any UPDATE.
+        let ids: Vec<i64> = conn
+            .prepare(
+                "SELECT id FROM tasks
+                 WHERE status = 'open'
+                   AND priority > 0
+                   AND is_archived = 0
+                   AND updated_at < ?1",
+            )?
+            .query_map([cutoff], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for &id in &ids {
+            conn.execute(
+                "UPDATE tasks SET priority = priority - 1, updated_at = ?1 WHERE id = ?2 AND priority > 0",
+                params![now, id],
+            )?;
+        }
+        Ok(ids)
+    }
 }
 
 #[cfg(test)]
@@ -1333,5 +1360,42 @@ mod tests {
         s.task_archive(id).unwrap();
         // next_claimable should not return archived tasks.
         assert!(s.next_claimable(&[], &[]).unwrap().is_none());
+    }
+
+    #[test]
+    fn escalate_stale_tasks_bumps_priority() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.task_add("old task", "", 3, &[], "human").unwrap();
+        // Back-date created_at and updated_at so the task appears stale.
+        {
+            let conn = s.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE tasks SET updated_at = updated_at - 7200 WHERE id = ?1",
+                [id],
+            ).unwrap();
+        }
+        // Threshold 1 hour (3600s) — task is 2 hours stale → should escalate.
+        let escalated = s.escalate_stale_tasks(3600).unwrap();
+        assert!(escalated.contains(&id));
+        let t = s.task_get(id).unwrap().unwrap();
+        assert_eq!(t.priority, 2);
+    }
+
+    #[test]
+    fn escalate_does_not_exceed_priority_zero() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.task_add("urgent", "", 0, &[], "human").unwrap();
+        // Back-date so it's stale.
+        {
+            let conn = s.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE tasks SET updated_at = updated_at - 7200 WHERE id = ?1",
+                [id],
+            ).unwrap();
+        }
+        // priority=0 should not be escalated (already at top).
+        s.escalate_stale_tasks(3600).unwrap();
+        let t = s.task_get(id).unwrap().unwrap();
+        assert_eq!(t.priority, 0);
     }
 }
