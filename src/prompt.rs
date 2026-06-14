@@ -202,6 +202,7 @@ mod tests {
             updated_at: 0,
             depends_on: vec![],
             due_at: None,
+            timeout_mins: None,
         }
     }
 

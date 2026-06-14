@@ -1311,6 +1311,30 @@ impl Hub {
             })
             .collect();
 
+        // Optional test gate: run configured command; skip commit if it fails.
+        if let Some(test_cmd) = self.cfg.auto_commit_test_cmd.as_deref() {
+            let result = Command::new("sh")
+                .args(["-c", test_cmd])
+                .current_dir(&self.project_root)
+                .output();
+            match result {
+                Ok(o) if o.status.success() => {}
+                Ok(o) => {
+                    let code = o.status.code().unwrap_or(-1);
+                    self.log(format!(
+                        "auto-commit skipped: tests failed (exit {code}) for {agent} — cmd: {test_cmd}"
+                    ));
+                    return;
+                }
+                Err(e) => {
+                    self.log(format!(
+                        "auto-commit skipped: could not run test command for {agent}: {e}"
+                    ));
+                    return;
+                }
+            }
+        }
+
         // Stage the files
         if Command::new("git")
             .arg("add")
