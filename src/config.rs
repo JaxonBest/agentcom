@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HubConfig {
     pub project_name: String,
@@ -79,7 +79,21 @@ pub struct HubConfig {
     pub agents: Vec<AgentConfig>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl std::fmt::Debug for HubConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HubConfig")
+            .field("project_name", &self.project_name)
+            .field("agents", &format!("{} agent(s)", self.agents.len()))
+            .field("webhook_url", &self.webhook_url)
+            .field(
+                "webhook_secret",
+                &self.webhook_secret.as_ref().map(|_| "***"),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentConfig {
     /// Unique handle other agents address messages to. `[a-z0-9_-]+`.
@@ -137,6 +151,10 @@ pub struct AgentConfig {
     /// any global `stagger_agents_ms`. Useful to spread API calls at startup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub spawn_delay_ms: Option<u64>,
+    /// Capability labels this agent has (e.g. ["security", "rust"]).
+    /// Tasks may require all of a set of capabilities before an agent can claim them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
@@ -154,6 +172,20 @@ impl std::fmt::Display for AgentProvider {
             AgentProvider::Codex => f.write_str("codex"),
             AgentProvider::Deepseek => f.write_str("deepseek"),
         }
+    }
+}
+
+impl std::fmt::Debug for AgentConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let masked_env: std::collections::BTreeMap<&str, &str> =
+            self.env.keys().map(|k| (k.as_str(), "***")).collect();
+        f.debug_struct("AgentConfig")
+            .field("name", &self.name)
+            .field("role", &self.role)
+            .field("provider", &self.provider)
+            .field("model", &self.model)
+            .field("env", &masked_env)
+            .finish_non_exhaustive()
     }
 }
 
@@ -177,6 +209,7 @@ impl Default for AgentConfig {
             env: BTreeMap::new(),
             initial_prompt: None,
             spawn_delay_ms: None,
+            capabilities: vec![],
         }
     }
 }
@@ -1157,5 +1190,44 @@ ANOTHER = "world"
         let text = toml::to_string(&cfg).unwrap();
         let cfg2: HubConfig = toml::from_str(&text).unwrap();
         assert_eq!(cfg2.agents[0].env, cfg.agents[0].env);
+    }
+
+    #[test]
+    fn debug_masks_webhook_secret() {
+        let toml = r#"
+project_name = "x"
+webhook_secret = "super-secret-key"
+webhook_url = "https://example.com/hook"
+[[agent]]
+name = "worker"
+role = "does things"
+"#;
+        let cfg: HubConfig = toml::from_str(toml).unwrap();
+        let debug = format!("{cfg:?}");
+        assert!(
+            !debug.contains("super-secret-key"),
+            "webhook_secret must be redacted in Debug output, got: {debug}"
+        );
+        assert!(debug.contains("***"), "expected *** placeholder");
+    }
+
+    #[test]
+    fn debug_masks_agent_env_values() {
+        let toml = r#"
+project_name = "x"
+[[agent]]
+name = "worker"
+role = "does things"
+[agent.env]
+ANTHROPIC_API_KEY = "sk-ant-secret123"
+"#;
+        let cfg: HubConfig = toml::from_str(toml).unwrap();
+        let debug = format!("{:?}", cfg.agents[0]);
+        assert!(
+            !debug.contains("sk-ant-secret123"),
+            "env values must be redacted in Debug output, got: {debug}"
+        );
+        assert!(debug.contains("ANTHROPIC_API_KEY"), "env keys should remain visible");
+        assert!(debug.contains("***"), "expected *** placeholder");
     }
 }
