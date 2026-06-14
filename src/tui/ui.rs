@@ -802,6 +802,10 @@ fn draw_task_detail(f: &mut Frame, task: &crate::store::Task, area: Rect) {
         let tag_str = task.tags.iter().map(|l| format!("[{l}]")).collect::<Vec<_>>().join(" ");
         lines.push(Line::from(Span::styled(format!("tags: {tag_str}"), Style::default().fg(Color::Magenta))));
     }
+    if !task.requires.is_empty() {
+        let req_str = task.requires.join(", ");
+        lines.push(Line::from(Span::styled(format!("requires: {req_str}"), Style::default().fg(Color::Cyan))));
+    }
     if let Some(due) = task.due_at {
         let now_ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
