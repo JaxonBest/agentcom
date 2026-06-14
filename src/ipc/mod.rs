@@ -8,6 +8,7 @@
 
 pub mod client;
 pub mod server;
+pub use client::Client;
 
 use crate::store::{Message, Task};
 use serde::{Deserialize, Serialize};

@@ -222,6 +222,7 @@ mod tests {
             requires: vec![],
             due_at: None,
             timeout_mins: None,
+            is_archived: false,
         }
     }
 
