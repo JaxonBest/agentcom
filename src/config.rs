@@ -89,6 +89,12 @@ pub struct HubConfig {
     /// Default: false. Set to true to enable live config reloads.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub config_watch: bool,
+    /// Optional HTTP JSON API port. When set, the hub exposes GET /status,
+    /// GET /tasks, GET /agents on this port (127.0.0.1 only). Requests must
+    /// include `Authorization: Bearer <token>` using the same IPC token.
+    /// Example: rest_api_port = 7071
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rest_api_port: Option<u16>,
     #[serde(default, rename = "agent")]
     pub agents: Vec<AgentConfig>,
 }
