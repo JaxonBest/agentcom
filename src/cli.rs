@@ -627,6 +627,13 @@ pub enum TaskCmd {
         #[arg(long)]
         title: Option<String>,
     },
+    /// Show per-agent cost and time spent on a task (offline, no hub needed)
+    Cost {
+        id: i64,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -839,7 +846,7 @@ pub async fn run_client(command: Command) -> Result<()> {
                     requires,
                     recur,
                 },
-                TaskCmd::Due { .. } | TaskCmd::Graph => unreachable!("handled in main"),
+                TaskCmd::Due { .. } | TaskCmd::Graph | TaskCmd::Cost { .. } => unreachable!("handled in main"),
                 TaskCmd::List { status, search, tag } => Request::TaskList { status, search, tag },
                 TaskCmd::Claim { id } => Request::TaskClaim { id },
                 TaskCmd::Done { id, note } => Request::TaskDone { id, note },

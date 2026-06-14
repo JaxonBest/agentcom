@@ -142,6 +142,7 @@ async fn main() -> Result<()> {
         Command::Task(cli::TaskCmd::FromTemplate { name, title }) => {
             run_task_from_template(name, title).await
         }
+        Command::Task(cli::TaskCmd::Cost { id, json }) => run_task_cost(id, json),
         Command::Task(cli::TaskCmd::Add { title, description, priority, depends_on, timeout, requires, nl: true, recur: _ }) => {
             run_task_add_nl(title, description, priority, depends_on, timeout, requires).await
         }
@@ -2925,5 +2926,108 @@ async fn run_workflow_run(
     }
     let created = created_ids.iter().filter(|&&id| id != -1).count();
     println!("\nworkflow '{}' instantiated — {created} task(s) created", tpl.name);
+    Ok(())
+}
+
+fn run_task_cost(id: i64, json_out: bool) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let project_root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+    let db = paths::db_path(&project_root)?;
+    anyhow::ensure!(db.exists(), "no hub data found — run `agentcom up` first");
+    let conn = rusqlite::Connection::open(&db)?;
+
+    let (title, task_status): (String, String) = conn
+        .query_row("SELECT title, status FROM tasks WHERE id = ?1", [id], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
+        .map_err(|_| anyhow::anyhow!("task #{id} not found"))?;
+
+    let mut stmt = conn.prepare(
+        "SELECT agent, body, created_at FROM task_activity WHERE task_id = ?1 ORDER BY created_at ASC"
+    )?;
+    let events: Vec<(String, String, i64)> = stmt
+        .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+
+    struct Window {
+        agent: String,
+        claim_at: i64,
+        end_at: Option<i64>,
+    }
+    let mut windows: Vec<Window> = Vec::new();
+    for (agent, body, ts) in &events {
+        let lower = body.to_lowercase();
+        if lower.starts_with("claimed") {
+            windows.push(Window { agent: agent.clone(), claim_at: *ts, end_at: None });
+        } else if lower.starts_with("done") || lower.starts_with("blocked") {
+            if let Some(w) = windows.iter_mut().rev().find(|w| w.agent == *agent && w.end_at.is_none()) {
+                w.end_at = Some(*ts);
+            }
+        }
+    }
+
+    #[derive(serde::Serialize)]
+    struct AgentCost {
+        agent: String,
+        cost_usd: f64,
+        wall_secs: i64,
+    }
+
+    let mut rows: Vec<AgentCost> = Vec::new();
+    let mut total_cost = 0f64;
+    let mut total_secs = 0i64;
+
+    for w in &windows {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(w.claim_at);
+        let end = w.end_at.unwrap_or(now_secs);
+        let secs = end - w.claim_at;
+
+        let cost: f64 = conn.query_row(
+            "SELECT COALESCE(SUM(cost_usd), 0.0) FROM runs
+             WHERE agent = ?1 AND started_at >= ?2 AND started_at <= ?3",
+            rusqlite::params![w.agent, w.claim_at, end],
+            |r| r.get(0),
+        ).unwrap_or(0.0);
+
+        total_cost += cost;
+        total_secs += secs;
+        rows.push(AgentCost { agent: w.agent.clone(), cost_usd: cost, wall_secs: secs });
+    }
+
+    if json_out {
+        #[derive(serde::Serialize)]
+        struct Out<'a> {
+            id: i64,
+            title: &'a str,
+            status: &'a str,
+            total_cost_usd: f64,
+            total_wall_secs: i64,
+            agents: &'a [AgentCost],
+        }
+        println!("{}", serde_json::to_string_pretty(&Out {
+            id,
+            title: &title,
+            status: &task_status,
+            total_cost_usd: total_cost,
+            total_wall_secs: total_secs,
+            agents: &rows,
+        })?);
+    } else {
+        println!("task #{id} — {title} [{task_status}]");
+        println!("  total cost: ${total_cost:.4}  wall time: {}m{}s",
+            total_secs / 60, total_secs % 60);
+        if rows.is_empty() {
+            println!("  (no activity recorded)");
+        } else {
+            for r in &rows {
+                println!("  {:>20}  ${:.4}  {}m{}s",
+                    r.agent, r.cost_usd, r.wall_secs / 60, r.wall_secs % 60);
+            }
+        }
+    }
     Ok(())
 }
