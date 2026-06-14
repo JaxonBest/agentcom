@@ -261,6 +261,15 @@ pub enum TaskCmd {
         /// Task ids this depends on (repeatable)
         #[arg(long = "dep")]
         depends_on: Vec<i64>,
+        /// Auto-block if still claimed after this many minutes
+        #[arg(long)]
+        timeout: Option<u64>,
+        /// Required capability labels (comma-separated); only agents with all caps get this task
+        #[arg(long = "requires", value_delimiter = ',')]
+        requires: Vec<String>,
+        /// Expand a plain-English description into a structured task via claude
+        #[arg(long)]
+        nl: bool,
     },
     /// List tasks
     List {
@@ -383,6 +392,24 @@ pub enum TaskCmd {
     Pin { id: i64 },
     /// Remove a task's pin
     Unpin { id: i64 },
+    /// Set or clear a due date on a task
+    ///
+    /// Examples:
+    ///   agentcom task due 42 2026-07-01
+    ///   agentcom task due 42 --clear
+    Due {
+        id: i64,
+        /// Due date as YYYY-MM-DD or unix timestamp (omit with --clear)
+        date: Option<String>,
+        /// Remove the due date
+        #[arg(long)]
+        clear: bool,
+    },
+    /// Print task dependency graph as Mermaid flowchart (paste into GitHub markdown)
+    ///
+    /// Example:
+    ///   agentcom task graph
+    Graph,
     /// Show the full lifecycle of a task: created → claimed → done/blocked
     ///
     /// Example:
@@ -468,6 +495,15 @@ pub enum AgentCmd {
         /// Milliseconds to delay before spawning this agent (useful with stagger_agents_ms)
         #[arg(long)]
         spawn_delay: Option<u64>,
+        /// Capability labels this agent has (comma-separated); used to route tasks with --requires
+        #[arg(long = "capability", value_delimiter = ',')]
+        capabilities: Vec<String>,
+        /// Standing goal sent every time the agent becomes idle with no pending work
+        #[arg(long)]
+        idle_goal: Option<String>,
+        /// Max prompts per minute (rate limiting)
+        #[arg(long)]
+        max_rpm: Option<u32>,
     },
     /// List configured agents (with live state if the hub is running)
     List,
@@ -553,14 +589,18 @@ pub async fn run_client(command: Command) -> Result<()> {
                     description,
                     priority,
                     depends_on,
+                    timeout,
+                    requires,
+                    nl: _,
                 } => Request::TaskAdd {
                     title,
                     description,
                     priority,
                     depends_on,
-                    timeout_mins: None,
-                    requires: vec![],
+                    timeout_mins: timeout,
+                    requires,
                 },
+                TaskCmd::Due { .. } | TaskCmd::Graph => unreachable!("handled in main"),
                 TaskCmd::List { status, search, tag } => Request::TaskList { status, search, tag },
                 TaskCmd::Claim { id } => Request::TaskClaim { id },
                 TaskCmd::Done { id, note } => Request::TaskDone { id, note },
@@ -730,6 +770,9 @@ pub async fn run_agent_cmd(cmd: AgentCmd) -> Result<()> {
             env_vars,
             initial_prompt,
             spawn_delay,
+            capabilities,
+            idle_goal,
+            max_rpm,
         } => {
             let env: std::collections::BTreeMap<String, String> = env_vars
                 .into_iter()
@@ -758,6 +801,9 @@ pub async fn run_agent_cmd(cmd: AgentCmd) -> Result<()> {
                 env,
                 initial_prompt,
                 spawn_delay_ms: spawn_delay,
+                capabilities,
+                idle_goal,
+                max_rpm,
                 ..Default::default()
             };
             // Validate the combined config first; only persist after the

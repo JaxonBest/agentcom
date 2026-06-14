@@ -125,6 +125,11 @@ async fn main() -> Result<()> {
         Command::Task(cli::TaskCmd::Watch { no_color }) => run_task_watch(no_color),
         Command::Task(cli::TaskCmd::Trace { id }) => run_task_trace(id),
         Command::Task(cli::TaskCmd::Deps { id }) => run_task_deps(id),
+        Command::Task(cli::TaskCmd::Graph) => run_task_graph(),
+        Command::Task(cli::TaskCmd::Due { id, date, clear }) => run_task_due(id, date, clear).await,
+        Command::Task(cli::TaskCmd::Add { title, description, priority, depends_on, timeout, requires, nl: true }) => {
+            run_task_add_nl(title, description, priority, depends_on, timeout, requires).await
+        }
         Command::Audit { event, agent, since, count, json } => run_audit(event, agent, since, count, json),
         other => cli::run_client(other).await,
     }
@@ -1567,4 +1572,167 @@ fn run_task_deps(id: i64) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Parse "YYYY-MM-DD" to a unix timestamp (midnight UTC) without chrono.
+fn parse_date_to_ts(s: &str) -> Result<i64> {
+    let parts: Vec<&str> = s.splitn(3, '-').collect();
+    if parts.len() != 3 {
+        anyhow::bail!("invalid date {s:?} — use YYYY-MM-DD");
+    }
+    let y: i64 = parts[0].parse().context("invalid year")?;
+    let m: u32 = parts[1].parse().context("invalid month")?;
+    let d: u32 = parts[2].parse().context("invalid day")?;
+    if m < 1 || m > 12 || d < 1 || d > 31 {
+        anyhow::bail!("invalid date {s:?}");
+    }
+    // Days from civil epoch (0001-03-01) using Gregorian algorithm.
+    let (y, m) = if m <= 2 { (y - 1, m + 9) } else { (y, m - 3) };
+    let era = y / 400;
+    let yoe = y - era * 400;
+    let doy = (153 * m as i64 + 2) / 5 + d as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    let days = era * 146097 + doe - 719468;
+    Ok(days * 86400)
+}
+
+async fn run_task_due(id: i64, date: Option<String>, clear: bool) -> Result<()> {
+    let due_at: Option<i64> = if clear {
+        None
+    } else if let Some(ref s) = date {
+        // Accept unix timestamp directly or YYYY-MM-DD.
+        if let Ok(ts) = s.parse::<i64>() {
+            Some(ts)
+        } else {
+            Some(parse_date_to_ts(s)?)
+        }
+    } else {
+        anyhow::bail!("provide a date (YYYY-MM-DD) or --clear");
+    };
+
+    let mut client = ipc::client::Client::connect()
+        .await
+        .context("hub not running — start it with: agentcom up")?;
+    let resp = client.request(&ipc::Request::TaskSetDue { id, due_at }).await?;
+    match resp {
+        ipc::Response::Ok { message } => {
+            println!("{}", message.unwrap_or_else(|| {
+                if clear { format!("cleared due date on #{id}") }
+                else { format!("set due date on #{id}") }
+            }));
+            Ok(())
+        }
+        ipc::Response::Err { message } => anyhow::bail!("{message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
+fn run_task_graph() -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let project_root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+    let db = paths::db_path(&project_root)?;
+    if !db.exists() {
+        anyhow::bail!("no hub data found — run `agentcom up` first");
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        &db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+
+    let mut stmt = conn.prepare("SELECT id, title, status FROM tasks ORDER BY id")?;
+    let tasks: Vec<(i64, String, String)> = {
+        let mut v = Vec::new();
+        for row in stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))? {
+            v.push(row?);
+        }
+        v
+    };
+
+    let mut stmt2 = conn.prepare("SELECT task_id, depends_on_id FROM task_deps ORDER BY task_id")?;
+    let edges: Vec<(i64, i64)> = {
+        let mut v = Vec::new();
+        for row in stmt2.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))? {
+            v.push(row?);
+        }
+        v
+    };
+
+    if tasks.is_empty() {
+        println!("no tasks");
+        return Ok(());
+    }
+
+    println!("```mermaid");
+    println!("graph TD");
+    for (id, title, status) in &tasks {
+        let short = if title.len() > 35 { format!("{}…", &title[..35]) } else { title.clone() };
+        println!("  N{id}[\"#{id} {short} [{status}]\"]");
+    }
+    for (task_id, dep_id) in &edges {
+        println!("  N{dep_id} --> N{task_id}");
+    }
+    println!("```");
+    Ok(())
+}
+
+async fn run_task_add_nl(
+    title: String,
+    description: String,
+    priority: i64,
+    depends_on: Vec<i64>,
+    timeout: Option<u64>,
+    requires: Vec<String>,
+) -> Result<()> {
+    // Try to expand via claude. If unavailable, fall back to raw text.
+    let expanded = try_expand_nl_task(&title).await;
+    let (final_title, final_desc, final_priority) = match expanded {
+        Some((t, d, p)) => (t, d, p),
+        None => (title, description, priority),
+    };
+
+    let mut client = ipc::client::Client::connect()
+        .await
+        .context("hub not running — start it with: agentcom up")?;
+    let resp = client.request(&ipc::Request::TaskAdd {
+        title: final_title,
+        description: final_desc,
+        priority: final_priority,
+        depends_on,
+        timeout_mins: timeout,
+        requires,
+    }).await?;
+    match resp {
+        ipc::Response::Ok { message } => {
+            println!("{}", message.unwrap_or_else(|| "task added".into()));
+            Ok(())
+        }
+        ipc::Response::Tasks { tasks } if !tasks.is_empty() => {
+            println!("added #{}: {}", tasks[0].id, tasks[0].title);
+            Ok(())
+        }
+        ipc::Response::Err { message } => anyhow::bail!("{message}"),
+        other => anyhow::bail!("unexpected response: {other:?}"),
+    }
+}
+
+async fn try_expand_nl_task(text: &str) -> Option<(String, String, i64)> {
+    let prompt = format!(
+        "Expand this into a clear agentcom task. Return ONLY valid JSON, no markdown fences: \
+        {{\"title\":\"...\",\"description\":\"...\",\"priority\":2}}\n\nInput: {text}"
+    );
+    let output = tokio::process::Command::new("claude")
+        .args(["-p", &prompt])
+        .output()
+        .await
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).ok()?;
+    let title = v["title"].as_str()?.to_string();
+    let description = v["description"].as_str().unwrap_or("").to_string();
+    let priority = v["priority"].as_i64().unwrap_or(2);
+    Some((title, description, priority))
 }
