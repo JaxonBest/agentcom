@@ -5,6 +5,23 @@ use super::{now_ts, Store, Task, TaskSnapshot, TaskStatus};
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection, Row};
 
+/// Parse a recurrence interval string into seconds.
+/// Supported: Nh (hours), Nd (days), Nw (weeks). Returns None on parse failure.
+pub(super) fn parse_recur_secs(recur: &str) -> Option<i64> {
+    let recur = recur.trim();
+    if recur.is_empty() {
+        return None;
+    }
+    let (n_str, unit) = recur.split_at(recur.len().saturating_sub(1));
+    let n: i64 = n_str.parse().ok()?;
+    match unit {
+        "h" => Some(n * 3600),
+        "d" => Some(n * 86400),
+        "w" => Some(n * 7 * 86400),
+        _ => None,
+    }
+}
+
 fn parse_tags(raw: &str) -> Vec<String> {
     raw.split(',')
         .map(str::trim)
@@ -33,6 +50,8 @@ fn task_from_row(row: &Row) -> rusqlite::Result<Task> {
         timeout_mins: row.get::<_, Option<i64>>("timeout_mins").unwrap_or(None).map(|v| v as u64),
         requires: parse_tags(&requires_raw),
         is_archived: is_archived != 0,
+        recur: row.get("recur").unwrap_or(None),
+        next_run_at: row.get("next_run_at").unwrap_or(None),
         created_by: row.get("created_by")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
@@ -834,6 +853,35 @@ impl Store {
     /// Bump priority by 1 (toward 0 = highest) for open tasks that have been
     /// sitting untouched for longer than `threshold_secs`. Stops at priority 0.
     /// Returns the IDs of every task that was escalated.
+    pub fn task_set_recur(&self, id: i64, recur: Option<&str>) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE tasks SET recur = ?1, updated_at = ?2 WHERE id = ?3",
+            params![recur, now_ts(), id],
+        )?;
+        Ok(())
+    }
+
+    /// When a recurring task is completed, create a fresh open copy with the same
+    /// title/description/priority and set its `next_run_at` to `now + interval`.
+    /// Returns `None` if the task has no recur interval, else the new task's id.
+    pub fn create_next_recurrence(&self, task: &Task) -> Result<Option<i64>> {
+        let Some(ref recur) = task.recur else {
+            return Ok(None);
+        };
+        let interval_secs = parse_recur_secs(recur).unwrap_or(86400);
+        let next_run = now_ts() + interval_secs;
+        let new_id = self.task_add(&task.title, &task.description, task.priority, &[], &task.created_by)?;
+        {
+            let conn = self.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE tasks SET recur = ?1, next_run_at = ?2, updated_at = ?3 WHERE id = ?4",
+                params![recur.as_str(), next_run, now_ts(), new_id],
+            )?;
+        }
+        Ok(Some(new_id))
+    }
+
     pub fn escalate_stale_tasks(&self, threshold_secs: u64) -> Result<Vec<i64>> {
         let cutoff = now_ts() - threshold_secs as i64;
         let now = now_ts();
@@ -1397,5 +1445,51 @@ mod tests {
         s.escalate_stale_tasks(3600).unwrap();
         let t = s.task_get(id).unwrap().unwrap();
         assert_eq!(t.priority, 0);
+    }
+
+    #[test]
+    fn parse_recur_secs_parses_intervals() {
+        assert_eq!(super::parse_recur_secs("1h"), Some(3600));
+        assert_eq!(super::parse_recur_secs("2h"), Some(7200));
+        assert_eq!(super::parse_recur_secs("1d"), Some(86400));
+        assert_eq!(super::parse_recur_secs("7d"), Some(604800));
+        assert_eq!(super::parse_recur_secs("1w"), Some(604800));
+        assert_eq!(super::parse_recur_secs("2w"), Some(1209600));
+        assert_eq!(super::parse_recur_secs("bad"), None);
+        assert_eq!(super::parse_recur_secs(""), None);
+    }
+
+    #[test]
+    fn task_set_recur_persists() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.task_add("daily standup", "", 2, &[], "human").unwrap();
+        s.task_set_recur(id, Some("1d")).unwrap();
+        let t = s.task_get(id).unwrap().unwrap();
+        assert_eq!(t.recur.as_deref(), Some("1d"));
+        // Clearing recur.
+        s.task_set_recur(id, None).unwrap();
+        let t2 = s.task_get(id).unwrap().unwrap();
+        assert!(t2.recur.is_none());
+    }
+
+    #[test]
+    fn create_next_recurrence_creates_fresh_copy() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.task_add("weekly report", "", 2, &[], "human").unwrap();
+        s.task_set_recur(id, Some("1w")).unwrap();
+        let t = s.task_get(id).unwrap().unwrap();
+
+        s.task_claim(id, "alice").unwrap();
+        s.task_done(id, "alice", None).unwrap();
+
+        let new_id = s.create_next_recurrence(&t).unwrap().unwrap();
+        assert_ne!(new_id, id);
+        let new_task = s.task_get(new_id).unwrap().unwrap();
+        assert_eq!(new_task.title, "weekly report");
+        assert_eq!(new_task.recur.as_deref(), Some("1w"));
+        assert!(new_task.next_run_at.is_some());
+        // next_run_at should be roughly now + 7 days.
+        let expected_min = super::now_ts() + 7 * 86400 - 5;
+        assert!(new_task.next_run_at.unwrap() >= expected_min);
     }
 }

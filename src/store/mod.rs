@@ -134,11 +134,19 @@ pub struct Task {
     /// Soft-deleted: hidden from normal task list until restored.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_archived: bool,
+    /// Recurrence interval ("1h", "1d", "7d", "1w"). Hub creates a fresh copy when done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recur: Option<String>,
+    /// Unix timestamp when the next recurrence should become visible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_run_at: Option<i64>,
     pub created_by: String,
     pub created_at: i64,
     pub updated_at: i64,
     pub depends_on: Vec<i64>,
 }
+
+
 
 /// Portable snapshot of a task used for export/import.
 /// `depends_on` holds the original source task IDs; the importer remaps them.
@@ -182,6 +190,8 @@ impl Default for Task {
             timeout_mins: None,
             requires: vec![],
             is_archived: false,
+            recur: None,
+            next_run_at: None,
             created_by: String::new(),
             created_at: 0,
             updated_at: 0,
