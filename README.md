@@ -278,6 +278,7 @@ These commands read local files directly and work without a running hub.
 | `agentcom logs [-n 100] [--agent <name>] [--follow]` | Read hub log files; reads across rotated daily logs; `-n` controls line count |
 | `agentcom budget` | Per-agent spend and turn report from the run history database |
 | `agentcom completions <bash\|zsh\|fish\|elvish>` | Print shell completion script to stdout |
+| `agentcom config show` | Print the loaded `agentcom.toml` as pretty JSON — useful for scripting and debugging |
 
 ### Real-time control
 
@@ -306,6 +307,7 @@ These commands read local files directly and work without a running hub.
 | `agentcom task edit <id> [-t title] [-d desc] [-p priority]` | Update task fields (PATCH — omitted fields unchanged) |
 | `agentcom task remove <id>` | Permanently delete a task (not allowed if claimed) |
 | `agentcom task prune [--before 7d]` | Delete all done/blocked tasks older than the given duration |
+| `agentcom task export` | Print the full task board as a Markdown checklist (offline, no hub required) |
 
 ### Agent fleet
 
