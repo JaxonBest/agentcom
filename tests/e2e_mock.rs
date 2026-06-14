@@ -938,7 +938,7 @@ fn task_export() {
     )
     .unwrap();
 
-    let mut hub = start_hub(&project, &scripts, &["seed task"], &[]);
+    let hub = start_hub(&project, &scripts, &["seed task"], &[]);
     wait_for(
         &project,
         &["task", "list", "--status", "done"],
