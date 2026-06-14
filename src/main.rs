@@ -123,6 +123,9 @@ async fn main() -> Result<()> {
         Command::Task(cli::TaskCmd::Import { file }) => run_task_import(&file),
         Command::Task(cli::TaskCmd::Stats { json }) => run_task_stats(json),
         Command::Task(cli::TaskCmd::Watch { no_color }) => run_task_watch(no_color),
+        Command::Task(cli::TaskCmd::Trace { id }) => run_task_trace(id),
+        Command::Task(cli::TaskCmd::Deps { id }) => run_task_deps(id),
+        Command::Audit { event, agent, since, count, json } => run_audit(event, agent, since, count, json),
         other => cli::run_client(other).await,
     }
 }
@@ -1316,6 +1319,252 @@ fn init_logging(project_root: &std::path::Path, headless: bool) -> Result<()> {
     } else {
         // The TUI owns the terminal — file logging only.
         tracing_subscriber::registry().with(file_layer).init();
+    }
+    Ok(())
+}
+
+/// Format a unix timestamp as "YYYY-MM-DD HH:MM:SS" without external crates.
+fn fmt_unix_ts(ts: i64) -> String {
+    // Days since epoch → calendar date via the Gregorian algorithm.
+    let secs_of_day = ts.rem_euclid(86400) as u32;
+    let days = (ts / 86400) as i64;
+    // Shift epoch from 1970-01-01 to 0001-03-01 (civil calendar base).
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    let h = secs_of_day / 3600;
+    let min = (secs_of_day % 3600) / 60;
+    let s = secs_of_day % 60;
+    format!("{y:04}-{m:02}-{d:02} {h:02}:{min:02}:{s:02}")
+}
+
+fn run_audit(
+    event_filter: Option<String>,
+    agent_filter: Option<String>,
+    since: Option<String>,
+    count: usize,
+    json_out: bool,
+) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let project_root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+    let log_path = paths::data_dir(&project_root)?.join("audit.log");
+    if !log_path.exists() {
+        if json_out {
+            println!("[]");
+        } else {
+            println!("no audit log found — hub hasn't run yet");
+        }
+        return Ok(());
+    }
+
+    let since_ts: Option<i64> = since.as_deref().map(|s| {
+        // Parse YYYY-MM-DD without chrono: days since epoch * 86400.
+        let parts: Vec<&str> = s.splitn(3, '-').collect();
+        if parts.len() == 3 {
+            if let (Ok(y), Ok(m), Ok(d)) = (
+                parts[0].parse::<i64>(),
+                parts[1].parse::<i64>(),
+                parts[2].parse::<i64>(),
+            ) {
+                // Rough days-since-epoch: good enough for filtering.
+                let days = (y - 1970) * 365 + (y - 1969) / 4 + (m - 1) * 30 + d;
+                return days * 86400;
+            }
+        }
+        0
+    });
+
+    let content = std::fs::read_to_string(&log_path)?;
+    let mut events: Vec<serde_json::Value> = content
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .filter(|v: &serde_json::Value| {
+            if let Some(ref ef) = event_filter {
+                if v["event"].as_str().unwrap_or("") != ef {
+                    return false;
+                }
+            }
+            if let Some(ref af) = agent_filter {
+                if v["agent"].as_str().unwrap_or("") != af {
+                    return false;
+                }
+            }
+            if let Some(ts_min) = since_ts {
+                if v["ts"].as_i64().unwrap_or(0) < ts_min {
+                    return false;
+                }
+            }
+            true
+        })
+        .collect();
+
+    // Apply count limit (most recent N, so take from the end).
+    if events.len() > count {
+        let skip = events.len() - count;
+        events = events.into_iter().skip(skip).collect();
+    }
+
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&events)?);
+        return Ok(());
+    }
+
+    if events.is_empty() {
+        println!("no audit events matching filters");
+        return Ok(());
+    }
+
+    for ev in &events {
+        let ts = ev["ts"].as_i64().unwrap_or(0);
+        let dt = fmt_unix_ts(ts);
+        let event = ev["event"].as_str().unwrap_or("?");
+        let agent = ev["agent"].as_str().unwrap_or("?");
+        // Print extra fields (everything except ts/event/agent) as key=value.
+        let extras: String = ev
+            .as_object()
+            .map(|obj| {
+                obj.iter()
+                    .filter(|(k, _)| !matches!(k.as_str(), "ts" | "event" | "agent"))
+                    .map(|(k, v)| {
+                        let s = match v {
+                            serde_json::Value::String(s) => s.clone(),
+                            other => other.to_string(),
+                        };
+                        format!(" {k}={s}")
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        println!("{dt}  {event:<20}  {agent:<14}{extras}");
+    }
+    Ok(())
+}
+
+fn run_task_trace(id: i64) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let project_root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+    let db = paths::db_path(&project_root)?;
+    if !db.exists() {
+        anyhow::bail!("no hub data found — run `agentcom up` first");
+    }
+    let store = store::Store::open(&db)?;
+
+    // Load task.
+    let tasks = store.task_list(None, None)?;
+    let task = tasks.iter().find(|t| t.id == id)
+        .ok_or_else(|| anyhow::anyhow!("task #{id} not found"))?;
+
+    println!("Task #{id}: {}", task.title);
+    println!("Status:    {:?}", task.status);
+    println!("Priority:  {}", task.priority);
+    if !task.description.is_empty() {
+        println!("Desc:      {}", task.description);
+    }
+    if let Some(ref by) = task.claimed_by {
+        println!("Claimed:   {by}");
+    }
+    if !task.tags.is_empty() {
+        println!("Tags:      {}", task.tags.join(", "));
+    }
+    if let Some(ref note) = task.note {
+        println!("Note:      {note}");
+    }
+    if !task.depends_on.is_empty() {
+        println!("Deps:      #{}", task.depends_on.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", #"));
+    }
+
+    println!();
+    println!("Timeline:");
+    println!("  {} created by {}", fmt_unix_ts(task.created_at), task.created_by);
+
+    // Activity log comments.
+    let comments = store.task_comments(id)?;
+    for c in &comments {
+        println!("  {} [{}] {}", fmt_unix_ts(c.created_at), c.agent, c.body);
+    }
+    println!("  {} last updated", fmt_unix_ts(task.updated_at));
+    Ok(())
+}
+
+fn run_task_deps(id: i64) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let project_root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+    let db = paths::db_path(&project_root)?;
+    if !db.exists() {
+        anyhow::bail!("no hub data found — run `agentcom up` first");
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        &db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+
+    // Load all tasks into a map for fast lookup.
+    let mut stmt = conn.prepare(
+        "SELECT id, title, status FROM tasks ORDER BY id",
+    )?;
+    let all: std::collections::HashMap<i64, (String, String)> = {
+        let mut m = std::collections::HashMap::new();
+        for row in stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))? {
+            let (tid, title, status) = row?;
+            m.insert(tid, (title, status));
+        }
+        m
+    };
+
+    let label = |tid: i64| -> String {
+        if let Some((title, status)) = all.get(&tid) {
+            let short = if title.len() > 40 { format!("{}…", &title[..40]) } else { title.clone() };
+            format!("#{tid} [{status}] {short}")
+        } else {
+            format!("#{tid} [?]")
+        }
+    };
+
+    // Upstream: what this task depends on.
+    let mut stmt2 = conn.prepare(
+        "SELECT depends_on_id FROM task_deps WHERE task_id = ?1 ORDER BY depends_on_id",
+    )?;
+    let upstream: Vec<i64> = stmt2
+        .query_map(rusqlite::params![id], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+
+    // Downstream: what depends on this task.
+    let mut stmt3 = conn.prepare(
+        "SELECT task_id FROM task_deps WHERE depends_on_id = ?1 ORDER BY task_id",
+    )?;
+    let downstream: Vec<i64> = stmt3
+        .query_map(rusqlite::params![id], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+
+    println!("Dependencies for {}", label(id));
+    println!();
+
+    if upstream.is_empty() {
+        println!("Upstream (depends on): none");
+    } else {
+        println!("Upstream (depends on):");
+        for tid in &upstream {
+            println!("  ← {}", label(*tid));
+        }
+    }
+    println!();
+    if downstream.is_empty() {
+        println!("Downstream (blocks): none");
+    } else {
+        println!("Downstream (blocks):");
+        for tid in &downstream {
+            println!("  → {}", label(*tid));
+        }
     }
     Ok(())
 }

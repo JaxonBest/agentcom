@@ -197,6 +197,30 @@ pub enum Command {
     /// Read the loaded agentcom.toml config
     #[command(subcommand)]
     Config(ConfigCmd),
+    /// Browse the security audit log offline (no hub needed)
+    ///
+    /// Examples:
+    ///   agentcom audit
+    ///   agentcom audit --event task_claim
+    ///   agentcom audit --agent builder --since 2026-01-01
+    ///   agentcom audit -n 100 --json
+    Audit {
+        /// Only show events of this type (e.g. task_claim, file_claim, agent_spawn)
+        #[arg(long)]
+        event: Option<String>,
+        /// Only show events by this agent
+        #[arg(long)]
+        agent: Option<String>,
+        /// Only show events at or after this date (YYYY-MM-DD)
+        #[arg(long)]
+        since: Option<String>,
+        /// Maximum events to show (most recent last)
+        #[arg(short = 'n', long, default_value_t = 50)]
+        count: usize,
+        /// Output as JSON array
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -359,6 +383,16 @@ pub enum TaskCmd {
     Pin { id: i64 },
     /// Remove a task's pin
     Unpin { id: i64 },
+    /// Show the full lifecycle of a task: created → claimed → done/blocked
+    ///
+    /// Example:
+    ///   agentcom task trace 42
+    Trace { id: i64 },
+    /// Show the dependency tree for a task (upstream and downstream)
+    ///
+    /// Example:
+    ///   agentcom task deps 42
+    Deps { id: i64 },
 }
 
 #[derive(Subcommand)]
@@ -574,7 +608,12 @@ pub async fn run_client(command: Command) -> Result<()> {
                 TaskCmd::Untag { id, label } => Request::TaskUntag { id, label },
                 TaskCmd::Pin { id } => Request::TaskPin { id },
                 TaskCmd::Unpin { id } => Request::TaskUnpin { id },
-                TaskCmd::Export { .. } | TaskCmd::Import { .. } | TaskCmd::Stats { .. } | TaskCmd::Watch { .. } => unreachable!("handled in main"),
+                TaskCmd::Export { .. }
+                | TaskCmd::Import { .. }
+                | TaskCmd::Stats { .. }
+                | TaskCmd::Watch { .. }
+                | TaskCmd::Trace { .. }
+                | TaskCmd::Deps { .. } => unreachable!("handled in main"),
             };
             let resp = client.request(&req).await?;
             match resp {
@@ -658,6 +697,7 @@ pub async fn run_client(command: Command) -> Result<()> {
         | Command::Budget
         | Command::Messages { .. }
         | Command::Replay { .. }
+        | Command::Audit { .. }
         | Command::Version
         | Command::Config(_) => {
             unreachable!("handled in main")
