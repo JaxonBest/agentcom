@@ -218,10 +218,8 @@ fn handle_modal_key(app: &mut App, key: KeyEvent) {
         KeyCode::Backspace => {
             modal.buffer.pop();
         }
-        KeyCode::Char(c) => {
-            if !key.modifiers.contains(KeyModifiers::CONTROL) {
-                modal.buffer.push(c);
-            }
+        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+            modal.buffer.push(c);
         }
         _ => {}
     }
