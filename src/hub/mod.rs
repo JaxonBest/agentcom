@@ -625,8 +625,47 @@ impl Hub {
             rt.restarts_this_hour = 0;
         }
 
-        let should_restart = (rt.cfg.auto_restart || was_interrupting) && rt.restarts_this_hour < 5;
-        if should_restart {
+        // Circuit breaker: track rapid consecutive crashes; pause after N in window.
+        let window_secs = self.cfg.crash_circuit_breaker_window_secs;
+        let max_crashes = self.cfg.crash_circuit_breaker_n;
+        let rt = self.agents.get_mut(agent).expect("agent exists");
+        if rt.first_crash_at.map(|t| t.elapsed().as_secs() >= window_secs).unwrap_or(false) {
+            rt.crash_count = 0;
+            rt.first_crash_at = None;
+        }
+        if rt.first_crash_at.is_none() {
+            rt.first_crash_at = Some(now);
+        }
+        rt.crash_count += 1;
+        let circuit_open = rt.crash_count >= max_crashes;
+
+        let should_restart = !circuit_open && (rt.cfg.auto_restart || was_interrupting) && rt.restarts_this_hour < 5;
+        if circuit_open {
+            let count = rt.crash_count;
+            let mins = window_secs / 60;
+            rt.state = AgentState::Paused;
+            rt.state_detail = Some(format!("circuit breaker: {count} crashes in {mins}min"));
+            rt.paused_at = Some(now);
+            self.emit_state(agent);
+            self.log(format!(
+                "CIRCUIT BREAKER: {agent} paused after {count} crashes in {mins}min — manual resume required"
+            ));
+            let msg = format!(
+                "CIRCUIT BREAKER: {agent} has crashed {count} times within {mins}min and has been auto-paused. \
+                 Use 'agentcom resume {agent}' to re-enable after investigating the root cause."
+            );
+            let _ = self.store.msg_send("hub", &["composer".to_string()], &msg, true);
+            // Release stranded work and file claims.
+            let released = self.store.release_claims(agent).unwrap_or(0);
+            if released > 0 {
+                self.log(format!("{agent}: circuit breaker released {released} claimed task(s) back to open"));
+                let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
+            }
+            let freed = self.store.files_release(agent, &[], true).unwrap_or(0);
+            if freed > 0 {
+                self.log(format!("{agent}: circuit breaker released {freed} file claim(s)"));
+            }
+        } else if should_restart {
             rt.restarts_this_hour += 1;
             let resume = rt.session_id.clone();
             let name = agent.to_string();
