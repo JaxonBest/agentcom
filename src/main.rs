@@ -153,6 +153,11 @@ async fn main() -> Result<()> {
         Command::Context { file, agent } => run_context_push(file, agent).await,
         Command::Preflight { verbose } => run_preflight(verbose),
         Command::Cost { agent, json } => run_cost(agent, json),
+        Command::Health { json } => run_hub_health(json),
+        Command::Workflow(cli::WorkflowCmd::List) => run_workflow_list(),
+        Command::Workflow(cli::WorkflowCmd::Run { name, title, vars }) => {
+            run_workflow_run(name, title, vars).await
+        }
         other => cli::run_client(other).await,
     }
 }
@@ -2682,5 +2687,230 @@ async fn run_task_from_template(name: String, title_override: Option<String>) ->
         ipc::Response::Err { message } => anyhow::bail!("{message}"),
         other => anyhow::bail!("unexpected response: {other:?}"),
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Hub health: query REST /health endpoint
+// ---------------------------------------------------------------------------
+
+fn run_hub_health(json_out: bool) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+    let cfg = config::HubConfig::load(&root)?;
+    let port = cfg.rest_api_port.context(
+        "rest_api_port not set in agentcom.toml — add 'rest_api_port = 7071' to enable the REST API",
+    )?;
+    let url = format!("http://127.0.0.1:{port}/health");
+
+    // Use a simple synchronous HTTP request via std::net.
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpStream;
+    let mut stream = TcpStream::connect(format!("127.0.0.1:{port}"))
+        .context("hub not running or REST API not listening on expected port")?;
+    stream
+        .write_all(format!("GET /health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n").as_bytes())
+        .context("failed to send request")?;
+
+    let mut reader = BufReader::new(stream);
+    // Read all lines; status is first, blank line separates headers from body.
+    let all_lines: Vec<String> = reader.lines().collect::<std::io::Result<_>>()?;
+    let status_line = all_lines.first().map(|s| s.as_str()).unwrap_or("");
+    let ok = status_line.contains("200");
+    let sep = all_lines.iter().position(|l| l.is_empty()).unwrap_or(all_lines.len());
+    let body = all_lines[sep + 1..].join("");
+
+    if !ok {
+        anyhow::bail!("hub health check failed: {}", status_line.trim());
+    }
+
+    if json_out {
+        println!("{body}");
+        return Ok(());
+    }
+
+    // Human-readable output.
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+        let status = v["status"].as_str().unwrap_or("?");
+        let uptime = v["uptime_secs"].as_u64().unwrap_or(0);
+        let version = v["version"].as_str().unwrap_or("?");
+        let hours = uptime / 3600;
+        let mins = (uptime % 3600) / 60;
+        let secs = uptime % 60;
+        let uptime_str = if hours > 0 {
+            format!("{hours}h {mins}m {secs}s")
+        } else if mins > 0 {
+            format!("{mins}m {secs}s")
+        } else {
+            format!("{secs}s")
+        };
+        println!("hub status:  {status}");
+        println!("uptime:      {uptime_str}");
+        println!("version:     {version}");
+        println!("rest api:    {url}");
+    } else {
+        println!("{body}");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Workflow: template-based task sequence instantiation
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+struct WorkflowTemplate {
+    name: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default)]
+    step: Vec<WorkflowStep>,
+}
+
+#[derive(serde::Deserialize)]
+struct WorkflowStep {
+    title: String,
+    #[serde(default)]
+    description: String,
+    #[serde(default = "default_wf_priority")]
+    priority: i64,
+    #[serde(default)]
+    dep: WorkflowDep,
+}
+
+#[derive(serde::Deserialize, Default)]
+#[serde(untagged)]
+enum WorkflowDep {
+    #[default]
+    None,
+    One(usize),
+    Many(Vec<usize>),
+}
+
+fn default_wf_priority() -> i64 {
+    2
+}
+
+fn workflows_dir(project_root: &std::path::Path) -> std::path::PathBuf {
+    project_root.join(".agentcom").join("workflows")
+}
+
+fn apply_vars(s: &str, vars: &std::collections::HashMap<String, String>) -> String {
+    let mut out = s.to_string();
+    for (k, v) in vars {
+        out = out.replace(&format!("{{{{{k}}}}}"), v);
+    }
+    out
+}
+
+fn run_workflow_list() -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+    let dir = workflows_dir(&root);
+    if !dir.exists() {
+        println!("no workflow templates found — create .agentcom/workflows/<name>.toml");
+        return Ok(());
+    }
+    let mut found = false;
+    for entry in std::fs::read_dir(&dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("toml") {
+            continue;
+        }
+        let raw = std::fs::read_to_string(&path)?;
+        let tpl: WorkflowTemplate = toml::from_str(&raw)
+            .with_context(|| format!("parsing {}", path.display()))?;
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("?");
+        if tpl.description.is_empty() {
+            println!("{:<20} ({} steps)", stem, tpl.step.len());
+        } else {
+            println!("{:<20} {} ({} steps)", stem, tpl.description, tpl.step.len());
+        }
+        found = true;
+    }
+    if !found {
+        println!("no workflow templates found — create .agentcom/workflows/<name>.toml");
+    }
+    Ok(())
+}
+
+async fn run_workflow_run(
+    name: String,
+    title: Option<String>,
+    vars: Vec<String>,
+) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+    let tpl_path = workflows_dir(&root).join(format!("{name}.toml"));
+    anyhow::ensure!(
+        tpl_path.exists(),
+        "workflow template not found: {} — run 'agentcom workflow list'",
+        tpl_path.display()
+    );
+    let raw = std::fs::read_to_string(&tpl_path)?;
+    let tpl: WorkflowTemplate = toml::from_str(&raw)
+        .with_context(|| format!("parsing {}", tpl_path.display()))?;
+
+    let mut var_map: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for kv in &vars {
+        let (k, v) = kv.split_once('=').context("--var must be key=value")?;
+        var_map.insert(k.to_string(), v.to_string());
+    }
+    if let Some(t) = title {
+        var_map.insert("title".to_string(), t);
+    }
+
+    let mut client = ipc::client::Client::connect()
+        .await
+        .context("hub not running — start it with: agentcom up")?;
+
+    let mut created_ids: Vec<i64> = Vec::with_capacity(tpl.step.len());
+    for (i, step) in tpl.step.iter().enumerate() {
+        let step_title = apply_vars(&step.title, &var_map);
+        let step_desc = apply_vars(&step.description, &var_map);
+        let deps: Vec<i64> = match &step.dep {
+            WorkflowDep::None => vec![],
+            WorkflowDep::One(idx) => created_ids
+                .get(*idx)
+                .copied()
+                .filter(|&id| id != -1)
+                .map(|id| vec![id])
+                .unwrap_or_default(),
+            WorkflowDep::Many(idxs) => idxs
+                .iter()
+                .filter_map(|idx| created_ids.get(*idx).copied())
+                .filter(|&id| id != -1)
+                .collect(),
+        };
+        let resp = client
+            .request(&ipc::Request::TaskAdd {
+                title: step_title.clone(),
+                description: step_desc,
+                priority: step.priority,
+                depends_on: deps,
+                timeout_mins: None,
+                requires: vec![],
+                recur: None,
+            })
+            .await?;
+        let task_id = match resp {
+            ipc::Response::Tasks { tasks } if !tasks.is_empty() => tasks[0].id,
+            ipc::Response::Ok { .. } => {
+                println!("step {i}: {step_title} — added");
+                created_ids.push(-1);
+                continue;
+            }
+            ipc::Response::Err { message } => anyhow::bail!("step {i} failed: {message}"),
+            other => anyhow::bail!("unexpected response at step {i}: {other:?}"),
+        };
+        println!("step {i}: #{task_id} {step_title}");
+        created_ids.push(task_id);
+    }
+    let created = created_ids.iter().filter(|&&id| id != -1).count();
+    println!("\nworkflow '{}' instantiated — {created} task(s) created", tpl.name);
     Ok(())
 }

@@ -299,6 +299,29 @@ pub enum Command {
         #[arg(long)]
         verbose: bool,
     },
+    /// Query the hub REST /health endpoint — shows status, uptime, and version
+    ///
+    /// Requires rest_api_port to be set in agentcom.toml.
+    ///
+    /// Examples:
+    ///   agentcom health
+    ///   agentcom health --json
+    Health {
+        /// Output raw JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Expand a TOML workflow template into a sequence of dependent tasks
+    ///
+    /// Templates live in .agentcom/workflows/<name>.toml. The 'run' subcommand
+    /// creates all steps as tasks, wiring deps automatically.
+    ///
+    /// Examples:
+    ///   agentcom workflow list
+    ///   agentcom workflow run feature --title "Add OAuth"
+    ///   agentcom workflow run sprint --title "Sprint 14" --var priority=1
+    #[command(subcommand)]
+    Workflow(WorkflowCmd),
 }
 
 #[derive(Subcommand)]
@@ -319,6 +342,27 @@ pub enum ConfigCmd {
         key: String,
         /// Value to set (booleans and numbers are auto-detected)
         value: String,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum WorkflowCmd {
+    /// List available workflow templates in .agentcom/workflows/
+    List,
+    /// Expand a workflow template into a sequence of dependent tasks
+    ///
+    /// Examples:
+    ///   agentcom workflow run feature --title "Add OAuth"
+    ///   agentcom workflow run sprint --title "Sprint 14" --var priority=1
+    Run {
+        /// Name of the template (without .toml extension)
+        name: String,
+        /// Shorthand for --var title=<value>
+        #[arg(long)]
+        title: Option<String>,
+        /// Template variables as key=value (repeatable)
+        #[arg(long = "var")]
+        vars: Vec<String>,
     },
 }
 
@@ -960,8 +1004,10 @@ pub async fn run_client(command: Command) -> Result<()> {
         | Command::Restore { .. }
         | Command::Preflight { .. }
         | Command::Cost { .. }
+        | Command::Health { .. }
         | Command::Version
-        | Command::Config(_) => {
+        | Command::Config(_)
+        | Command::Workflow(_) => {
             unreachable!("handled in main")
         }
     }
