@@ -911,16 +911,31 @@ impl Hub {
                     Err(e) => Response::err(e.to_string()),
                 }
             }
-            Request::TaskClaim { id, .. } => match self.store.task_claim(id, identity) {
-                Ok(t) => {
-                    self.clear_declined(id);
-                    self.log(format!("{identity} claimed task #{} — {}", t.id, t.title));
-                    self.audit.write("task_claim", identity, serde_json::json!({"task_id": t.id, "title": t.title}));
-                    let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
-                    Response::ok_msg(format!("claimed task #{} — {}", t.id, t.title))
+            Request::TaskClaim { id, .. } => {
+                // Enforce per-agent parallel task limit if configured
+                if let Some(limit) = self.cfg.agents.iter().find(|a| a.name == identity)
+                    .and_then(|a| a.max_claimed_tasks)
+                {
+                    let count = self.store.task_list(Some(crate::store::TaskStatus::Claimed), None)
+                        .map(|ts| ts.iter().filter(|t| t.claimed_by.as_deref() == Some(identity)).count())
+                        .unwrap_or(0) as u64;
+                    if count >= limit {
+                        return Response::err(format!(
+                            "parallel-task limit reached: {identity} already holds {count}/{limit} task(s)"
+                        ));
+                    }
                 }
-                Err(e) => Response::err(e.to_string()),
-            },
+                match self.store.task_claim(id, identity) {
+                    Ok(t) => {
+                        self.clear_declined(id);
+                        self.log(format!("{identity} claimed task #{} — {}", t.id, t.title));
+                        self.audit.write("task_claim", identity, serde_json::json!({"task_id": t.id, "title": t.title}));
+                        let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
+                        Response::ok_msg(format!("claimed task #{} — {}", t.id, t.title))
+                    }
+                    Err(e) => Response::err(e.to_string()),
+                }
+            }
             Request::TaskDone { id, note, .. } => {
                 match self.store.task_done(id, identity, note.as_deref()) {
                     Ok(t) => {

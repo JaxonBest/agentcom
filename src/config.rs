@@ -187,6 +187,10 @@ pub struct AgentConfig {
     /// Example: idle_goal = "Scan the task board and claim the highest-priority open task."
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_goal: Option<String>,
+    /// Maximum number of tasks this agent may hold in `claimed` state simultaneously.
+    /// Defaults to None (unlimited). Set to 1 to enforce single-task focus.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_claimed_tasks: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
@@ -243,6 +247,7 @@ impl Default for AgentConfig {
             spawn_delay_ms: None,
             capabilities: vec![],
             idle_goal: None,
+            max_claimed_tasks: None,
         }
     }
 }
