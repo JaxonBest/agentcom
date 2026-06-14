@@ -328,6 +328,13 @@ pub fn validate_agent_name(name: &str) -> Result<()> {
             name
         );
     }
+    if name.len() > 32 {
+        bail!(
+            "agent name {:?} is too long ({} chars) — maximum 32 characters",
+            name,
+            name.len()
+        );
+    }
     if name == "all" || name == "human" || name == "hub" {
         bail!("agent name {:?} is reserved", name);
     }
@@ -1129,6 +1136,40 @@ mod tests {
             cfg.agents[2].provider,
             Some(AgentProvider::Deepseek)
         );
+    }
+
+    #[test]
+    fn agent_name_too_long_rejected() {
+        let long_name = "a".repeat(33);
+        let text = format!(
+            r#"
+project_name = "x"
+[[agent]]
+name = "{long_name}"
+role = "r"
+"#
+        );
+        let cfg: HubConfig = toml::from_str(&text).unwrap();
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("too long"),
+            "expected too-long error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn agent_name_32_chars_accepted() {
+        let name = "a".repeat(32);
+        let text = format!(
+            r#"
+project_name = "x"
+[[agent]]
+name = "{name}"
+role = "r"
+"#
+        );
+        let cfg: HubConfig = toml::from_str(&text).unwrap();
+        cfg.validate().unwrap();
     }
 
     #[test]
