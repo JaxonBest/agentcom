@@ -94,6 +94,16 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 buffer: String::new(),
             })
         }
+        KeyCode::Char('/') => {
+            app.modal = Some(InputModal {
+                kind: InputKind::TaskFilter,
+                buffer: app.task_filter.clone(),
+            });
+        }
+        KeyCode::Char('F') => {
+            app.task_filter.clear();
+            app.flash = Some("filter cleared".into());
+        }
         KeyCode::Char('p') => {
             if let Some(name) = app.selected_agent().map(str::to_string) {
                 let paused = app
@@ -175,7 +185,8 @@ fn handle_modal_key(app: &mut App, key: KeyEvent) {
             let kind = modal.kind;
             let text = modal.buffer.trim().to_string();
             app.modal = None;
-            if text.is_empty() {
+            // TaskFilter allows empty text (clears the filter).
+            if text.is_empty() && kind != InputKind::TaskFilter {
                 return;
             }
             match kind {
@@ -212,6 +223,14 @@ fn handle_modal_key(app: &mut App, key: KeyEvent) {
                         depends_on: vec![],
                     });
                     app.flash = Some("task added".into());
+                }
+                InputKind::TaskFilter => {
+                    app.task_filter = text.clone();
+                    if text.is_empty() {
+                        app.flash = Some("filter cleared".into());
+                    } else {
+                        app.flash = Some(format!("filter: {text}"));
+                    }
                 }
             }
         }

@@ -55,6 +55,7 @@ pub enum InputKind {
     Urgent,
     Broadcast,
     AddTask,
+    TaskFilter,
 }
 
 pub struct InputModal {
@@ -72,6 +73,7 @@ pub struct App {
     pub messages: Vec<Message>,
     pub hub_log: VecDeque<String>,
     pub file_claims: Vec<FileClaim>,
+    pub task_filter: String,
     pub open_tasks: u64,
     pub total_cost: f64,
     /// `None` = follow live output; `Some(n)` = scrolled up by n lines.
@@ -203,6 +205,7 @@ async fn run_loop(
         messages: Vec::new(),
         hub_log: VecDeque::with_capacity(500),
         file_claims: Vec::new(),
+        task_filter: String::new(),
         open_tasks: 0,
         total_cost: 0.0,
         scroll_back: None,

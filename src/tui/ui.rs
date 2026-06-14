@@ -514,8 +514,24 @@ fn priority_style(priority: i64) -> Style {
 }
 
 fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
-    let rows: Vec<Row> = app
+    let filter = app.task_filter.to_lowercase();
+    let visible: Vec<_> = app
         .tasks
+        .iter()
+        .filter(|t| {
+            if filter.is_empty() {
+                return true;
+            }
+            t.title.to_lowercase().contains(&filter)
+                || t.description.to_lowercase().contains(&filter)
+                || t.status.as_str().contains(&filter)
+                || t.claimed_by
+                    .as_deref()
+                    .map(|s| s.to_lowercase().contains(&filter))
+                    .unwrap_or(false)
+        })
+        .collect();
+    let rows: Vec<Row> = visible
         .iter()
         .map(|t| {
             let row_style = match t.status {
@@ -566,7 +582,18 @@ fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
         Row::new(vec!["id", "p", "status", "agent", "title", "note"])
             .style(Style::default().add_modifier(Modifier::BOLD)),
     )
-    .block(Block::default().borders(Borders::ALL).title(" task board "));
+    .block(Block::default().borders(Borders::ALL).title({
+        if filter.is_empty() {
+            format!(" task board ({}) ", app.tasks.len())
+        } else {
+            format!(
+                " task board — filter: \"{}\" ({}/{}) ",
+                app.task_filter,
+                visible.len(),
+                app.tasks.len()
+            )
+        }
+    }));
     f.render_widget(table, area);
 }
 
@@ -654,6 +681,7 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
         ("Tab / 1-5",  "switch tabs",        "Up/Down/j/k", "select agent"),
         ("m",          "message agent",       "u",           "interrupt agent"),
         ("M",          "broadcast all",       "a",           "add task"),
+        ("/",          "filter tasks",        "F",           "clear task filter"),
         ("p",          "pause/resume agent",  "s",           "stop agent"),
         ("PgUp/PgDn",  "scroll output",       "End",         "follow live"),
         ("Enter",      "send chat message",   "?",           "toggle this help"),
@@ -705,6 +733,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             InputKind::Urgent => format!("INTERRUPT -> {}: ", app.selected_agent().unwrap_or("?")),
             InputKind::Broadcast => "broadcast -> all: ".to_string(),
             InputKind::AddTask => "new task title: ".to_string(),
+            InputKind::TaskFilter => "filter tasks (empty to clear): ".to_string(),
         };
         Line::from(vec![
             Span::styled(label, Style::default().fg(Color::Yellow)),
