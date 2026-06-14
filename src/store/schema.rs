@@ -75,6 +75,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         ("pinned", "ALTER TABLE tasks ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"),
         ("due_at", "ALTER TABLE tasks ADD COLUMN due_at INTEGER"),
         ("timeout_mins", "ALTER TABLE tasks ADD COLUMN timeout_mins INTEGER"),
+        ("requires", "ALTER TABLE tasks ADD COLUMN requires TEXT NOT NULL DEFAULT ''"),
     ] {
         let exists: bool = conn
             .query_row(

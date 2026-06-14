@@ -70,7 +70,15 @@ impl Hub {
             if let Some(declined) = self.declined.get(name) {
                 exclude.extend(declined.iter().copied());
             }
-            self.store.next_claimable(&exclude).ok().flatten()
+            // Pass agent capabilities so tasks with 'requires' are only offered
+            // to agents that have all the listed capability labels.
+            // Fresh borrow to avoid lifetime conflict with mutable accesses above.
+            let caps: Vec<String> = self
+                .agents
+                .get(name)
+                .map(|r| r.cfg.capabilities.clone())
+                .unwrap_or_default();
+            self.store.next_claimable(&exclude, &caps).ok().flatten()
         } else {
             None
         };

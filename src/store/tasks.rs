@@ -15,6 +15,7 @@ fn parse_tags(raw: &str) -> Vec<String> {
 
 fn task_from_row(row: &Row) -> rusqlite::Result<Task> {
     let tags_raw: String = row.get("tags").unwrap_or_default();
+    let requires_raw: String = row.get("requires").unwrap_or_default();
     let pinned: i64 = row.get("pinned").unwrap_or(0);
     Ok(Task {
         id: row.get("id")?,
@@ -29,6 +30,7 @@ fn task_from_row(row: &Row) -> rusqlite::Result<Task> {
         pinned: pinned != 0,
         due_at: row.get("due_at").unwrap_or(None),
         timeout_mins: row.get::<_, Option<i64>>("timeout_mins").unwrap_or(None).map(|v| v as u64),
+        requires: parse_tags(&requires_raw),
         created_by: row.get("created_by")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
@@ -223,13 +225,21 @@ impl Store {
 
     /// Highest-priority open task whose dependencies are all done, excluding
     /// any the scheduler was told to skip (already suggested elsewhere).
-    pub fn next_claimable(&self, exclude: &[i64]) -> Result<Option<Task>> {
+    ///
+    /// `capabilities` is the claiming agent's capability set. Tasks with
+    /// non-empty `requires` are only returned when the agent has ALL listed
+    /// capabilities. An empty `capabilities` slice skips capability filtering
+    /// (backward-compatible: agents without declared capabilities can claim any task).
+    pub fn next_claimable(&self, exclude: &[i64], capabilities: &[String]) -> Result<Option<Task>> {
         let conn = self.conn.lock().unwrap();
         let exclude_csv = exclude
             .iter()
             .map(|i| i.to_string())
             .collect::<Vec<_>>()
             .join(",");
+        // When capabilities are declared we may need to skip tasks with
+        // unmet requirements — fetch a small batch and post-filter in Rust.
+        let limit = if capabilities.is_empty() { 1 } else { 50 };
         let sql = format!(
             "SELECT * FROM tasks t
              WHERE t.status = 'open'
@@ -241,7 +251,7 @@ impl Store {
                {}
              ORDER BY t.pinned DESC,
                       CASE WHEN t.due_at IS NOT NULL AND t.due_at < strftime('%s','now') THEN 0 ELSE 1 END,
-                      t.priority, t.id LIMIT 1",
+                      t.priority, t.id LIMIT {limit}",
             if exclude.is_empty() {
                 String::new()
             } else {
@@ -249,14 +259,41 @@ impl Store {
             }
         );
         let mut stmt = conn.prepare(&sql)?;
-        match stmt.query_row([], task_from_row) {
-            Ok(mut t) => {
-                load_deps(&conn, &mut t)?;
-                Ok(Some(t))
+        let candidates: Vec<Task> = stmt
+            .query_map([], task_from_row)?
+            .collect::<rusqlite::Result<_>>()?;
+        drop(stmt);
+        for mut t in candidates {
+            // Skip tasks whose requirements exceed the agent's capabilities.
+            if !capabilities.is_empty() && !t.requires.is_empty() {
+                if !t.requires.iter().all(|r| capabilities.contains(r)) {
+                    continue;
+                }
             }
-            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-            Err(e) => Err(e.into()),
+            load_deps(&conn, &mut t)?;
+            return Ok(Some(t));
         }
+        Ok(None)
+    }
+
+    /// Set the capability requirements on a task (comma-separated labels).
+    /// Pass an empty slice to clear all requirements.
+    pub fn task_set_requires(&self, id: i64, requires: &[String]) -> Result<()> {
+        let raw = requires
+            .iter()
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(",");
+        let conn = self.conn.lock().unwrap();
+        let rows = conn.execute(
+            "UPDATE tasks SET requires = ?1, updated_at = ?2 WHERE id = ?3",
+            params![raw, now_ts(), id],
+        )?;
+        if rows == 0 {
+            anyhow::bail!("task #{id} not found");
+        }
+        Ok(())
     }
 
     /// The task an agent currently has claimed, if any.
@@ -671,6 +708,7 @@ impl Store {
                 depends_on: t.depends_on,
                 due_at: t.due_at,
                 timeout_mins: t.timeout_mins,
+                requires: t.requires,
             })
             .collect();
         Ok(snapshots)
@@ -758,14 +796,14 @@ mod tests {
         let b = s.task_add("second", "", 0, &[a], "human").unwrap();
 
         // b is higher priority but blocked by dep — a must come first.
-        let next = s.next_claimable(&[]).unwrap().unwrap();
+        let next = s.next_claimable(&[], &[]).unwrap().unwrap();
         assert_eq!(next.id, a);
 
         s.task_claim(a, "builder").unwrap();
-        assert!(s.next_claimable(&[]).unwrap().is_none());
+        assert!(s.next_claimable(&[], &[]).unwrap().is_none());
 
         s.task_done(a, "builder", None).unwrap();
-        let next = s.next_claimable(&[]).unwrap().unwrap();
+        let next = s.next_claimable(&[], &[]).unwrap().unwrap();
         assert_eq!(next.id, b);
         assert_eq!(next.depends_on, vec![a]);
     }
@@ -789,9 +827,9 @@ mod tests {
         let id = s.task_add("t", "", 2, &[], "human").unwrap();
         s.task_claim(id, "alice").unwrap();
         s.task_block(id, "alice", "waiting on schema").unwrap();
-        assert!(s.next_claimable(&[]).unwrap().is_none());
+        assert!(s.next_claimable(&[], &[]).unwrap().is_none());
         s.task_reopen(id).unwrap();
-        assert_eq!(s.next_claimable(&[]).unwrap().unwrap().id, id);
+        assert_eq!(s.next_claimable(&[], &[]).unwrap().unwrap().id, id);
     }
 
     #[test]
@@ -800,7 +838,7 @@ mod tests {
         let id = s.task_add("t", "", 2, &[], "human").unwrap();
         s.task_claim(id, "alice").unwrap();
         assert_eq!(s.release_claims("alice").unwrap(), 1);
-        assert_eq!(s.next_claimable(&[]).unwrap().unwrap().id, id);
+        assert_eq!(s.next_claimable(&[], &[]).unwrap().unwrap().id, id);
     }
 
     #[test]
@@ -975,13 +1013,13 @@ mod tests {
         s.task_set_due(overdue, Some(1_000_000)).unwrap(); // Unix epoch + 1M secs ≈ 1982
 
         // Scheduler should prefer overdue over normal despite lower priority.
-        let next = s.next_claimable(&[]).unwrap().unwrap();
+        let next = s.next_claimable(&[], &[]).unwrap().unwrap();
         assert_eq!(next.id, overdue);
         assert_eq!(next.due_at, Some(1_000_000));
 
         // Clear due date — normal should win again.
         s.task_set_due(overdue, None).unwrap();
-        let next = s.next_claimable(&[]).unwrap().unwrap();
+        let next = s.next_claimable(&[], &[]).unwrap().unwrap();
         assert_eq!(next.id, normal);
         assert_eq!(next.due_at, None);
     }
@@ -996,7 +1034,7 @@ mod tests {
         let future_ts = now_ts() + 86_400; // 1 day in the future
         s.task_set_due(low, Some(future_ts)).unwrap();
 
-        let next = s.next_claimable(&[]).unwrap().unwrap();
+        let next = s.next_claimable(&[], &[]).unwrap().unwrap();
         assert_eq!(next.id, high, "future due date should not change ordering");
     }
 
@@ -1039,12 +1077,12 @@ mod tests {
         s.task_pin(pinned).unwrap();
 
         // next_claimable should prefer the pinned task despite lower numeric priority.
-        let next = s.next_claimable(&[]).unwrap().unwrap();
+        let next = s.next_claimable(&[], &[]).unwrap().unwrap();
         assert_eq!(next.id, pinned);
         assert!(next.pinned);
 
         s.task_unpin(pinned).unwrap();
-        let next = s.next_claimable(&[]).unwrap().unwrap();
+        let next = s.next_claimable(&[], &[]).unwrap().unwrap();
         assert_eq!(next.id, normal, "after unpin, higher priority wins");
     }
 
@@ -1090,7 +1128,7 @@ mod tests {
 
         // Dep gate: beta should not be claimable because alpha is not done
         // in the original — but we imported alpha as done, so beta IS claimable.
-        assert!(dst.next_claimable(&[]).unwrap().is_some());
+        assert!(dst.next_claimable(&[], &[]).unwrap().is_some());
     }
 
     #[test]
@@ -1108,6 +1146,7 @@ mod tests {
                 source_id: None,
                 due_at: None,
                 timeout_mins: None,
+                requires: vec![],
             },
             TaskSnapshot {
                 title: "t2".into(),
@@ -1119,6 +1158,7 @@ mod tests {
                 source_id: None,
                 due_at: None,
                 timeout_mins: None,
+                requires: vec![],
             },
         ];
         let ids = dst.bulk_import_tasks(&snaps, "bot").unwrap();
@@ -1195,5 +1235,38 @@ mod tests {
             "SELECT COUNT(*) FROM task_deps", [], |r| r.get(0),
         ).unwrap();
         assert_eq!(remaining_deps, 0, "all dep links should be cleaned up");
+    }
+
+    #[test]
+    fn capability_filter_in_next_claimable() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.task_add("rust task", "", 2, &[], "human").unwrap();
+        s.task_set_requires(id, &["rust".to_string()]).unwrap();
+
+        // Agent without capabilities: any task is shown (backward-compat).
+        assert!(s.next_claimable(&[], &[]).unwrap().is_some());
+
+        // Agent with the required capability: task is offered.
+        let caps = vec!["rust".to_string(), "backend".to_string()];
+        assert_eq!(s.next_claimable(&[], &caps).unwrap().unwrap().id, id);
+
+        // Agent missing the required capability: task is skipped.
+        let wrong_caps = vec!["frontend".to_string()];
+        assert!(s.next_claimable(&[], &wrong_caps).unwrap().is_none());
+    }
+
+    #[test]
+    fn task_set_requires_round_trips() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.task_add("work", "", 2, &[], "human").unwrap();
+        s.task_set_requires(id, &["rust".to_string(), "sql".to_string()]).unwrap();
+        let t = s.task_get(id).unwrap().unwrap();
+        assert!(t.requires.contains(&"rust".to_string()));
+        assert!(t.requires.contains(&"sql".to_string()));
+
+        // Clear requirements.
+        s.task_set_requires(id, &[]).unwrap();
+        let t = s.task_get(id).unwrap().unwrap();
+        assert!(t.requires.is_empty());
     }
 }

@@ -128,6 +128,9 @@ pub struct Task {
     /// Auto-block this task if it stays claimed for more than this many minutes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_mins: Option<u64>,
+    /// Capability labels the claiming agent must have (all required).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<String>,
     pub created_by: String,
     pub created_at: i64,
     pub updated_at: i64,
@@ -154,6 +157,9 @@ pub struct TaskSnapshot {
     pub due_at: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_mins: Option<u64>,
+    /// Capability labels required on the claiming agent (all must be present).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub requires: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
