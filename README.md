@@ -1,373 +1,477 @@
 # agentcom
 
-`agentcom` is a local coordination hub for fleets of coding agents. It can run
-Claude Code and Codex agents in the same project, gives them a shared task
-board, lets them message or interrupt each other, and provides a chat-first TUI
-where you talk to a coordinator agent called the composer.
+**agentcom** is a local coordination hub for fleets of AI coding agents. You describe what you want; the hub turns it into tasks, dispatches Claude Code, Codex, and DeepSeek agents to claim them, and keeps everything in sync through a shared task board, file-claim system, and inter-agent message bus.
 
-The core idea is simple: you describe what you want done, the composer breaks it
-into work, workers claim tasks and files, and the hub keeps everyone moving
-without letting agents silently overwrite each other.
+```
+  you
+   │  (chat)
+   ▼
+composer ──────────────────────────────────┐
+   │  (plans, delegates, reports)          │
+   ├──► builder     ──► shared board       │
+   ├──► reviewer    ──► shared board       │
+   └──► junior      ──► shared board       │
+                                           │
+   hub: IPC bus · SQLite · ring buffers ◄──┘
+```
 
-## Current Shape
+---
 
-- **Mixed providers**: per-agent `provider = "claude"`, `provider = "codex"`, or `provider = "deepseek"`.
-- **Composer-first UI**: `agentcom up` opens a chat with the composer; agent
-  output is one tab away.
-- **Shared board**: tasks are persisted in SQLite and claimed before work starts.
-- **File claims**: agents claim paths before editing so conflicting work is
-  rejected and rerouted.
-- **Self-scaling**: agents can recruit more agents with `agentcom agent add`,
-  bounded by `max_agents` and budgets.
-- **Free mode**: give the fleet a broad goal plus a stopping condition, and it
-  keeps generating useful work until the stop fires.
-- **Fresh sessions**: every `agentcom up` resets stale claimed tasks and file
-  claims before spawning agents. Done and blocked task history stays intact.
+## Prerequisites
 
-## Install
+| Requirement | Notes |
+|---|---|
+| **Rust toolchain** | `rustup` + stable channel — [rustup.rs](https://rustup.rs) |
+| **claude CLI** | Required for Claude agents — [install guide](https://docs.anthropic.com/en/docs/claude-code) |
+| **codex CLI** | Optional, for Codex agents — [OpenAI Codex](https://github.com/openai/codex) |
+| **DEEPSEEK_API_KEY** | Optional, for DeepSeek agents — [platform.deepseek.com](https://platform.deepseek.com) |
 
-From this repository:
+Verify your setup with:
 
-```powershell
+```
+agentcom doctor
+```
+
+---
+
+## Installation
+
+### From this repository
+
+```
 cargo install --path . --force
 ```
 
-If Windows says it cannot replace `agentcom.exe`, a hub is still running:
+This installs four binaries:
 
-```powershell
-agentcom stop
-cargo install --path . --force
+| Binary | Purpose |
+|---|---|
+| `agentcom` | Main CLI and hub |
+| `agentcom-codex-adapter` | Protocol bridge for Codex agents |
+| `agentcom-deepseek-adapter` | Protocol bridge for DeepSeek agents |
+| `mock-claude`, `mock-codex` | Zero-cost test stubs |
+
+Verify:
+
+```
+agentcom --version
 ```
 
-The install includes:
+> **Windows tip:** If install fails with "cannot replace agentcom.exe", a hub is still running. Run `agentcom stop` first.
 
-- `agentcom`
-- `agentcom-codex-adapter`
-- `agentcom-deepseek-adapter`
-- `mock-claude` and `mock-codex` for tests
+---
 
 ## Quick Start
 
-In a project you want agents to work on:
+**1. Initialize a project**
 
-```powershell
+```
+cd my-project
 agentcom init
+```
+
+This writes `agentcom.toml` with a starter two-agent fleet (builder + reviewer). Edit it to fit your project.
+
+**2. Start the hub**
+
+```
 agentcom up
 ```
 
-Then type your request into the TUI chat. The composer receives it, plans, files
-tasks, delegates, and reports progress back to you.
+The TUI opens. The composer agent starts and waits for your instructions.
 
-You can also seed work from the command line:
+**3. Tell the composer what you want**
 
-```powershell
-agentcom up --task "Fix the failing tests and explain the root cause"
-agentcom task add "Audit src/auth for unsafe edge cases" -p 0
+Type in the Chat tab and press Enter:
+
+```
+Add input validation to the signup form and write tests for the new logic
 ```
 
-Use `--headless` when you want the hub without the TUI:
+The composer breaks this into tasks, claims them on the board, and directs your agents.
 
-```powershell
-agentcom up --headless --task "Run tests and fix failures"
-```
+**4. Watch progress**
 
-## Configuration
+- Press `2` or Tab to see the selected agent's live output
+- Press `3` to watch tasks being claimed and completed
+- Press `4` to see the message feed between agents
 
-`agentcom.toml` lives in the project root. Commands can be run from any
-subdirectory; agentcom walks upward to find the config.
+**5. Respond to questions**
+
+If an agent needs a decision, the TUI marks it as **QUESTION** in the header and chat panel. Type your answer and press Enter.
+
+---
+
+## Configuration Reference
+
+`agentcom.toml` lives in your project root. You can run `agentcom` commands from any subdirectory — it walks upward to find the config.
+
+### Top-level fields
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `project_name` | string | *(required)* | Displayed in the TUI header and used for the data directory path |
+| `default_provider` | `"claude"` \| `"codex"` \| `"deepseek"` | `"claude"` | Provider used by agents that don't set their own |
+| `default_model` | string | *(none)* | Model used by agents that don't set their own (e.g. `"sonnet"`) |
+| `max_total_budget_usd` | float | *(none)* | Stop everything once total tracked spend crosses this USD amount |
+| `interrupt_timeout_secs` | integer | `15` | Seconds to wait for an agent to abort before force-killing it |
+| `max_agents` | integer | `8` | Fleet size cap; prevents recruitment spirals |
+| `partial_messages` | bool | `true` | Enable live streaming of partial agent output to the TUI |
+
+### `[[agent]]` fields
+
+Each agent is defined by an `[[agent]]` table. You can have as many as `max_agents` allows.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `name` | string | *(required)* | Unique agent handle. Lowercase letters, digits, `-`, `_` only. Reserved: `all`, `human`, `hub` |
+| `role` | string | *(required)* | Appended to the system prompt as the agent's identity and responsibilities |
+| `provider` | `"claude"` \| `"codex"` \| `"deepseek"` | `default_provider` | Runtime for this agent |
+| `model` | string | `default_model` | Model override for this agent |
+| `cwd` | path | project root | Working directory for the agent process (relative paths resolve from project root) |
+| `allowed_tools` | string[] | `["Bash","Read","Edit","Write","Glob","Grep"]` | Tools the agent may use. Any tool not listed is auto-denied. Supports Bash patterns like `"Bash(npm test:*)"` |
+| `permission_mode` | string | `"acceptEdits"` | Claude permission mode: `acceptEdits`, `plan`, `default`, `bypassPermissions` |
+| `max_turns_per_prompt` | integer | *(none)* | Max autonomous turns per fed prompt. Caps a single work stretch |
+| `max_budget_usd` | float | *(none)* | Cumulative USD spend cap for this agent across the hub's lifetime |
+| `auto_restart` | bool | `true` | Automatically restart the agent if it crashes |
+
+### Annotated example config
 
 ```toml
+# ─── Project ──────────────────────────────────────────────────────────────────
 project_name = "my-project"
 
-# Runtime for agents that do not set one directly.
-# default_provider = "claude"        # or "codex" or "deepseek"
-
-# Model for agents that do not set one directly.
-# For Claude this is a Claude Code model name; for Codex this is a Codex model.
-# For DeepSeek this is usually "deepseek-chat" or "deepseek-reasoner".
-# default_model = "sonnet"
-
-# Stop all work once total tracked spend crosses this.
-# max_total_budget_usd = 20.0
-
-# Seconds to wait for an interrupt to complete before force-killing.
-# interrupt_timeout_secs = 15
-
-# Worker cap. The injected composer gets its own slot.
-# max_agents = 8
-
-[[agent]]
-name = "builder"
-role = "Implements features and fixes. Claims files before editing and keeps tests green."
-# provider = "claude"
-# cwd = "."
-# model = "sonnet"
-allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
-# permission_mode = "acceptEdits"
-# max_turns_per_prompt = 50
-# max_budget_usd = 10.0
-# auto_restart = true
-
-[[agent]]
-name = "reviewer"
-role = "Reviews changes, runs tests, and files follow-up tasks for problems found."
-provider = "codex"
-model = "gpt-5.4"
-allowed_tools = ["Bash", "Read", "Glob", "Grep"]
-```
-
-If you do not define a `composer`, `agentcom up` injects one automatically. To
-customize it, add your own:
-
-```toml
-[[agent]]
-name = "composer"
-role = "Lead engineer. Turn human goals into tasks, prevent file conflicts, recruit specialists, and report progress."
-provider = "claude"
-allowed_tools = ["Bash", "Read", "Glob", "Grep"]
-```
-
-## Mixed Claude, Codex, and DeepSeek Fleets
-
-You can mix providers freely. DeepSeek is useful as a lower-cost lane for
-review, triage, planning, and simple scripted work:
-
-```toml
+# Default provider and model for agents that don't specify their own.
 default_provider = "claude"
+default_model    = "sonnet"
+
+# Hub-wide spend guard (USD). Comment out for unbounded sessions.
+max_total_budget_usd = 20.0
+
+# How long to wait for a graceful interrupt before force-killing (seconds).
+interrupt_timeout_secs = 15
+
+# Maximum number of agents allowed at once (including the composer).
+max_agents = 8
+
+# ─── Agents ───────────────────────────────────────────────────────────────────
+
+# The composer is optional — agentcom injects a default one if you omit it.
+# Define it here to customize the role or restrict its tools.
+[[agent]]
+name    = "composer"
+role    = "Lead coordinator. Turn human goals into tasks, prevent file conflicts, recruit specialists, and report progress. Never edit code yourself."
+allowed_tools = ["Bash", "Read", "Glob", "Grep"]
 
 [[agent]]
-name = "builder"
-role = "Primary implementer"
-provider = "claude"
+name    = "builder"
+role    = "Implements features and fixes. Owns src/. Coordinates with reviewer before large refactors."
+# allowed_tools lists EVERY tool the agent may use — anything not listed is denied.
+allowed_tools     = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+max_turns_per_prompt = 50
+max_budget_usd    = 10.0
 
 [[agent]]
-name = "tester"
-role = "Independent test runner and regression hunter"
-provider = "codex"
-model = "gpt-5.4"
+name    = "reviewer"
+role    = "Reviews changes made by builder, runs tests, and files follow-up tasks for problems found."
+# Read-only tools: reviewer should not edit files.
+allowed_tools = ["Bash", "Read", "Glob", "Grep"]
 
-[[agent]]
-name = "reviewer"
-role = "Reviews the final diff and checks for missed edge cases"
-provider = "deepseek"
-model = "deepseek-chat"
+# Optional: lower-cost DeepSeek agent for triage and simple tasks.
+# [[agent]]
+# name     = "junior"
+# role     = "Handles well-scoped, low-complexity tasks from the board."
+# provider = "deepseek"
+# model    = "deepseek-chat"
+# allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+# max_budget_usd = 2.0
 ```
 
-They share the same board, message bus, file claims, composer, and TUI.
+---
 
-Provider differences:
+## Provider Setup
 
-- Claude agents run as persistent `claude -p --input-format stream-json
-  --output-format stream-json` sessions.
-- Codex agents run through `agentcom-codex-adapter`, which keeps the hub protocol
-  persistent and launches `codex exec --json` for each fed turn.
-- DeepSeek agents run through `agentcom-deepseek-adapter`, which calls the
-  DeepSeek OpenAI-compatible chat API. Because the API does not run local tools
-  natively, the adapter executes commands the model places in fenced shell
-  blocks, limited by the agent's `allowed_tools`.
-- Claude supports native mid-turn control requests. Codex turns are stopped by
-  tree-killing the active `codex exec` process and delivering the urgent message
-  on the next turn.
+### Claude (default)
 
-## TUI
+Claude agents run as persistent `claude` CLI sessions using the stream-json protocol.
 
-`agentcom up` opens the dashboard.
+1. Install the Claude CLI: follow the [official guide](https://docs.anthropic.com/en/docs/claude-code)
+2. Authenticate: `claude` (first run opens a browser login)
+3. Verify: `claude --version`
 
-Tabs:
+Recommended models (set via `model` or `default_model`):
 
-| Key | View |
+| Value | Use case |
 |---|---|
-| `1` | Chat with composer |
-| `2` or Tab | Selected agent output |
-| `3` | Task board |
-| `4` | Message feed |
-| `5` | Hub log |
+| `sonnet` | Default — best balance of speed and quality |
+| `opus` | Complex reasoning, architecture decisions |
+| `haiku` | Fast, cheap tasks (linting, simple edits) |
 
-Common keys:
+### Codex
 
-| Key | Action |
+Codex agents run through `agentcom-codex-adapter`, which bridges the hub protocol to `codex exec --json`.
+
+1. Install the Codex CLI from [github.com/openai/codex](https://github.com/openai/codex)
+2. Authenticate with your OpenAI account
+3. Verify: `codex --version`
+
+**Windows note:** agentcom looks for Codex at `%LOCALAPPDATA%\OpenAI\Codex\bin\...\codex.exe` before falling back to `PATH`. If it can't be found:
+
+```
+$env:AGENTCOM_CODEX_EXE = "$env:LOCALAPPDATA\OpenAI\Codex\bin\<id>\codex.exe"
+```
+
+Interrupts work by tree-killing the active `codex exec` process and replaying the urgent message on the next turn.
+
+### DeepSeek
+
+DeepSeek agents run through `agentcom-deepseek-adapter`, which calls the DeepSeek OpenAI-compatible chat API. The adapter executes shell commands the model places in fenced code blocks, bounded by `allowed_tools`.
+
+1. Get an API key at [platform.deepseek.com](https://platform.deepseek.com)
+2. Set the environment variable:
+   ```
+   # Windows
+   $env:DEEPSEEK_API_KEY = "sk-..."
+   # Linux/macOS
+   export DEEPSEEK_API_KEY=sk-...
+   ```
+3. Add an agent to your config with `provider = "deepseek"`
+
+Recommended models:
+
+| Value | Use case |
 |---|---|
-| Enter in chat | Send message to composer |
-| `a` | Add a direct task |
-| `m` | Message selected agent |
-| `M` | Broadcast to all agents |
-| `u` | Interrupt selected agent |
-| `p` | Pause selected agent |
-| `s` | Stop selected agent / hub |
-| Ctrl+C | Quit / graceful shutdown |
+| `deepseek-chat` | General tasks, review, triage |
+| `deepseek-reasoner` | Complex reasoning and planning |
 
-The chat view includes an activity panel so you can see what agents are doing
-while they are thinking: current state, recent tool activity, task claims,
-completions, recruitment, interrupts, and crashes.
+Optional overrides:
 
-The dashboard header shows total usage plus per-provider usage:
-
-```text
-$0.18 total | claude $0.12/4t | codex $0.06/2t
+```
+$env:DEEPSEEK_BASE_URL                 = "https://api.deepseek.com"   # default
+$env:AGENTCOM_DEEPSEEK_INPUT_PER_MTOK  = "0.27"  # for budget tracking
+$env:AGENTCOM_DEEPSEEK_OUTPUT_PER_MTOK = "1.10"
 ```
 
-Each agent row also shows its provider badge, such as `[claude]`, `[codex]`,
-or `[deepseek]`, so mixed fleets are easy to scan. Human-directed messages are highlighted in
-the header, chat, and message feed. If an agent appears to be asking you a
-question, the TUI labels it as `QUESTION` and keeps a visible count in the chat
-footer until you handle it.
-
-## Free Mode
-
-Free mode is for broad goals where the fleet should keep working until a limit
-is reached:
-
-```powershell
-agentcom up --free "find bugs, improve tests, and document what changed" --for 2h
-agentcom up --free "polish docs and examples" --budget 5.0
-agentcom up --free "general code health" --for 90m --budget 10 --usage 80
-```
-
-Stop conditions:
-
-- `--for 2h`, `90m`, `1h30m`, or `45s`: wall-clock limit
-- `--budget 5.0`: tracked spend limit
-- `--usage 80`: provider usage-limit percentage when available
-
-When the entire fleet is idle, the hub nudges the composer to review the goal,
-the board, and the codebase, then queue the next useful work. The composer is
-instructed to prefer valuable work over busywork and to tell you when nothing
-worth doing remains.
-
-## Sessions and Stopping Work
-
-To stop all active work:
-
-```powershell
-agentcom stop
-```
-
-On the next `agentcom up`, agentcom starts a fresh session:
-
-- claimed tasks are reset to `open`
-- file claims are cleared
-- done and blocked tasks remain as history
-
-Useful commands while running:
-
-```powershell
-agentcom status
-agentcom pause builder
-agentcom resume builder
-agentcom task list --status claimed
-agentcom task reopen 12
-agentcom files list
-```
+---
 
 ## CLI Reference
 
-| Command | What it does |
+### Hub management
+
+| Command | Description |
 |---|---|
-| `agentcom init` | Write a starter `agentcom.toml` |
-| `agentcom up [agents...]` | Start the hub and TUI |
-| `agentcom up --headless` | Start the hub without TUI |
+| `agentcom init [--force]` | Write a starter `agentcom.toml` in the current directory |
+| `agentcom up` | Start the hub, spawn agents, open TUI |
+| `agentcom up --headless` | Start hub without TUI |
+| `agentcom up --agents builder,reviewer` | Start only the named agents |
+| `agentcom up --task "..."` | Seed a task before agents start (repeatable) |
 | `agentcom status` | Fleet state, spend, turns, pending messages, open tasks |
-| `agentcom send <agent\|all> "<msg>"` | Queue a message for an agent |
-| `agentcom interrupt <agent> "<msg>"` | Stop current work and deliver urgent message |
-| `agentcom inbox` | Read and consume human-directed messages |
-| `agentcom task add "<title>" [-d desc] [-p 0-4] [--dep id]` | Add a task |
-| `agentcom task list [--status open\|claimed\|done\|blocked]` | List tasks |
-| `agentcom task claim <id>` | Claim a task for the current agent |
-| `agentcom task done <id> --note "<note>"` | Mark task done |
-| `agentcom task block <id> --reason "<reason>"` | Block a task |
-| `agentcom task reopen <id>` | Reopen a blocked/claimed/done task |
-| `agentcom agent add <name> --role "<role>" [--provider claude\|codex\|deepseek]` | Add an agent |
-| `agentcom agent list` | List configured agents and live states |
-| `agentcom files claim <paths...>` | Claim files before editing |
-| `agentcom files release <paths...>` | Release file claims |
-| `agentcom files release --all` | Release all claims for current agent |
-| `agentcom files list` | Show file claims |
-| `agentcom tail <agent> [-n 50] [-f]` | Show recent output |
-| `agentcom pause <agent>` | Pause after current turn |
-| `agentcom resume <agent>` | Resume a paused agent |
-| `agentcom stop [agent]` | Stop one agent or the entire hub |
+| `agentcom stop` | Gracefully shut down all agents and the hub |
+| `agentcom doctor` | Pre-flight check: CLIs, API keys, config validity |
 
-## Environment Variables
+### Real-time control
 
-| Variable | Purpose |
+| Command | Description |
 |---|---|
-| `AGENTCOM_CLAUDE_EXE` | Override `claude` executable path |
-| `AGENTCOM_CODEX_EXE` | Override `codex` executable path |
-| `AGENTCOM_CODEX_ADAPTER_EXE` | Override bundled Codex adapter path |
-| `AGENTCOM_CODEX_VERBOSE_STDERR` | Show raw Codex adapter stderr chatter |
-| `AGENTCOM_DEEPSEEK_ADAPTER_EXE` | Override bundled DeepSeek adapter path |
-| `DEEPSEEK_API_KEY` | API key for DeepSeek agents |
-| `DEEPSEEK_BASE_URL` | Override API base URL; defaults to `https://api.deepseek.com` |
-| `AGENTCOM_DEEPSEEK_INPUT_PER_MTOK` | Estimated input price for budget tracking |
-| `AGENTCOM_DEEPSEEK_OUTPUT_PER_MTOK` | Estimated output price for budget tracking |
-| `AGENTCOM_INTERRUPT_SUBTYPE` | Override Claude control-request interrupt subtype |
-| `AGENTCOM_CAPTURE_RAW` | Tee raw child stdout lines to `<dir>/<agent>.ndjson` |
-| `AGENTCOM_FREE_NUDGE_SECS` | Override free-mode idle nudge delay |
+| `agentcom send <agent\|all> "<msg>"` | Queue a message for an agent |
+| `agentcom send <agent> "<msg>" --urgent` | Queue with interrupt flag |
+| `agentcom interrupt <agent> "<msg>"` | Abort current turn and deliver message immediately |
+| `agentcom inbox` | Read and consume your pending messages |
+| `agentcom pause <agent>` | Pause after the current turn completes |
+| `agentcom resume <agent>` | Resume a paused agent |
+| `agentcom tail <agent> [-n 50] [-f]` | Stream recent output (follow with `-f`) |
 
-On Windows, `agentcom` first looks for the Codex app executable under
-`%LOCALAPPDATA%\OpenAI\Codex\bin\...\codex.exe`, then falls back to `codex` on
-`PATH`. If startup says Codex is missing, verify the CLI directly:
+### Task board
 
-```powershell
-codex --version
-codex exec --json "say hello"
+| Command | Description |
+|---|---|
+| `agentcom task add "<title>" [-d "<desc>"] [-p 0-4] [--dep <id>]` | Add a task (0 = highest priority) |
+| `agentcom task list [--status open\|claimed\|done\|blocked]` | List tasks |
+| `agentcom task claim <id>` | Claim a task (used by agents) |
+| `agentcom task done <id> --note "<note>"` | Mark a task complete |
+| `agentcom task block <id> --reason "<reason>"` | Mark a task blocked |
+| `agentcom task reopen <id>` | Reopen a blocked or stuck-claimed task |
+
+### Agent fleet
+
+| Command | Description |
+|---|---|
+| `agentcom agent add <name> --role "<role>" [--provider claude\|codex\|deepseek] [--model <m>] [--budget <usd>]` | Add an agent to config and spawn it live |
+| `agentcom agent add <name> --role "<role>" --no-spawn` | Add to config only; starts on next `agentcom up` |
+| `agentcom agent list` | List configured agents with live state |
+
+### File claims
+
+| Command | Description |
+|---|---|
+| `agentcom files claim <paths...>` | Claim files before editing (rejected if another agent holds any) |
+| `agentcom files release <paths...>` | Release specific file claims |
+| `agentcom files release --all` | Release all claims held by the current agent |
+| `agentcom files list` | Show all current file claims |
+
+---
+
+## TUI Guide
+
+`agentcom up` opens a full-terminal dashboard.
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│ agentcom - my-project  | $0.18 total | claude $0.12/4t | codex $0.06/2t      │  ← header: cost/usage
+├────────────────┬─────────────────────────────────────────────────────────────┤
+│ agents         │ 1 Chat  2 Output  3 Tasks  4 Messages  5 Hub Log            │  ← tab bar
+│                ├─────────────────────────────────────────────────────────────┤
+│ > | composer   │                                                             │
+│   [claude]     │  composer: I've created 3 tasks. Builder is working on     │
+│   . builder    │  the validation logic now.                                  │  ← chat panel
+│   [claude]     │                                                             │
+│   > reviewer   ├─────────────────────────────────────────────────────────────┤
+│   [codex]      │ > working on task #2...           ← activity/agent status  │
+│                │ - builder claimed src/auth.rs                               │
+│                │ - reviewer filed task #4                                    │
+├────────────────┴─────────────────────────────────────────────────────────────┤
+│ > type message here|   (Enter send - Tab panes - ? help - Ctrl+C quit)      │  ← footer/input
+└──────────────────────────────────────────────────────────────────────────────┘
+  ↑ sidebar                                                          ↑ flash/hints
 ```
 
-If the Microsoft Store `WindowsApps` alias is present but cannot run, point
-agentcom at the real Codex executable:
+**Panels:**
 
-```powershell
-$env:AGENTCOM_CODEX_EXE = "$env:LOCALAPPDATA\OpenAI\Codex\bin\<id>\codex.exe"
+- **Sidebar** — agent list with live state glyph (`>` working, `.` idle, `||` paused, `x` crashed) and provider badge
+- **Chat** — your conversation with the composer; unread questions shown in yellow
+- **Output** — live output stream for the selected agent; scroll with PgUp/PgDn
+- **Tasks** — the shared board with status, priority, and assignee
+- **Messages** — full inter-agent and human message feed
+- **Hub Log** — hub-level events (starts, stops, crashes, recruits)
+
+### Keybindings
+
+| Key | Action |
+|---|---|
+| `Tab` / `1`–`5` | Switch tabs |
+| `Up` / `Down` / `j` / `k` | Select agent in sidebar |
+| `Enter` | Send chat message (Chat tab) |
+| `m` | Message selected agent |
+| `u` | Interrupt selected agent (urgent) |
+| `M` | Broadcast message to all agents |
+| `a` | Add a task directly to the board |
+| `p` | Pause / resume selected agent |
+| `s` | Stop selected agent |
+| `PgUp` / `PgDn` | Scroll agent output |
+| `End` | Jump to live output (stop scrolling) |
+| `?` | Toggle this keybinding help overlay |
+| `q` / `Ctrl+C` | Quit (prompts for confirmation) |
+
+---
+
+## Free Mode
+
+Free mode lets the fleet pursue a broad goal autonomously until a stopping condition fires. When every agent goes idle, the hub nudges the composer to review the goal, the board, and the codebase, then queue the next useful work.
+
+```
+agentcom up --free "find bugs, improve tests, document what changed" --for 2h
+agentcom up --free "polish the docs and examples" --budget 5.0
+agentcom up --free "general code health" --for 90m --budget 10 --usage 80
+```
+
+### Stop conditions
+
+| Flag | Format | Description |
+|---|---|---|
+| `--for <duration>` | `2h`, `90m`, `1h30m`, `45s` | Wall-clock limit from hub start |
+| `--budget <usd>` | `5.0` | Stop when total tracked spend reaches this USD amount |
+| `--usage <percent>` | `80` | Stop when the provider's 5-hour usage limit hits this percentage |
+
+Conditions are **OR**'d — the first one to fire wins. Combine them for safe-by-default sessions:
+
+```
+agentcom up --free "refactor the payment module" --for 1h --budget 8
+```
+
+The composer is instructed to prefer high-value work and to report when nothing worth doing remains, preventing busy-work loops.
+
+---
+
+## Troubleshooting
+
+**`cargo install` fails with "cannot replace agentcom.exe"**
+
+A hub is running. Stop it first:
+```
+agentcom stop
+cargo install --path . --force
+```
+
+**`agentcom up` says "claude not found"**
+
+Install and authenticate the Claude CLI, then verify `claude --version` works from the same terminal.
+
+**Codex agents stay in "starting" state**
+
+On Windows, the Microsoft Store app alias may shadow the real executable. Point agentcom to it directly:
+```
+$env:AGENTCOM_CODEX_EXE = "$env:LOCALAPPDATA\OpenAI\Codex\bin\<version-id>\codex.exe"
+```
+Run `agentcom doctor` to check what agentcom actually finds.
+
+**DeepSeek agent crashes immediately**
+
+Verify your API key is set: `echo $env:DEEPSEEK_API_KEY`. Check the Hub Log tab (press `5`) for the specific error. Common causes: missing key, invalid key, or network proxy blocking `api.deepseek.com`.
+
+**Task is stuck as "claimed" after a crash**
+
+Tasks are reset to `open` automatically on the next `agentcom up`. To reopen one in a live session:
+```
+agentcom task reopen <id>
+```
+
+**File claim is blocking an agent**
+
+See who holds it, then coordinate:
+```
+agentcom files list
+agentcom send <agent> "please release src/foo.rs when you're done"
+```
+As a last resort, restart the hub — `agentcom up` clears all stale claims.
+
+**The TUI is blank or corrupted on Windows**
+
+This can happen if a previous run left the terminal in raw mode. Open a fresh terminal window. If the issue persists, check that Windows Terminal or ConPTY is being used (not a legacy `cmd.exe` window).
+
+---
+
+## Architecture
+
+```
 agentcom up
+│
+├── Hub (tokio runtime)
+│   ├── IPC server  — Unix/named-pipe socket; agents connect on startup
+│   ├── Agent pool  — one child process per agent (Claude/Codex/DeepSeek)
+│   ├── Store       — SQLite via rusqlite: tasks, messages, file claims
+│   ├── Ring buffers — lock-free per-agent output buffers (TUI streaming)
+│   └── Free-mode loop — idle-detection + composer nudge
+│
+├── TUI  — ratatui; reads ring buffers directly; sends IPC messages
+│
+└── Agents (child processes)
+    ├── Claude  — persistent `claude -p --input-format stream-json` session
+    ├── Codex   — agentcom-codex-adapter wraps `codex exec --json` per turn
+    └── DeepSeek — agentcom-deepseek-adapter calls DeepSeek API; executes tool calls locally
 ```
 
-The hub injects these into child agents:
+**How coordination works:** Every agent has `AGENTCOM_PORT`, `AGENTCOM_TOKEN`, and `AGENTCOM_AGENT` injected into its environment. When an agent runs `agentcom task claim 5`, that `agentcom` invocation connects back to the hub over IPC, identifies itself with the token, and the hub enforces the claim atomically. File claims work the same way — the hub rejects a claim if another agent already holds any of the requested paths.
 
-- `AGENTCOM_PORT`
-- `AGENTCOM_TOKEN`
-- `AGENTCOM_AGENT`
+**Data lives outside the project:** The SQLite database and WAL files are stored under `%LOCALAPPDATA%\agentcom\data\<project-id>\` on Windows (or `~/.local/share/agentcom/` on Linux/macOS). This keeps state away from git and cloud sync. Your project only needs `agentcom.toml`.
 
-That is how `agentcom <cmd>` calls from an agent identify and authenticate
-against the running hub.
-
-## Data Storage
-
-Mutable runtime state is stored outside the project directory:
-
-```text
-%LOCALAPPDATA%\agentcom\data\<project-id>\
-```
-
-This keeps SQLite WAL files away from OneDrive sync. The project only needs
-`agentcom.toml`.
-
-## How This Differs From Similar Tools
-
-Tools like Claude Squad and Crystal/Nimbalyst are strong parallel session
-managers: they run multiple coding agents in isolated terminals or git
-worktrees. `agentcom` is more of a local team coordinator:
-
-- one shared task board instead of independent prompts only
-- composer agent as the front door
-- inter-agent messages and human inbox
-- advisory file claims for same-worktree coordination
-- optional mixed Claude/Codex fleet
-- free mode for broad, bounded autonomy
-
-The tradeoff: worktree isolation is harder safety; agentcom's file claims are
-advisory and rely on agent compliance. The upside is tighter collaboration in a
-single working tree.
+---
 
 ## Testing
 
-```powershell
+```
 cargo test
 ```
 
-The test suite runs a real headless hub against zero-cost `mock-claude` and
-`mock-codex` binaries plus the DeepSeek adapter's mock mode. It covers task lifecycle, message passing, interrupts,
-ignored-interrupt escalation, pause/resume, provider switching, file claims,
-free mode, recruitment, composer chat, and graceful shutdown.
+The suite runs a real headless hub against zero-cost `mock-claude` and `mock-codex` binaries and the DeepSeek adapter's mock mode. It covers task lifecycle, message passing, interrupts, ignored-interrupt escalation, pause/resume, provider switching, file claims, free mode, recruitment, composer chat, and graceful shutdown.
 
-The protocol codec is also locked against NDJSON fixtures captured from a live
-Claude Code CLI session, including a real interrupted turn.
+The protocol codec is locked against NDJSON fixtures captured from a live Claude Code CLI session.

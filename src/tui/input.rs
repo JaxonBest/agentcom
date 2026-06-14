@@ -23,6 +23,17 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
+    // ? toggles help overlay from anywhere (except modals handled above).
+    if key.code == KeyCode::Char('?') {
+        app.show_help = !app.show_help;
+        return;
+    }
+    // Esc closes help overlay if open.
+    if app.show_help && key.code == KeyCode::Esc {
+        app.show_help = false;
+        return;
+    }
+
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         app.confirm_quit = true;
         return;

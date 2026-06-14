@@ -229,49 +229,259 @@ impl HubConfig {
     }
 }
 
-pub const EXAMPLE_CONFIG: &str = r#"# agentcom configuration
-# Define your agent fleet here. Run `agentcom up` to start it.
+/// Fleet archetype for `agentcom init --template`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
+#[value(rename_all = "lowercase")]
+pub enum ConfigTemplate {
+    /// Composer (auto-injected) + builder only — great for solo hacking.
+    Solo,
+    /// Composer + builder + reviewer — the recommended starting point.
+    #[default]
+    Team,
+    /// Composer + builder + reviewer + DeepSeek junior — cost-efficient mixed fleet.
+    Mixed,
+}
 
+/// The canonical team template (builder + reviewer, DeepSeek example commented
+/// out).  Used by tests and as the source for `render_example_config` when the
+/// project name is not yet known.
+#[allow(dead_code)]
+pub const EXAMPLE_CONFIG: &str = r#"# ============================================================
+# agentcom.toml — my-project
+# ============================================================
+#
+# GETTING STARTED
+# ─────────────────────────────────────────────────────────────
+# 1. Edit the [[agent]] entries below to describe your fleet.
+# 2. Run `agentcom up` to launch the hub and agent fleet.
+# 3. Chat with the auto-injected "composer" coordinator in the
+#    TUI pane — it turns your goals into board tasks and
+#    directs workers without ever editing code itself.
+# 4. Seed the board early: `agentcom task add "Fix login bug"`
+# 5. Monitor: `agentcom status`  |  `agentcom tail <agent>`
+# ─────────────────────────────────────────────────────────────
+
+# ── GLOBAL SETTINGS ─────────────────────────────────────────
+
+# (required) Human-readable label shown in the TUI and status.
 project_name = "my-project"
 
-# Runtime for agents that don't set one: "claude", "codex", or "deepseek".
+# Default runtime for agents that don't set provider themselves.
+# Values: "claude" | "codex" | "deepseek"    Default: "claude"
 # default_provider = "claude"
 
-# Default model for agents that don't set one. Omit to use your `claude` default.
-# default_model = "sonnet"
+# Default model passed to agents that don't set model themselves.
+# Omit to use each provider's own default (recommended).
+# Values: any model string                   Default: (provider default)
+# default_model = "claude-sonnet-4-5"
 
-# Stop everything once total spend crosses this (USD).
+# Hub-wide cumulative spend cap in USD. Hub shuts down once reached.
+# Values: any positive float                 Default: (no cap)
 # max_total_budget_usd = 20.0
 
-# Seconds to wait for an interrupted agent to abort before force-killing it.
+# Seconds to wait for an interrupted agent to abort gracefully
+# before the hub escalates to a force-kill.
+# Values: any positive integer               Default: 15
 # interrupt_timeout_secs = 15
 
-# Hard cap on fleet size. Agents can recruit teammates with `agentcom agent
-# add` when the board has more parallel work than the team can absorb; this
-# cap (plus the budgets) is what keeps that bounded.
+# Hard cap on fleet size. Agents can recruit teammates with
+# `agentcom agent add`; this cap (plus budgets) bounds that.
+# Values: any positive integer               Default: 8
 # max_agents = 8
+
+# ── AGENT FLEET ─────────────────────────────────────────────
+#
+# One [[agent]] block per worker. A "composer" coordinator is
+# injected automatically (unless you define your own below).
+# The composer talks to the human, files board tasks, and
+# directs workers — it never edits code itself.
+#
+# Each agent gets agentcom CLI commands (task/send/files/inbox)
+# automatically. Tools not in allowed_tools are auto-denied
+# when agents run headless — keep the list explicit.
+#
 
 [[agent]]
 name = "builder"
 role = "Implements features and fixes. Owns src/. Coordinates with reviewer before large refactors."
-# IMPORTANT: agents run headless, so nobody can answer permission prompts —
-# any tool NOT listed here is auto-denied. (`agentcom` coordination commands
-# are always allowed regardless.) Narrow Bash rules like "Bash(npm test:*)"
-# work too.
+# Tools the agent may call — everything else is auto-denied.
+# Values: list of tool names               Default: (all tools)
 allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
-# cwd = "."                      # working dir, relative to this file
-# provider = "claude"            # or "codex" or "deepseek"
-# model = "sonnet"
-# permission_mode = "acceptEdits"  # or "plan", "default", "bypassPermissions"
+# Working directory (relative to this file's location).
+# Values: any path                         Default: (project root)
+# cwd = "."
+# Agent runtime (overrides default_provider).
+# Values: "claude" | "codex" | "deepseek"  Default: (default_provider)
+# provider = "claude"
+# Model to use (overrides default_model).
+# Values: any model string                 Default: (default_model)
+# model = "claude-sonnet-4-5"
+# Tool permission policy.
+# Values: "acceptEdits" | "plan" | "default" | "bypassPermissions"
+#                                          Default: "acceptEdits"
+# permission_mode = "acceptEdits"
+# Max turns per fed prompt (caps one autonomous stretch).
+# Values: any positive integer             Default: (no cap)
 # max_turns_per_prompt = 50
+# Per-agent cumulative USD spend cap.
+# Values: any positive float               Default: (no cap)
 # max_budget_usd = 10.0
+# Restart the agent automatically if it exits.
+# Values: true | false                     Default: true
 # auto_restart = true
 
 [[agent]]
 name = "reviewer"
 role = "Reviews changes made by other agents, runs tests, and files follow-up tasks for problems found."
 allowed_tools = ["Bash", "Read", "Glob", "Grep"]
+
+# ── ADD A DEEPSEEK WORKER (uncomment to activate) ───────────
+#
+# [[agent]]
+# name = "junior-developer"
+# role = "Given clear instructions to do large amounts of code that require little reasoning."
+# provider = "deepseek"
+# model = "deepseek-coder"
+# allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+# max_budget_usd = 5.0
 "#;
+
+/// Generate an `agentcom.toml` for the given project name and fleet archetype.
+pub fn render_example_config(project_name: &str, template: ConfigTemplate) -> String {
+    let header = format!(
+        "# ============================================================\n\
+         # agentcom.toml — {project_name}\n\
+         # ============================================================\n\
+         #\n\
+         # GETTING STARTED\n\
+         # ─────────────────────────────────────────────────────────────\n\
+         # 1. Edit the [[agent]] entries below to describe your fleet.\n\
+         # 2. Run `agentcom up` to launch the hub and agent fleet.\n\
+         # 3. Chat with the auto-injected \"composer\" coordinator in the\n\
+         #    TUI pane — it turns your goals into board tasks and\n\
+         #    directs workers without ever editing code itself.\n\
+         # 4. Seed the board early: `agentcom task add \"Fix login bug\"`\n\
+         # 5. Monitor: `agentcom status`  |  `agentcom tail <agent>`\n\
+         # ─────────────────────────────────────────────────────────────\n\
+         \n\
+         # ── GLOBAL SETTINGS ─────────────────────────────────────────\n\
+         \n\
+         # (required) Human-readable label shown in the TUI and status.\n\
+         project_name = \"{project_name}\"\n\
+         \n\
+         # Default runtime for agents that don't set provider themselves.\n\
+         # Values: \"claude\" | \"codex\" | \"deepseek\"    Default: \"claude\"\n\
+         # default_provider = \"claude\"\n\
+         \n\
+         # Default model passed to agents that don't set model themselves.\n\
+         # Omit to use each provider's own default (recommended).\n\
+         # Values: any model string                   Default: (provider default)\n\
+         # default_model = \"claude-sonnet-4-5\"\n\
+         \n\
+         # Hub-wide cumulative spend cap in USD. Hub shuts down once reached.\n\
+         # Values: any positive float                 Default: (no cap)\n\
+         # max_total_budget_usd = 20.0\n\
+         \n\
+         # Seconds to wait for an interrupted agent to abort gracefully\n\
+         # before the hub escalates to a force-kill.\n\
+         # Values: any positive integer               Default: 15\n\
+         # interrupt_timeout_secs = 15\n\
+         \n\
+         # Hard cap on fleet size. Agents can recruit teammates with\n\
+         # `agentcom agent add`; this cap (plus budgets) bounds that.\n\
+         # Values: any positive integer               Default: 8\n\
+         # max_agents = 8\n\
+         \n\
+         # ── AGENT FLEET ─────────────────────────────────────────────\n\
+         #\n\
+         # One [[agent]] block per worker. A \"composer\" coordinator is\n\
+         # injected automatically (unless you define your own below).\n\
+         # The composer talks to the human, files board tasks, and\n\
+         # directs workers — it never edits code itself.\n\
+         #\n\
+         # Each agent gets agentcom CLI commands (task/send/files/inbox)\n\
+         # automatically. Tools not in allowed_tools are auto-denied\n\
+         # when agents run headless — keep the list explicit.\n\
+         #\n"
+    );
+
+    let builder = r#"
+[[agent]]
+name = "builder"
+role = "Implements features and fixes. Owns src/. Coordinates with reviewer before large refactors."
+# Tools the agent may call — everything else is auto-denied.
+# Values: list of tool names               Default: (all tools)
+allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+# Working directory (relative to this file's location).
+# Values: any path                         Default: (project root)
+# cwd = "."
+# Agent runtime (overrides default_provider).
+# Values: "claude" | "codex" | "deepseek"  Default: (default_provider)
+# provider = "claude"
+# Model to use (overrides default_model).
+# Values: any model string                 Default: (default_model)
+# model = "claude-sonnet-4-5"
+# Tool permission policy.
+# Values: "acceptEdits" | "plan" | "default" | "bypassPermissions"
+#                                          Default: "acceptEdits"
+# permission_mode = "acceptEdits"
+# Max turns per fed prompt (caps one autonomous stretch).
+# Values: any positive integer             Default: (no cap)
+# max_turns_per_prompt = 50
+# Per-agent cumulative USD spend cap.
+# Values: any positive float               Default: (no cap)
+# max_budget_usd = 10.0
+# Restart the agent automatically if it exits.
+# Values: true | false                     Default: true
+# auto_restart = true
+"#;
+
+    let reviewer = r#"
+[[agent]]
+name = "reviewer"
+role = "Reviews changes made by other agents, runs tests, and files follow-up tasks for problems found."
+allowed_tools = ["Bash", "Read", "Glob", "Grep"]
+"#;
+
+    let deepseek_active = r#"
+[[agent]]
+name = "junior-developer"
+role = "Given clear instructions to do large amounts of code that require little reasoning."
+provider = "deepseek"
+model = "deepseek-coder"
+allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+max_budget_usd = 5.0
+"#;
+
+    let deepseek_commented = r#"
+# ── ADD A DEEPSEEK WORKER (uncomment to activate) ───────────
+#
+# [[agent]]
+# name = "junior-developer"
+# role = "Given clear instructions to do large amounts of code that require little reasoning."
+# provider = "deepseek"
+# model = "deepseek-coder"
+# allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+# max_budget_usd = 5.0
+"#;
+
+    let mut out = header;
+    out.push_str(builder);
+    match template {
+        ConfigTemplate::Solo => {
+            out.push_str(deepseek_commented);
+        }
+        ConfigTemplate::Team => {
+            out.push_str(reviewer);
+            out.push_str(deepseek_commented);
+        }
+        ConfigTemplate::Mixed => {
+            out.push_str(reviewer);
+            out.push_str(deepseek_active);
+        }
+    }
+    out
+}
 
 /// Render agentcom.toml with a new `[[agent]]` block appended, preserving
 /// the rest of the file (comments included). Validates the combined config
@@ -297,6 +507,14 @@ pub fn render_with_agent(project_root: &Path, agent: &AgentConfig) -> Result<(Pa
 }
 
 pub fn write_example(project_root: &Path, force: bool) -> Result<PathBuf> {
+    write_example_template(project_root, force, ConfigTemplate::Team)
+}
+
+pub fn write_example_template(
+    project_root: &Path,
+    force: bool,
+    template: ConfigTemplate,
+) -> Result<PathBuf> {
     let path = project_root.join(crate::paths::CONFIG_FILE);
     if path.exists() && !force {
         bail!(
@@ -304,7 +522,11 @@ pub fn write_example(project_root: &Path, force: bool) -> Result<PathBuf> {
             path.display()
         );
     }
-    std::fs::write(&path, EXAMPLE_CONFIG)?;
+    let project_name = project_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("my-project");
+    std::fs::write(&path, render_example_config(project_name, template))?;
     Ok(path)
 }
 
@@ -333,6 +555,40 @@ mod tests {
         assert_eq!(cfg.agents[0].name, "builder");
         assert_eq!(cfg.agents[0].permission_mode, "acceptEdits");
         assert!(cfg.agents[0].auto_restart);
+    }
+
+    #[test]
+    fn render_example_config_solo() {
+        let text = render_example_config("cool-proj", ConfigTemplate::Solo);
+        assert!(text.contains("project_name = \"cool-proj\""));
+        let cfg: HubConfig = toml::from_str(&text).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.agents.len(), 1);
+        assert_eq!(cfg.agents[0].name, "builder");
+    }
+
+    #[test]
+    fn render_example_config_team() {
+        let text = render_example_config("cool-proj", ConfigTemplate::Team);
+        assert!(text.contains("project_name = \"cool-proj\""));
+        let cfg: HubConfig = toml::from_str(&text).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.agents.len(), 2);
+        assert_eq!(cfg.agents[1].name, "reviewer");
+    }
+
+    #[test]
+    fn render_example_config_mixed() {
+        let text = render_example_config("cool-proj", ConfigTemplate::Mixed);
+        assert!(text.contains("project_name = \"cool-proj\""));
+        let cfg: HubConfig = toml::from_str(&text).unwrap();
+        cfg.validate().unwrap();
+        assert_eq!(cfg.agents.len(), 3);
+        assert_eq!(cfg.agents[2].name, "junior-developer");
+        assert_eq!(
+            cfg.agents[2].provider,
+            Some(AgentProvider::Deepseek)
+        );
     }
 
     #[test]

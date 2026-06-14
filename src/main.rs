@@ -17,9 +17,9 @@ use cli::{Cli, Command};
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Init { force } => {
+        Command::Init { force, template } => {
             let cwd = std::env::current_dir()?;
-            let path = config::write_example(&cwd, force)?;
+            let path = config::write_example_template(&cwd, force, template)?;
             println!("wrote {}", path.display());
             println!("edit your agent fleet, then run: agentcom up");
             Ok(())
@@ -47,6 +47,7 @@ async fn main() -> Result<()> {
             run_up(agents, tasks, headless, free_mode, budget).await
         }
         Command::Agent(cmd) => cli::run_agent_cmd(cmd).await,
+        Command::Doctor => run_doctor(),
         other => cli::run_client(other).await,
     }
 }
@@ -225,6 +226,109 @@ fn stage_runtime_binaries(exe: &std::path::Path, stable_dir: &std::path::Path) -
                 .with_context(|| format!("copying adapter {}", src.display()))?;
         }
     }
+    Ok(())
+}
+
+fn run_doctor() -> Result<()> {
+    const GREEN: &str = "\x1b[32m";
+    const YELLOW: &str = "\x1b[33m";
+    const RED: &str = "\x1b[31m";
+    const BOLD: &str = "\x1b[1m";
+    const RESET: &str = "\x1b[0m";
+
+    println!("{BOLD}agentcom doctor{RESET} — pre-flight check\n");
+
+    let mut ok = 0u32;
+    let mut warn = 0u32;
+    let mut errors = 0u32;
+
+    // 1. claude CLI
+    match std::process::Command::new("claude")
+        .arg("--version")
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            println!("  {GREEN}✓{RESET} claude CLI        {ver}");
+            ok += 1;
+        }
+        _ => {
+            println!("  {RED}✗{RESET} claude CLI        not found — install Claude Code");
+            errors += 1;
+        }
+    }
+
+    // 2. codex CLI (optional)
+    match std::process::Command::new("codex")
+        .arg("--version")
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            let ver = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            println!("  {GREEN}✓{RESET} codex CLI         {ver}");
+            ok += 1;
+        }
+        _ => {
+            println!("  {YELLOW}○{RESET} codex CLI         not found (optional — only needed for codex agents)");
+            warn += 1;
+        }
+    }
+
+    // 3. DEEPSEEK_API_KEY
+    if std::env::var("DEEPSEEK_API_KEY").is_ok() {
+        println!("  {GREEN}✓{RESET} DEEPSEEK_API_KEY  set");
+        ok += 1;
+    } else {
+        println!("  {YELLOW}○{RESET} DEEPSEEK_API_KEY  not set (only needed for deepseek agents)");
+        warn += 1;
+    }
+
+    // 4. OPENAI_API_KEY (used by codex)
+    if std::env::var("OPENAI_API_KEY").is_ok() {
+        println!("  {GREEN}✓{RESET} OPENAI_API_KEY    set");
+        ok += 1;
+    } else {
+        println!("  {YELLOW}○{RESET} OPENAI_API_KEY    not set (only needed for codex agents)");
+        warn += 1;
+    }
+
+    // 5. agentcom.toml — find and validate
+    let cwd = std::env::current_dir()?;
+    match paths::find_project_root(&cwd) {
+        Some(root) => {
+            let toml_path = root.join(paths::CONFIG_FILE);
+            match config::HubConfig::load(&root) {
+                Ok(cfg) => {
+                    println!(
+                        "  {GREEN}✓{RESET} agentcom.toml     {} ({} agent(s))",
+                        toml_path.display(),
+                        cfg.agents.len()
+                    );
+                    ok += 1;
+                }
+                Err(e) => {
+                    println!(
+                        "  {RED}✗{RESET} agentcom.toml     {} — parse error: {e}",
+                        toml_path.display()
+                    );
+                    errors += 1;
+                }
+            }
+        }
+        None => {
+            println!("  {RED}✗{RESET} agentcom.toml     not found — run `agentcom init`");
+            errors += 1;
+        }
+    }
+
+    println!();
+    if errors == 0 {
+        println!("{GREEN}All checks passed{RESET} ({ok} ok, {warn} optional)");
+    } else {
+        println!("{RED}{errors} error(s){RESET}  {ok} ok  {warn} optional/warning");
+        std::process::exit(1);
+    }
+
     Ok(())
 }
 

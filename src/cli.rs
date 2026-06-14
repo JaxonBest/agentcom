@@ -24,6 +24,9 @@ pub enum Command {
         /// Overwrite an existing agentcom.toml
         #[arg(long)]
         force: bool,
+        /// Fleet archetype: solo, team (default), or mixed
+        #[arg(long, default_value = "team")]
+        template: crate::config::ConfigTemplate,
     },
     /// Start the hub and the agent fleet (TUI by default)
     Up {
@@ -91,6 +94,8 @@ pub enum Command {
     Pause { agent: String },
     /// Resume a paused agent
     Resume { agent: String },
+    /// Pre-flight check for all providers and config — no hub required
+    Doctor,
 }
 
 #[derive(Subcommand)]
@@ -314,7 +319,7 @@ pub async fn run_client(command: Command) -> Result<()> {
             let resp = client.request(&Request::Resume { agent }).await?;
             print_simple(resp)
         }
-        Command::Init { .. } | Command::Up { .. } | Command::Agent(_) => {
+        Command::Init { .. } | Command::Up { .. } | Command::Agent(_) | Command::Doctor => {
             unreachable!("handled in main")
         }
     }

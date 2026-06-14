@@ -2,7 +2,7 @@
 
 use super::{App, InputKind, Tab};
 use crate::store::{Message, TaskStatus};
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Tabs};
@@ -30,6 +30,10 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_main(f, app, body[1]);
 
     draw_footer(f, app, chunks[2]);
+
+    if app.show_help {
+        draw_help_overlay(f, f.area());
+    }
 }
 
 fn state_style(state: &str) -> Style {
@@ -555,6 +559,67 @@ fn draw_hub_log(f: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
+    let popup_width = r.width * percent_x / 100;
+    let x = r.x + (r.width.saturating_sub(popup_width)) / 2;
+    let y = r.y + (r.height.saturating_sub(height)) / 2;
+    Rect {
+        x,
+        y,
+        width: popup_width.min(r.width),
+        height: height.min(r.height),
+    }
+}
+
+fn draw_help_overlay(f: &mut Frame, area: Rect) {
+    // Each entry: (key, description, key, description) — two columns per row.
+    let rows: &[(&str, &str, &str, &str)] = &[
+        ("Tab / 1-5",  "switch tabs",        "Up/Down/j/k", "select agent"),
+        ("m",          "message agent",       "u",           "interrupt agent"),
+        ("M",          "broadcast all",       "a",           "add task"),
+        ("p",          "pause/resume agent",  "s",           "stop agent"),
+        ("PgUp/PgDn",  "scroll output",       "End",         "follow live"),
+        ("Enter",      "send chat message",   "?",           "toggle this help"),
+        ("q / Ctrl+C", "quit",                "",            ""),
+    ];
+
+    let popup_height = rows.len() as u16 + 2; // 2 border lines
+    let popup = centered_rect(72, popup_height, area);
+
+    f.render_widget(ratatui::widgets::Clear, popup);
+
+    // Inner width minus borders, split 50/50.
+    let inner_w = popup.width.saturating_sub(2) as usize;
+    let col = inner_w / 2;
+
+    let lines: Vec<Line> = rows
+        .iter()
+        .map(|(lk, ld, rk, rd)| {
+            let left_key = format!("{:<12}", lk);
+            let left_desc = format!("{:<width$}", ld, width = col.saturating_sub(13));
+            let right_key = format!("{:<12}", rk);
+            Line::from(vec![
+                Span::styled(left_key, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(left_desc),
+                Span::styled(right_key, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+                Span::raw(rd.to_string()),
+            ])
+        })
+        .collect();
+
+    f.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" keybindings ")
+                    .title_alignment(Alignment::Center)
+                    .style(Style::default().bg(Color::Indexed(235))),
+            ),
+        popup,
+    );
+}
+
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let (_, human_questions) = human_attention(app);
     let content: Line = if let Some(modal) = &app.modal {
@@ -580,7 +645,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             Span::raw(app.chat_input.clone()),
             Span::styled("|", Style::default().fg(Color::Green)),
             Span::styled(
-                "  (Enter send - Tab panes - Ctrl+C quit)",
+                "  (Enter send - Tab panes - ? help - Ctrl+C quit)",
                 Style::default().fg(Color::DarkGray),
             ),
         ];
@@ -597,13 +662,13 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         Line::from(vec![
             Span::styled(format!(" {flash} "), Style::default().fg(Color::Green)),
             Span::styled(
-                " [m]sg [u]rgent [M]broadcast [a]dd-task [p]ause [s]top [Tab]pane [q]uit",
+                " [m]sg [u]rgent [M]broadcast [a]dd-task [p]ause [s]top [Up/Down]agent [PgUp/PgDn]scroll [Tab]pane [?]help [q]uit",
                 Style::default().fg(Color::DarkGray),
             ),
         ])
     } else {
         Line::from(Span::styled(
-            " [m]sg [u]rgent [M]broadcast [a]dd-task [p]ause [s]top [Up/Down]agent [PgUp/PgDn]scroll [Tab]pane [q]uit",
+            " [m]sg [u]rgent [M]broadcast [a]dd-task [p]ause [s]top [Up/Down]agent [PgUp/PgDn]scroll [Tab]pane [?]help [q]uit",
             Style::default().fg(Color::DarkGray),
         ))
     };

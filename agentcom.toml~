@@ -31,8 +31,6 @@ allowed_tools = ["Bash", "Read", "Glob", "Grep"]
 name = "junior-developer"
 role = "Given clear instructions to do large amounts of code that require little reasoning."
 allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
-provider = "deepseek"
-model = "deepseek-reasoner"
 permission_mode = "acceptEdits"
 auto_restart = true
 
