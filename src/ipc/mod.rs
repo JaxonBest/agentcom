@@ -108,6 +108,16 @@ pub enum Request {
     TaskUnpin {
         id: i64,
     },
+    /// Add a label to a task.
+    TaskTag {
+        id: i64,
+        label: String,
+    },
+    /// Remove a label from a task.
+    TaskUntag {
+        id: i64,
+        label: String,
+    },
     Status,
     /// Hot-add an agent to the running hub (already persisted to
     /// agentcom.toml by the client).
