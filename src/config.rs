@@ -44,6 +44,18 @@ pub struct HubConfig {
     /// specific reason to bypass them.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub auto_commit_skip_hooks: bool,
+    /// HTTP/HTTPS endpoint to POST hub events to (task done, agent crash, etc).
+    /// Leave unset to disable webhooks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook_url: Option<String>,
+    /// Optional secret for HMAC-SHA256 signing of webhook payloads.
+    /// Sent as `X-Agentcom-Signature: sha256=<hex>`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webhook_secret: Option<String>,
+    /// Glob patterns for files to skip during auto-commit (e.g. ["agentcom.toml", "*.lock"]).
+    /// Defaults to ["agentcom.toml", ".agentcom/**"] to protect hub state files.
+    #[serde(default = "default_commit_exclude_patterns", skip_serializing_if = "Vec::is_empty")]
+    pub commit_exclude_patterns: Vec<String>,
     #[serde(default, rename = "agent")]
     pub agents: Vec<AgentConfig>,
 }
@@ -83,6 +95,10 @@ pub struct AgentConfig {
     /// Falls back to the agent's email or "<agent>@agentcom.local" if not set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_commit_author_email: Option<String>,
+    /// Per-agent override for auto_commit. When Some, takes precedence over the
+    /// global HubConfig.auto_commit setting. Use false to opt this agent out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_commit: Option<bool>,
     /// Extra environment variables injected into this agent's child process.
     /// Useful for per-agent API keys, debug flags, or tool configuration.
     /// Example: env = { ANTHROPIC_API_KEY = "sk-...", DEBUG = "1" }
@@ -178,6 +194,7 @@ pub fn composer_default(default_model: Option<&str>) -> AgentConfig {
         auto_restart: true,
         auto_commit_author_name: None,
         auto_commit_author_email: None,
+        auto_commit: None,
         env: BTreeMap::new(),
     }
 }
@@ -211,6 +228,9 @@ fn default_interrupt_timeout() -> u64 {
 }
 fn default_max_agents() -> usize {
     8
+}
+fn default_commit_exclude_patterns() -> Vec<String> {
+    vec!["agentcom.toml".into(), ".agentcom/**".into()]
 }
 
 impl HubConfig {

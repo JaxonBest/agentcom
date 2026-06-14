@@ -550,6 +550,7 @@ pub async fn run_agent_cmd(cmd: AgentCmd) -> Result<()> {
                 auto_restart: !no_auto_restart,
                 auto_commit_author_name,
                 auto_commit_author_email,
+                auto_commit: None,
                 env,
             };
             // Validate the combined config first; only persist after the
