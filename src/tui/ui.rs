@@ -873,7 +873,9 @@ fn draw_task_detail(f: &mut Frame, task: &crate::store::Task, area: Rect) {
         Span::styled("r", Style::default().fg(Color::DarkGray)),
         Span::styled(" — reopen  ", Style::default().fg(Color::DarkGray)),
         Span::styled("i", Style::default().fg(Color::DarkGray)),
-        Span::styled(" — pin/unpin", Style::default().fg(Color::DarkGray)),
+        Span::styled(" — pin/unpin  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("0-4", Style::default().fg(Color::DarkGray)),
+        Span::styled(" — set priority", Style::default().fg(Color::DarkGray)),
     ]));
 
     f.render_widget(

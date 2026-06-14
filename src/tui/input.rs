@@ -46,7 +46,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    // Task detail popup: Esc closes, 'r' reopens, 'i' toggles pin.
+    // Task detail popup: Esc closes, 'r' reopens, 'i' toggles pin, 0-4 sets priority.
     if let Some(id) = app.task_detail_id {
         match key.code {
             KeyCode::Esc => app.task_detail_id = None,
@@ -64,6 +64,17 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                     app.send_request(Request::TaskPin { id });
                     app.flash = Some(format!("pinned task #{id}"));
                 }
+                app.task_detail_id = None;
+            }
+            KeyCode::Char(c @ '0'..='4') => {
+                let priority = (c as i64) - ('0' as i64);
+                app.send_request(Request::TaskEdit {
+                    id,
+                    title: None,
+                    description: None,
+                    priority: Some(priority),
+                });
+                app.flash = Some(format!("task #{id} priority → p{priority}"));
                 app.task_detail_id = None;
             }
             _ => {}
