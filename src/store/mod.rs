@@ -122,6 +122,9 @@ pub struct Task {
     pub tags: Vec<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub pinned: bool,
+    /// Unix timestamp after which this task is considered overdue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<i64>,
     pub created_by: String,
     pub created_at: i64,
     pub updated_at: i64,
@@ -144,6 +147,8 @@ pub struct TaskSnapshot {
     /// Original source DB id (informational; not used on import).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_id: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

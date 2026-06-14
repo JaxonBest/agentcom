@@ -27,6 +27,7 @@ fn task_from_row(row: &Row) -> rusqlite::Result<Task> {
         note: row.get("note")?,
         tags: parse_tags(&tags_raw),
         pinned: pinned != 0,
+        due_at: row.get("due_at").unwrap_or(None),
         created_by: row.get("created_by")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
@@ -144,15 +145,72 @@ impl Store {
         self.task_list_filtered(status, search, None)
     }
 
-    /// Like [`task_list`] but also filters by a tag label after querying.
-    /// Hub uses this when the client passes `--tag <label>`.
+    /// Full task list with optional status, keyword search, and tag filter.
+    /// Hub uses `tag` when the client passes `--tag <label>`.
     pub fn task_list_filtered(
         &self,
         status: Option<TaskStatus>,
         search: Option<&str>,
         tag: Option<&str>,
     ) -> Result<Vec<Task>> {
-        let mut tasks = self.task_list(status, search)?;
+        let conn = self.conn.lock().unwrap();
+        let search_clause = search
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                let pattern = format!("%{}%", s.replace('%', "%%"));
+                (pattern, "(title LIKE ? OR description LIKE ?)".to_string())
+            });
+
+        let overdue_sort =
+            "CASE WHEN due_at IS NOT NULL AND due_at < strftime('%s','now') THEN 0 ELSE 1 END";
+        let mut tasks: Vec<Task> = match status {
+            Some(ref s) => {
+                let mut sql = "SELECT * FROM tasks WHERE status = ?1".to_string();
+                if let Some((_, clause)) = &search_clause {
+                    sql.push_str(&format!(" AND {clause}"));
+                }
+                sql.push_str(&format!(" ORDER BY {overdue_sort}, priority, id"));
+                let mut stmt = conn.prepare_cached(&sql)?;
+                if let Some((ref pattern, _)) = search_clause {
+                    let rows = stmt.query_map(
+                        params![s.as_str(), pattern, pattern],
+                        task_from_row,
+                    )?;
+                    rows.collect::<rusqlite::Result<Vec<_>>>()?
+                } else {
+                    let rows = stmt.query_map([s.as_str()], task_from_row)?;
+                    rows.collect::<rusqlite::Result<Vec<_>>>()?
+                }
+            }
+            None => {
+                if let Some((ref pattern, ref clause)) = search_clause {
+                    let sql = format!(
+                        "SELECT * FROM tasks WHERE id IN (SELECT id FROM tasks WHERE {clause}) \
+                         ORDER BY \
+                           CASE status WHEN 'claimed' THEN 0 WHEN 'open' THEN 1 \
+                                       WHEN 'blocked' THEN 2 ELSE 3 END, \
+                           pinned DESC, {overdue_sort}, priority, id"
+                    );
+                    let mut stmt = conn.prepare_cached(&sql)?;
+                    let rows = stmt.query_map(params![pattern, pattern], task_from_row)?;
+                    rows.collect::<rusqlite::Result<Vec<_>>>()?
+                } else {
+                    let sql = format!(
+                        "SELECT * FROM tasks ORDER BY \
+                           CASE status WHEN 'claimed' THEN 0 WHEN 'open' THEN 1 \
+                                       WHEN 'blocked' THEN 2 ELSE 3 END, \
+                           pinned DESC, {overdue_sort}, priority, id"
+                    );
+                    let mut stmt = conn.prepare_cached(&sql)?;
+                    let rows = stmt.query_map([], task_from_row)?;
+                    rows.collect::<rusqlite::Result<Vec<_>>>()?
+                }
+            }
+        };
+        for t in &mut tasks {
+            load_deps(&conn, t)?;
+        }
+        drop(conn);
         if let Some(label) = tag
             .map(|t| t.trim().to_lowercase())
             .filter(|t| !t.is_empty())
@@ -180,7 +238,9 @@ impl Store {
                    WHERE d.task_id = t.id AND dt.status != 'done'
                )
                {}
-             ORDER BY t.pinned DESC, t.priority, t.id LIMIT 1",
+             ORDER BY t.pinned DESC,
+                      CASE WHEN t.due_at IS NOT NULL AND t.due_at < strftime('%s','now') THEN 0 ELSE 1 END,
+                      t.priority, t.id LIMIT 1",
             if exclude.is_empty() {
                 String::new()
             } else {
@@ -498,6 +558,20 @@ impl Store {
         Ok(())
     }
 
+    /// Set or clear the due date for a task.
+    /// Pass `None` to clear an existing due date.
+    pub fn task_set_due(&self, id: i64, due_at: Option<i64>) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let updated = conn.execute(
+            "UPDATE tasks SET due_at = ?1, updated_at = ?2 WHERE id = ?3",
+            params![due_at, now_ts(), id],
+        )?;
+        if updated == 0 {
+            bail!("task #{id} not found");
+        }
+        Ok(())
+    }
+
     /// Pin a task so it sorts before all non-pinned tasks in suggestion order.
     pub fn task_pin(&self, id: i64) -> Result<()> {
         let conn = self.conn.lock().unwrap();
@@ -558,6 +632,7 @@ impl Store {
                 status: t.status.as_str().to_string(),
                 tags: t.tags,
                 depends_on: t.depends_on,
+                due_at: t.due_at,
             })
             .collect();
         Ok(snapshots)
@@ -613,6 +688,13 @@ impl Store {
                 let _ = conn.execute(
                     "UPDATE tasks SET status = ?1 WHERE id = ?2",
                     params![status, new_id],
+                );
+            }
+            // Restore due date if present.
+            if snap.due_at.is_some() {
+                let _ = conn.execute(
+                    "UPDATE tasks SET due_at = ?1 WHERE id = ?2",
+                    params![snap.due_at, new_id],
                 );
             }
         }
@@ -801,6 +883,41 @@ mod tests {
     }
 
     #[test]
+    fn due_date_overdue_task_sorted_before_non_overdue() {
+        let s = Store::open_in_memory().unwrap();
+        let normal = s.task_add("normal", "", 1, &[], "human").unwrap();
+        let overdue = s.task_add("overdue", "", 2, &[], "human").unwrap(); // lower priority
+
+        // Set due date in the past (overdue).
+        s.task_set_due(overdue, Some(1_000_000)).unwrap(); // Unix epoch + 1M secs ≈ 1982
+
+        // Scheduler should prefer overdue over normal despite lower priority.
+        let next = s.next_claimable(&[]).unwrap().unwrap();
+        assert_eq!(next.id, overdue);
+        assert_eq!(next.due_at, Some(1_000_000));
+
+        // Clear due date — normal should win again.
+        s.task_set_due(overdue, None).unwrap();
+        let next = s.next_claimable(&[]).unwrap().unwrap();
+        assert_eq!(next.id, normal);
+        assert_eq!(next.due_at, None);
+    }
+
+    #[test]
+    fn due_date_future_does_not_change_order() {
+        let s = Store::open_in_memory().unwrap();
+        let high = s.task_add("high priority", "", 0, &[], "human").unwrap();
+        let low = s.task_add("low priority", "", 3, &[], "human").unwrap();
+
+        // Set future due date on low-priority task — should NOT boost it.
+        let future_ts = now_ts() + 86_400; // 1 day in the future
+        s.task_set_due(low, Some(future_ts)).unwrap();
+
+        let next = s.next_claimable(&[]).unwrap().unwrap();
+        assert_eq!(next.id, high, "future due date should not change ordering");
+    }
+
+    #[test]
     fn tag_filter_in_task_list_filtered() {
         let s = Store::open_in_memory().unwrap();
         let a = s.task_add("alpha", "", 1, &[], "human").unwrap();
@@ -906,6 +1023,7 @@ mod tests {
                 tags: vec![],
                 depends_on: vec![],
                 source_id: None,
+                due_at: None,
             },
             TaskSnapshot {
                 title: "t2".into(),
@@ -915,6 +1033,7 @@ mod tests {
                 tags: vec![],
                 depends_on: vec![],
                 source_id: None,
+                due_at: None,
             },
         ];
         let ids = dst.bulk_import_tasks(&snaps, "bot").unwrap();

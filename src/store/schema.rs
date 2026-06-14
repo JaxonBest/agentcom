@@ -73,6 +73,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     for (col, ddl) in [
         ("tags", "ALTER TABLE tasks ADD COLUMN tags TEXT NOT NULL DEFAULT ''"),
         ("pinned", "ALTER TABLE tasks ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"),
+        ("due_at", "ALTER TABLE tasks ADD COLUMN due_at INTEGER"),
     ] {
         let exists: bool = conn
             .query_row(
