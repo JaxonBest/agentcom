@@ -173,7 +173,21 @@ async fn handle_conn(
     // First frame must be a valid Hello.
     let identity = match read_line_bounded(&mut lines).await? {
         Some(line) => match serde_json::from_str::<Request>(&line) {
-            Ok(Request::Hello { token: t, identity }) if ct_eq(&t, &token) => identity,
+            Ok(Request::Hello { token: t, identity }) if ct_eq(&t, &token) => {
+                // Validate identity format: must be "human" or a valid agent name.
+                let valid = identity == "human"
+                    || crate::config::validate_agent_name(&identity).is_ok();
+                if !valid {
+                    tracing::warn!(
+                        peer = %peer,
+                        identity = %identity,
+                        "ipc: rejected connection with invalid identity format"
+                    );
+                    write_frame(&mut write_half, &Response::err("invalid identity")).await?;
+                    return Ok(());
+                }
+                identity
+            }
             Ok(Request::Hello { identity, .. }) => {
                 tracing::warn!(peer = %peer, identity = %identity, "ipc: rejected connection with invalid token");
                 write_frame(&mut write_half, &Response::err("invalid token")).await?;
