@@ -2,6 +2,7 @@
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -444,6 +445,226 @@ pub fn write_example_template(
 }
 
 
+/// Walk a project tree (up to 3 levels deep, skipping `.git`/`target`/`node_modules`)
+/// and return a concise one-line summary suitable for an AI prompt.
+///
+/// The summary includes the detected language/framework, project name (if found),
+/// file count by top extensions, and a README preview (first 5 lines).
+pub fn scan_project(root: &Path) -> String {
+    let skip_dirs: &[&str] = &[".git", "target", "node_modules"];
+
+    let mut ext_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut frameworks: Vec<String> = Vec::new();
+    let mut project_name: Option<String> = None;
+    let mut total_files: usize = 0;
+    let mut readme_lines: Vec<String> = Vec::new();
+
+    // Recursive walk helper (fn, not closure — no capture needed).
+    fn walk(
+        dir: &Path,
+        root: &Path,
+        depth: usize,
+        max_depth: usize,
+        skip_dirs: &[&str],
+        ext_counts: &mut BTreeMap<String, usize>,
+        frameworks: &mut Vec<String>,
+        project_name: &mut Option<String>,
+        total_files: &mut usize,
+        readme_lines: &mut Vec<String>,
+    ) {
+        if depth > max_depth {
+            return;
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let ft = match entry.file_type() {
+                Ok(t) => t,
+                _ => continue,
+            };
+            let name = entry.file_name();
+            let name_lower = name.to_string_lossy().to_lowercase();
+            let path = entry.path();
+
+            if ft.is_dir() {
+                if skip_dirs.contains(&name_lower.as_str())
+                    || skip_dirs.contains(&name.to_string_lossy().as_ref())
+                {
+                    continue;
+                }
+                walk(
+                    &path,
+                    root,
+                    depth + 1,
+                    max_depth,
+                    skip_dirs,
+                    ext_counts,
+                    frameworks,
+                    project_name,
+                    total_files,
+                    readme_lines,
+                );
+            } else if ft.is_file() {
+                *total_files += 1;
+
+                // --- Detect language / framework from marker files ---
+                match name_lower.as_str() {
+                    "cargo.toml" => {
+                        push_unique(frameworks, "Rust");
+                        if project_name.is_none() {
+                            if let Ok(text) = std::fs::read_to_string(&path) {
+                                // Minimal TOML parse for [package].name
+                                #[derive(Deserialize)]
+                                struct Pkg {
+                                    name: Option<String>,
+                                }
+                                #[derive(Deserialize)]
+                                struct Ct {
+                                    package: Option<Pkg>,
+                                }
+                                if let Ok(ct) = toml::from_str::<Ct>(&text) {
+                                    if let Some(n) = ct.package.and_then(|p| p.name) {
+                                        *project_name = Some(n);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "package.json" => {
+                        push_unique(frameworks, "JS/TS");
+                        if project_name.is_none() {
+                            if let Ok(text) = std::fs::read_to_string(&path) {
+                                #[derive(Deserialize)]
+                                struct Pj {
+                                    name: Option<String>,
+                                }
+                                if let Ok(pj) = serde_json::from_str::<Pj>(&text) {
+                                    if let Some(n) = pj.name {
+                                        *project_name = Some(n);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    "pyproject.toml" | "setup.py" => {
+                        push_unique(frameworks, "Python");
+                    }
+                    "go.mod" => {
+                        push_unique(frameworks, "Go");
+                    }
+                    "gemfile" => {
+                        push_unique(frameworks, "Ruby");
+                    }
+                    "pom.xml" => {
+                        push_unique(frameworks, "Java");
+                    }
+                    "build.gradle" | "build.gradle.kts" => {
+                        push_unique(frameworks, "Kotlin/Groovy");
+                    }
+                    "cmakelists.txt" => {
+                        push_unique(frameworks, "C/C++ (CMake)");
+                    }
+                    "makefile" | "makefile.am" | "gnumakefile" => {
+                        push_unique(frameworks, "C/C++");
+                    }
+                    _ => {}
+                }
+
+                // --- Check for README.md (any casing) ---
+                if matches!(
+                    name_lower.as_str(),
+                    "readme.md" | "readme.markdown" | "readme.txt"
+                ) && readme_lines.is_empty()
+                {
+                    if let Ok(text) = std::fs::read_to_string(&path) {
+                        readme_lines.extend(
+                            text.lines().take(5).map(|l| l.to_string()),
+                        );
+                    }
+                }
+
+                // --- Count extensions ---
+                if let Some(ext) = path.extension() {
+                    let ext_str = ext.to_string_lossy().to_lowercase();
+                    if !ext_str.is_empty() {
+                        *ext_counts.entry(ext_str).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    walk(
+        root,
+        root,
+        0,
+        3,
+        skip_dirs,
+        &mut ext_counts,
+        &mut frameworks,
+        &mut project_name,
+        &mut total_files,
+        &mut readme_lines,
+    );
+
+    // --- Assemble summary ---
+    let lang = if frameworks.is_empty() {
+        "Unknown".to_string()
+    } else {
+        frameworks.join("/")
+    };
+
+    let name_part = project_name
+        .map(|n| format!(" ({n})"))
+        .unwrap_or_default();
+
+    // Sort extensions by count descending, take top 7
+    let mut ext_vec: Vec<(String, usize)> = ext_counts.into_iter().collect();
+    ext_vec.sort_by(|a, b| b.1.cmp(&a.1));
+    ext_vec.truncate(7);
+
+    let ext_summary: String = ext_vec
+        .iter()
+        .map(|(ext, count)| format!("~{} .{ext} files", count))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let readme_part = if !readme_lines.is_empty() {
+        let preview = readme_lines.join(" | ");
+        if preview.len() > 120 {
+            format!("README.md: {}…", &preview[..117])
+        } else {
+            format!("README.md: {preview}")
+        }
+    } else {
+        "No README.md found".to_string()
+    };
+
+    if total_files == 0 {
+        return format!("Empty project{name_part}. {readme_part}");
+    }
+
+    let summary = format!(
+        "{lang} project{name_part}. ~{total_files} files: {ext_summary}. {readme_part}"
+    );
+
+    // Enforce 500-char limit
+    if summary.len() > 500 {
+        let trimmed: String = summary.chars().take(497).collect();
+        format!("{}…", trimmed)
+    } else {
+        summary
+    }
+}
+
+/// Push `val` into `vec` only if not already present.
+fn push_unique(vec: &mut Vec<String>, val: &str) {
+    if !vec.iter().any(|v| v == val) {
+        vec.push(val.to_string());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -528,5 +749,48 @@ role = "r"
 "#;
         let cfg: HubConfig = toml::from_str(dup).unwrap();
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn scan_project_detects_rust() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+
+        // Create Cargo.toml with a project name
+        std::fs::write(
+            root.join("Cargo.toml"),
+            r#"[package]
+name = "test-crate"
+version = "0.1.0"
+edition = "2021"
+"#,
+        )
+        .unwrap();
+
+        // Create src/ with a couple of .rs files
+        std::fs::create_dir(root.join("src")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}").unwrap();
+        std::fs::write(root.join("src/lib.rs"), "pub fn hello() {}").unwrap();
+
+        // Create a .rs build file to test extension counting
+        std::fs::write(root.join("build.rs"), "fn main() {}").unwrap();
+
+        let summary = scan_project(root);
+        assert!(
+            summary.contains("Rust"),
+            "Expected 'Rust' in summary, got: {summary}"
+        );
+        assert!(
+            summary.contains("test-crate"),
+            "Expected 'test-crate' in summary, got: {summary}"
+        );
+        assert!(
+            summary.contains("~3 .rs files"),
+            "Expected ~3 .rs files in summary, got: {summary}"
+        );
+        assert!(
+            summary.contains("No README.md found"),
+            "Expected 'No README.md found' in summary, got: {summary}"
+        );
     }
 }
