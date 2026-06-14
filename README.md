@@ -1,6 +1,6 @@
 # agentcom
 
-**agentcom** is a local coordination hub for fleets of AI coding agents. You describe what you want; the hub turns it into tasks, dispatches Claude Code, Codex, and DeepSeek agents to claim them, and keeps everything in sync through a shared task board, file-claim system, and inter-agent message bus.
+**agentcom** is a local coordination hub for fleets of AI coding agents. You describe what you want; the hub turns it into tasks, dispatches Claude Code, Codex, and DeepSeek agents to claim them, and keeps everything in sync through a shared task board, atomic file claims, and an inter-agent message bus.
 
 ```
   you
@@ -14,6 +14,15 @@ composer ───────────────────────�
                                            │
    hub: IPC bus · SQLite · ring buffers ◄──┘
 ```
+
+**When agentcom is the right tool:**
+
+- You want a cheap **DeepSeek** worker grinding mechanical tasks while a careful **Claude** agent owns the hard ones.
+- You want a **builder** and a **reviewer** running concurrently so every change is read by a second pair of eyes the moment it lands.
+- You want a free-mode fleet running overnight under a strict budget cap, working a backlog of small improvements while you sleep.
+- You want hard guarantees that two agents will never clobber the same file mid-edit.
+
+**When it's not:** if a single careful agent on a single feature is fast enough, use that. agentcom shines when you have *parallel* work, *heterogeneous* work, or *long-running* work.
 
 ---
 
@@ -70,7 +79,7 @@ cd my-project
 agentcom init
 ```
 
-This writes `agentcom.toml` with a starter two-agent fleet (builder + reviewer). Edit it to fit your project.
+This writes `agentcom.toml` with a starter two-agent fleet (builder + reviewer). Edit it to fit your project — see **[Fleet Recipes](#fleet-recipes)** below for examples that go beyond the default.
 
 **2. Start the hub**
 
@@ -102,6 +111,389 @@ If an agent needs a decision, the TUI marks it as **QUESTION** in the header and
 
 ---
 
+## Writing strong agent roles
+
+The `role` field is the single most important knob in `agentcom.toml`. A weak role makes agents fight for tasks; a strong role gives each agent a clear lane and lets the composer route work confidently.
+
+A strong role specifies four things:
+
+1. **Lane** — what files, directories, or work-types this agent owns.
+2. **Coordination protocol** — when to wait for another agent, when to file a task instead of acting, when to escalate to a human.
+3. **Done criteria** — what "task complete" means for this agent (tests pass, lint clean, doc updated, etc.).
+4. **Anti-patterns** — what this agent must *not* do, so the composer can route around it.
+
+### Bad vs. good roles
+
+| ❌ Weak | ✅ Strong |
+|---|---|
+| `"A simple software engineer"` | `"Implements server-side features in src/api/ and src/services/. Owns database migrations. Before any schema change, file a task tagged 'schema:' and wait for reviewer ack. Run 'cargo test --lib' before marking a task done. Never edit src/web/ — that is frontend's lane."` |
+| `"Reviews code"` | `"Read-only. After every task close, run 'cargo test' and 'cargo clippy --all-targets'. File follow-up tasks tagged 'review-fail:' for any regression, missing test, or unclear change. Approve silently — only speak up on problems."` |
+| `"Helps with small tasks"` | `"Handles mechanical, well-scoped tasks: typo fixes, rustfmt cleanup, adding #[derive(Debug)], renaming variables. Do NOT claim tasks tagged 'complex:' or 'architecture:', or any task without explicit done-criteria. If a task feels ambiguous, leave it."` |
+
+### A library of strong roles
+
+Copy these into your `agentcom.toml` and tune the file paths to your project.
+
+**Composer (lead coordinator) — only define this if you want to override the default:**
+
+agentcom auto-injects a sensible composer if you don't declare one, so most fleets can skip this block entirely. Define it explicitly only when you need a different role description, a tighter `allowed_tools` list, or a cheaper model.
+
+```toml
+[[agent]]
+name = "composer"
+role = """
+Lead coordinator. Convert human goals into 1-5 board tasks with explicit done-criteria
+and priorities. Match tasks to agents by their declared lane. Intervene when:
+two agents are in the same lane, a task has been open >30min with no activity,
+or a file-claim deadlock develops. Never edit code yourself — your job is routing,
+not implementation. Report blockers to the human immediately; do not try to debug
+them yourself.
+"""
+allowed_tools = ["Bash", "Read", "Glob", "Grep"]
+```
+
+**Backend builder:**
+```toml
+[[agent]]
+name = "backend"
+role = """
+Implements server-side features in src/api/, src/services/, and src/db/.
+Owns database migrations in migrations/. Before any schema change, file a task
+tagged 'schema:' and wait for reviewer ack before merging. Run 'cargo test --lib'
+before marking a task done. Never edit src/web/ — that is frontend's lane.
+If a task requires touching both backend and frontend, split it into two
+linked tasks and notify the composer.
+"""
+allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+max_turns_per_prompt = 60
+max_budget_usd = 15.0
+```
+
+**Frontend builder:**
+```toml
+[[agent]]
+name = "frontend"
+role = """
+Owns src/web/ and all React components. Coordinates with backend via the OpenAPI
+contract in src/api/openapi.yaml — if the contract needs to change, file a task
+instead of editing the file directly. Verify changes by running 'npm run dev' and
+confirming the affected route renders without console errors. Never touch
+src/api/ or src/db/.
+"""
+allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+```
+
+**Reviewer (silent approver, vocal critic):**
+```toml
+[[agent]]
+name = "reviewer"
+role = """
+Read-only watchdog. After every task close, read the diff, run 'cargo test' and
+'cargo clippy --all-targets -- -D warnings', and check that any new public API
+has a doc comment. File follow-up tasks tagged 'review-fail:<short reason>' for
+any regression, missing test, or unclear change. Approve silently — only message
+the author on problems. Never edit code or claim implementation tasks.
+"""
+allowed_tools = ["Bash", "Read", "Glob", "Grep"]
+```
+
+**Test engineer:**
+```toml
+[[agent]]
+name = "tester"
+role = """
+Owns tests/ and #[cfg(test)] modules. After each task close by another agent,
+ask: 'is this regression-proof?' If not, write the missing test in the same
+session. Run 'cargo test' after every addition. File tasks tagged 'coverage-gap:'
+when you find untested branches in code others wrote. Do not modify production
+code to make tests pass — that is the original author's job; send them a message
+instead.
+"""
+allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+```
+
+**Security auditor (read-only):**
+```toml
+[[agent]]
+name = "security"
+role = """
+Read-only. Scan newly committed code for: hardcoded secrets, SQL/command injection,
+unvalidated user input, missing auth checks, unsafe deserialization, and CSRF gaps.
+File tasks tagged 'security:<severity>' where severity is low|med|high|critical.
+For critical findings, also send the file's owner an --urgent interrupt with the
+exact line and a one-sentence exploit sketch. Never edit code yourself.
+"""
+allowed_tools = ["Bash", "Read", "Glob", "Grep"]
+```
+
+**Performance scout:**
+```toml
+[[agent]]
+name = "perf"
+role = """
+Run 'cargo bench' in benches/ after each task close. If any benchmark regresses
+>10% vs. the previous run, file a task tagged 'perf-regression:' with the bench
+name, before/after numbers, and the offending commit hash. Do NOT optimize
+speculatively — only respond to measured regressions. Keep a running log of
+benchmark history in target/criterion/.
+"""
+allowed_tools = ["Bash", "Read", "Glob", "Grep"]
+```
+
+**Docs writer:**
+```toml
+[[agent]]
+name = "docs"
+role = """
+Owns README.md, docs/, CHANGELOG.md, and rustdoc comments on public items.
+After any public API change (new pub fn, changed signature, new CLI flag, new
+config field), update docs and any affected example. Run 'cargo doc --no-deps'
+to verify nothing breaks. Tag your tasks 'docs:' so others can route review
+appropriately. Never touch src/ for anything except doc comments.
+"""
+allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+```
+
+**Refactor specialist:**
+```toml
+[[agent]]
+name = "refactor"
+role = """
+Spot and remove duplication, dead code, and over-engineered abstractions.
+NEVER start a refactor without an open task — if you spot something worth
+fixing, file the task with a clear scope and wait for it to be claimed.
+Keep diffs under 200 lines per task; split bigger changes. Run 'cargo test'
+after every change. If a refactor would touch >5 files, send the composer
+a message before claiming.
+"""
+allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+```
+
+**Junior (cheap DeepSeek worker):**
+```toml
+[[agent]]
+name = "junior"
+role = """
+Handle mechanical, well-scoped tasks: typo fixes, rustfmt cleanup, adding
+#[derive(Debug)] or #[derive(Clone)], renaming variables for clarity, adding
+missing match arms with todo!(). Do NOT claim tasks tagged 'complex:',
+'architecture:', or 'security:'. Do NOT claim tasks without explicit
+done-criteria in the description. If a task feels ambiguous, leave it for
+the senior agents.
+"""
+provider = "deepseek"
+model = "deepseek-chat"
+allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+max_budget_usd = 2.0
+```
+
+---
+
+## Fleet Recipes
+
+Complete `agentcom.toml` files for common shapes. Drop one in your project root and tune from there.
+
+> **Heads-up:** every recipe below uses the auto-injected composer. agentcom adds one for you whenever your config doesn't declare an `[[agent]] name = "composer"` block — you only need to define one yourself to customize its role or tighten its tools.
+
+### Recipe 1 — Solo + safety net (2 agents)
+
+The simplest useful fleet: one builder, one reviewer running concurrently. Reviewer catches what the builder missed. (Plus the auto-injected composer = 3 processes total.)
+
+```toml
+project_name = "my-project"
+default_provider = "claude"
+default_model = "sonnet"
+max_total_budget_usd = 10.0
+
+[[agent]]
+name = "builder"
+role = """
+Implement features across the whole codebase. Run 'cargo test' before marking
+any task done. If a task touches more than 5 files, send the human a plan
+first and wait for approval.
+"""
+allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+
+[[agent]]
+name = "reviewer"
+role = """
+Read-only. After every task close, run 'cargo test' and 'cargo clippy'. File
+follow-up tasks tagged 'review-fail:' for any regression. Approve silently.
+"""
+allowed_tools = ["Bash", "Read", "Glob", "Grep"]
+```
+
+### Recipe 2 — Backend team (3 workers + auto composer)
+
+For server-side work where tests matter as much as the code.
+
+```toml
+project_name = "api-service"
+default_provider = "claude"
+default_model = "sonnet"
+max_total_budget_usd = 25.0
+
+[[agent]]
+name = "backend"
+role = """
+Owns src/api/, src/services/, src/db/, and migrations/. Run 'cargo test --lib'
+before marking tasks done. File 'schema:' tasks before any migration.
+"""
+allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+max_budget_usd = 12.0
+
+[[agent]]
+name = "tester"
+role = """
+Owns tests/ and #[cfg(test)] modules. Add missing tests for every task closed
+by backend. Run 'cargo test' after each addition.
+"""
+allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+
+[[agent]]
+name = "reviewer"
+role = """
+Read-only. After every task close, run 'cargo test' and 'cargo clippy
+--all-targets -- -D warnings'. File 'review-fail:' tasks for regressions.
+"""
+allowed_tools = ["Bash", "Read", "Glob", "Grep"]
+```
+
+### Recipe 3 — Full-stack with a cheap junior (4 workers + auto composer)
+
+Backend and frontend run in parallel; a DeepSeek junior chews through small cleanups so the senior agents stay focused on features.
+
+```toml
+project_name = "full-stack-app"
+default_provider = "claude"
+default_model = "sonnet"
+max_total_budget_usd = 30.0
+
+[[agent]]
+name = "backend"
+role = """
+Owns src/api/, src/db/. Coordinate with frontend via src/api/openapi.yaml —
+file a 'contract-change:' task before editing it. Run 'cargo test --lib' before done.
+"""
+allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+
+[[agent]]
+name = "frontend"
+role = """
+Owns web/. Verify with 'npm run dev' and check console for errors before marking
+done. Never touch src/. Treat src/api/openapi.yaml as read-only.
+"""
+allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+
+[[agent]]
+name = "junior"
+role = """
+Mechanical fixes only: typos, formatting, derive macros, renames. Skip tasks
+tagged 'complex:' or without clear done-criteria.
+"""
+provider = "deepseek"
+model = "deepseek-chat"
+allowed_tools = ["Read", "Edit", "Write", "Glob", "Grep"]
+max_budget_usd = 2.0
+
+[[agent]]
+name = "reviewer"
+role = """
+Read-only. Run tests + lint after every close. File 'review-fail:' tasks.
+"""
+allowed_tools = ["Bash", "Read", "Glob", "Grep"]
+```
+
+### Recipe 4 — Overnight audit fleet (3 read-only workers + auto composer)
+
+No code changes — just findings. Run with `--free` overnight on a stable branch and wake up to a triaged backlog.
+
+```toml
+project_name = "audit-pass"
+default_provider = "claude"
+default_model = "sonnet"
+max_total_budget_usd = 8.0
+
+[[agent]]
+name = "security"
+role = """
+Hunt for: hardcoded secrets, injection vectors, missing auth checks,
+unsafe deserialization. File 'security:<severity>' tasks. Severities:
+low|med|high|critical. Never edit code.
+"""
+allowed_tools = ["Bash", "Read", "Glob", "Grep"]
+
+[[agent]]
+name = "perf"
+role = """
+Run 'cargo bench' and compare against target/criterion/ history. File
+'perf-regression:' tasks for >10% regressions with bench name + numbers.
+Also flag obvious algorithmic issues (O(n²) in hot paths) as 'perf-smell:' tasks.
+"""
+allowed_tools = ["Bash", "Read", "Glob", "Grep"]
+
+[[agent]]
+name = "docs-auditor"
+role = """
+Check every pub item in src/ has a rustdoc comment. Check README CLI section
+matches actual 'agentcom --help' output. File 'docs-gap:' tasks for mismatches.
+Never edit code.
+"""
+allowed_tools = ["Bash", "Read", "Glob", "Grep"]
+```
+
+Start with:
+```
+agentcom up --free "find every issue worth fixing in this codebase" --for 8h --budget 8
+```
+
+### Recipe 5 — Cost-tuned tiered fleet (2 workers + custom composer)
+
+Cheap models do most of the work; expensive Opus only claims tasks tagged `hard:`. This recipe **does** override the composer — we want it on Haiku (cheap) and we want it to use the `hard:` tag convention, which the default composer doesn't know about.
+
+```toml
+project_name = "cost-tuned"
+default_provider = "claude"
+default_model = "haiku"
+max_total_budget_usd = 12.0
+
+# Override the default composer: cheaper model + explicit tagging convention.
+[[agent]]
+name = "composer"
+role = """
+Lead coordinator. Tag tasks 'hard:' only when they require careful reasoning,
+cross-file changes, or architectural judgment. Default to plain tasks for
+mechanical work.
+"""
+model = "haiku"
+allowed_tools = ["Bash", "Read", "Glob", "Grep"]
+
+[[agent]]
+name = "junior"
+role = """
+Mechanical fixes. Skip any task tagged 'hard:'. Stop if you find yourself
+reading more than 3 files for a single task — that means it should be 'hard:'
+and you should leave it.
+"""
+provider = "deepseek"
+model = "deepseek-chat"
+allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+max_budget_usd = 3.0
+
+[[agent]]
+name = "senior"
+role = """
+Claim ONLY tasks tagged 'hard:'. Run 'cargo test' before marking done.
+If you discover a task is actually mechanical mid-work, untag and reopen
+it for the junior.
+"""
+model = "opus"
+allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+max_budget_usd = 8.0
+```
+
+---
+
 ## Configuration Reference
 
 `agentcom.toml` lives in your project root. You can run `agentcom` commands from any subdirectory — it walks upward to find the config.
@@ -125,7 +517,7 @@ Each agent is defined by an `[[agent]]` table. You can have as many as `max_agen
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `name` | string | *(required)* | Unique agent handle. Lowercase letters, digits, `-`, `_` only. Reserved: `all`, `human`, `hub` |
-| `role` | string | *(required)* | Appended to the system prompt as the agent's identity and responsibilities |
+| `role` | string | *(required)* | Appended to the system prompt as the agent's identity and responsibilities. **See [Writing strong agent roles](#writing-strong-agent-roles).** |
 | `provider` | `"claude"` \| `"codex"` \| `"deepseek"` | `default_provider` | Runtime for this agent |
 | `model` | string | `default_model` | Model override for this agent |
 | `cwd` | path | project root | Working directory for the agent process (relative paths resolve from project root) |
@@ -134,58 +526,6 @@ Each agent is defined by an `[[agent]]` table. You can have as many as `max_agen
 | `max_turns_per_prompt` | integer | *(none)* | Max autonomous turns per fed prompt. Caps a single work stretch |
 | `max_budget_usd` | float | *(none)* | Cumulative USD spend cap for this agent across the hub's lifetime |
 | `auto_restart` | bool | `true` | Automatically restart the agent if it crashes |
-
-### Annotated example config
-
-```toml
-# ─── Project ──────────────────────────────────────────────────────────────────
-project_name = "my-project"
-
-# Default provider and model for agents that don't specify their own.
-default_provider = "claude"
-default_model    = "sonnet"
-
-# Hub-wide spend guard (USD). Comment out for unbounded sessions.
-max_total_budget_usd = 20.0
-
-# How long to wait for a graceful interrupt before force-killing (seconds).
-interrupt_timeout_secs = 15
-
-# Maximum number of agents allowed at once (including the composer).
-max_agents = 8
-
-# ─── Agents ───────────────────────────────────────────────────────────────────
-
-# The composer is optional — agentcom injects a default one if you omit it.
-# Define it here to customize the role or restrict its tools.
-[[agent]]
-name    = "composer"
-role    = "Lead coordinator. Turn human goals into tasks, prevent file conflicts, recruit specialists, and report progress. Never edit code yourself."
-allowed_tools = ["Bash", "Read", "Glob", "Grep"]
-
-[[agent]]
-name    = "builder"
-role    = "Implements features and fixes. Owns src/. Coordinates with reviewer before large refactors."
-# allowed_tools lists EVERY tool the agent may use — anything not listed is denied.
-allowed_tools     = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
-max_turns_per_prompt = 50
-max_budget_usd    = 10.0
-
-[[agent]]
-name    = "reviewer"
-role    = "Reviews changes made by builder, runs tests, and files follow-up tasks for problems found."
-# Read-only tools: reviewer should not edit files.
-allowed_tools = ["Bash", "Read", "Glob", "Grep"]
-
-# Optional: lower-cost DeepSeek agent for triage and simple tasks.
-# [[agent]]
-# name     = "junior"
-# role     = "Handles well-scoped, low-complexity tasks from the board."
-# provider = "deepseek"
-# model    = "deepseek-chat"
-# allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
-# max_budget_usd = 2.0
-```
 
 ---
 
@@ -226,6 +566,8 @@ Interrupts work by tree-killing the active `codex exec` process and replaying th
 ### DeepSeek
 
 DeepSeek agents run through `agentcom-deepseek-adapter`, which calls the DeepSeek OpenAI-compatible chat API. The adapter executes shell commands the model places in fenced code blocks, bounded by `allowed_tools`.
+
+> **Security note:** DeepSeek agents execute shell commands from model output. Always set a tight `allowed_tools` allowlist and avoid pointing a DeepSeek agent at untrusted input files — a prompt-injection in the input could try to coax the model into running something dangerous. Treat DeepSeek agents like a CI runner: scope them narrowly.
 
 1. Get an API key at [platform.deepseek.com](https://platform.deepseek.com)
 2. Set the environment variable:
@@ -407,53 +749,7 @@ agentcom up --free "refactor the payment module" --for 1h --budget 8
 
 The composer is instructed to prefer high-value work and to report when nothing worth doing remains, preventing busy-work loops.
 
----
-
-## Troubleshooting
-
-**`cargo install` fails with "cannot replace agentcom.exe"**
-
-A hub is running. Stop it first:
-```
-agentcom stop
-cargo install --path . --force
-```
-
-**`agentcom up` says "claude not found"**
-
-Install and authenticate the Claude CLI, then verify `claude --version` works from the same terminal.
-
-**Codex agents stay in "starting" state**
-
-On Windows, the Microsoft Store app alias may shadow the real executable. Point agentcom to it directly:
-```
-$env:AGENTCOM_CODEX_EXE = "$env:LOCALAPPDATA\OpenAI\Codex\bin\<version-id>\codex.exe"
-```
-Run `agentcom doctor` to check what agentcom actually finds.
-
-**DeepSeek agent crashes immediately**
-
-Verify your API key is set: `echo $env:DEEPSEEK_API_KEY`. Check the Hub Log tab (press `5`) for the specific error. Common causes: missing key, invalid key, or network proxy blocking `api.deepseek.com`.
-
-**Task is stuck as "claimed" after a crash**
-
-Tasks are reset to `open` automatically on the next `agentcom up`. To reopen one in a live session:
-```
-agentcom task reopen <id>
-```
-
-**File claim is blocking an agent**
-
-See who holds it, then coordinate:
-```
-agentcom files list
-agentcom send <agent> "please release src/foo.rs when you're done"
-```
-As a last resort, restart the hub — `agentcom up` clears all stale claims.
-
-**The TUI is blank or corrupted on Windows**
-
-This can happen if a previous run left the terminal in raw mode. Open a fresh terminal window. If the issue persists, check that Windows Terminal or ConPTY is being used (not a legacy `cmd.exe` window).
+> **Tip:** Pair free mode with **[Recipe 4 — Overnight audit fleet](#recipe-4--overnight-audit-fleet-4-agents-all-read-only)** for a zero-risk, finding-only run. Wake up to a triaged backlog with no surprise edits.
 
 ---
 
@@ -492,3 +788,61 @@ cargo test
 The suite runs a real headless hub against zero-cost `mock-claude` and `mock-codex` binaries and the DeepSeek adapter's mock mode. It covers task lifecycle, message passing, interrupts, ignored-interrupt escalation, pause/resume, provider switching, file claims, free mode, recruitment, composer chat, and graceful shutdown.
 
 The protocol codec is locked against NDJSON fixtures captured from a live Claude Code CLI session.
+
+---
+
+## Troubleshooting
+
+**`cargo install` fails with "cannot replace agentcom.exe"**
+
+A hub is running. Stop it first:
+```
+agentcom stop
+cargo install --path . --force
+```
+
+**`agentcom up` says "claude not found"**
+
+Install and authenticate the Claude CLI, then verify `claude --version` works from the same terminal.
+
+**Codex agents stay in "starting" state**
+
+On Windows, the Microsoft Store app alias may shadow the real executable. Point agentcom to it directly:
+```
+$env:AGENTCOM_CODEX_EXE = "$env:LOCALAPPDATA\OpenAI\Codex\bin\<version-id>\codex.exe"
+```
+Run `agentcom doctor` to check what agentcom actually finds.
+
+**DeepSeek agent crashes immediately**
+
+Verify your API key is set: `echo $env:DEEPSEEK_API_KEY`. Check the Hub Log tab (press `5`) for the specific error. Common causes: missing key, invalid key, or network proxy blocking `api.deepseek.com`.
+
+**Two agents keep grabbing the same kind of task**
+
+Their roles overlap. Tighten the lanes — give each one a specific directory or task tag, and add an explicit "never claim X" line to at least one. See **[Writing strong agent roles](#writing-strong-agent-roles)**.
+
+**Task is stuck as "claimed" after a crash**
+
+Tasks are reset to `open` automatically on the next `agentcom up`. To reopen one in a live session:
+```
+agentcom task reopen <id>
+```
+
+**File claim is blocking an agent**
+
+See who holds it, then coordinate:
+```
+agentcom files list
+agentcom send <agent> "please release src/foo.rs when you're done"
+```
+As a last resort, restart the hub — `agentcom up` clears all stale claims.
+
+**The TUI is blank or corrupted on Windows**
+
+This can happen if a previous run left the terminal in raw mode. Open a fresh terminal window. If the issue persists, check that Windows Terminal or ConPTY is being used (not a legacy `cmd.exe` window).
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).

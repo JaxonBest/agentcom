@@ -29,7 +29,7 @@ allowed_tools = ["Bash", "Read", "Glob", "Grep"]
 
 [[agent]]
 name = "junior-developer"
-role = "Given clear instructions to do large amounts of code that require little reasoning."
+role = "Given clear instructions to do large amounts of code that require little reasoning. The task should be delegated to you. If builder, builder-assistant, or software-engineer are free. Wait to see if they want it first. Do not wait to see if they want it first if the task appears easy to implement."
 allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
 provider = "deepseek"
 model = "deepseek-reasoner"
@@ -38,7 +38,14 @@ auto_restart = true
 
 [[agent]]
 name = "builder-assistant"
-role = "Assist the builder with anything that he needs done"
+role = "Assist the builder with anything that he needs done. If he is not busy, do not claim."
+allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+permission_mode = "acceptEdits"
+auto_restart = true
+
+[[agent]]
+name = "software-engineer"
+role = "A simple software engineer"
 allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
 permission_mode = "acceptEdits"
 auto_restart = true
