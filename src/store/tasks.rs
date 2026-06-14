@@ -28,6 +28,7 @@ fn task_from_row(row: &Row) -> rusqlite::Result<Task> {
         tags: parse_tags(&tags_raw),
         pinned: pinned != 0,
         due_at: row.get("due_at").unwrap_or(None),
+        timeout_mins: row.get::<_, Option<i64>>("timeout_mins").unwrap_or(None).map(|v| v as u64),
         created_by: row.get("created_by")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
@@ -558,6 +559,42 @@ impl Store {
         Ok(())
     }
 
+    /// Set or clear the per-task timeout (minutes claimed before auto-block).
+    pub fn task_set_timeout(&self, id: i64, timeout_mins: Option<u64>) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let updated = conn.execute(
+            "UPDATE tasks SET timeout_mins = ?1, updated_at = ?2 WHERE id = ?3",
+            params![timeout_mins.map(|v| v as i64), now_ts(), id],
+        )?;
+        if updated == 0 {
+            bail!("task #{id} not found");
+        }
+        Ok(())
+    }
+
+    /// Return tasks that have been claimed past their per-task timeout.
+    /// Scheduler calls this to find tasks to auto-block.
+    pub fn timed_out_tasks(&self) -> Result<Vec<Task>> {
+        let conn = self.conn.lock().unwrap();
+        // Find claimed tasks where (now - updated_at) > timeout_mins * 60
+        let mut stmt = conn.prepare_cached(
+            "SELECT * FROM tasks
+             WHERE status = 'claimed'
+               AND timeout_mins IS NOT NULL
+               AND (strftime('%s','now') - updated_at) > timeout_mins * 60",
+        )?;
+        let collected: Vec<Task> = {
+            let rows = stmt.query_map([], task_from_row)?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        drop(stmt);
+        let mut tasks = collected;
+        for t in &mut tasks {
+            load_deps(&conn, t)?;
+        }
+        Ok(tasks)
+    }
+
     /// Set or clear the due date for a task.
     /// Pass `None` to clear an existing due date.
     pub fn task_set_due(&self, id: i64, due_at: Option<i64>) -> Result<()> {
@@ -633,6 +670,7 @@ impl Store {
                 tags: t.tags,
                 depends_on: t.depends_on,
                 due_at: t.due_at,
+                timeout_mins: t.timeout_mins,
             })
             .collect();
         Ok(snapshots)
@@ -695,6 +733,13 @@ impl Store {
                 let _ = conn.execute(
                     "UPDATE tasks SET due_at = ?1 WHERE id = ?2",
                     params![snap.due_at, new_id],
+                );
+            }
+            // Restore timeout if present.
+            if let Some(tm) = snap.timeout_mins {
+                let _ = conn.execute(
+                    "UPDATE tasks SET timeout_mins = ?1 WHERE id = ?2",
+                    params![tm as i64, new_id],
                 );
             }
         }
@@ -883,6 +928,44 @@ mod tests {
     }
 
     #[test]
+    fn timed_out_tasks_returned() {
+        let s = Store::open_in_memory().unwrap();
+        let a = s.task_add("short", "", 1, &[], "human").unwrap();
+        let b = s.task_add("long", "", 1, &[], "human").unwrap();
+
+        s.task_claim(a, "alice").unwrap();
+        s.task_claim(b, "bob").unwrap();
+
+        // Set a 1-minute timeout and backdate updated_at by 2 minutes to simulate expiry.
+        s.task_set_timeout(a, Some(1)).unwrap();
+        {
+            let conn = s.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE tasks SET updated_at = updated_at - 120 WHERE id = ?1",
+                [a],
+            ).unwrap();
+        }
+        s.task_set_timeout(b, Some(60)).unwrap(); // 60 min — not expired yet
+
+        let timed_out = s.timed_out_tasks().unwrap();
+        assert_eq!(timed_out.len(), 1);
+        assert_eq!(timed_out[0].id, a);
+    }
+
+    #[test]
+    fn timeout_set_and_clear() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.task_add("t", "", 2, &[], "human").unwrap();
+        s.task_set_timeout(id, Some(30)).unwrap();
+        let t = s.task_get(id).unwrap().unwrap();
+        assert_eq!(t.timeout_mins, Some(30));
+
+        s.task_set_timeout(id, None).unwrap();
+        let t = s.task_get(id).unwrap().unwrap();
+        assert_eq!(t.timeout_mins, None);
+    }
+
+    #[test]
     fn due_date_overdue_task_sorted_before_non_overdue() {
         let s = Store::open_in_memory().unwrap();
         let normal = s.task_add("normal", "", 1, &[], "human").unwrap();
@@ -1024,6 +1107,7 @@ mod tests {
                 depends_on: vec![],
                 source_id: None,
                 due_at: None,
+                timeout_mins: None,
             },
             TaskSnapshot {
                 title: "t2".into(),
@@ -1034,6 +1118,7 @@ mod tests {
                 depends_on: vec![],
                 source_id: None,
                 due_at: None,
+                timeout_mins: None,
             },
         ];
         let ids = dst.bulk_import_tasks(&snaps, "bot").unwrap();

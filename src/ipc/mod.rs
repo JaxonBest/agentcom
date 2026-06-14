@@ -43,6 +43,9 @@ pub enum Request {
         description: String,
         priority: i64,
         depends_on: Vec<i64>,
+        /// Auto-block the task if it stays claimed for more than this many minutes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        timeout_mins: Option<u64>,
     },
     TaskList {
         status: Option<String>,

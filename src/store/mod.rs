@@ -125,6 +125,9 @@ pub struct Task {
     /// Unix timestamp after which this task is considered overdue.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due_at: Option<i64>,
+    /// Auto-block this task if it stays claimed for more than this many minutes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_mins: Option<u64>,
     pub created_by: String,
     pub created_at: i64,
     pub updated_at: i64,
@@ -149,6 +152,8 @@ pub struct TaskSnapshot {
     pub source_id: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub due_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_mins: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
