@@ -18,10 +18,39 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let _ = cli::JSON_MODE.set(cli.json);
     match cli.command {
-        Command::Init { force, template, analyze: _ } => {
+        Command::Init { force, template, analyze } => {
             let cwd = std::env::current_dir()?;
-            let path = config::write_example_template(&cwd, force, template)?;
-            println!("wrote {}", path.display());
+            if analyze {
+                let summary = config::scan_project(&cwd);
+                println!("detected: {summary}");
+                let prompt = format!(
+                    "You are configuring agentcom, a multi-agent CLI framework. \
+                     Given this project: {summary}\n\n\
+                     Output ONLY a valid agentcom.toml config (no markdown, no explanation). \
+                     Choose appropriate agent roles (composer, builder, reviewer etc.) \
+                     and set project_name. Use model claude-sonnet-4-6 for all agents."
+                );
+                let out = std::process::Command::new("claude")
+                    .args(["-p", &prompt])
+                    .output()
+                    .context("claude not found — install Claude Code to use --analyze")?;
+                let toml_str = String::from_utf8_lossy(&out.stdout);
+                let dest = cwd.join(crate::paths::CONFIG_FILE);
+                if dest.exists() && !force {
+                    anyhow::bail!("{} already exists (use --force to overwrite)", dest.display());
+                }
+                if toml::from_str::<toml::Value>(&toml_str).is_ok() {
+                    std::fs::write(&dest, toml_str.as_ref())?;
+                    println!("wrote {} (AI-generated)", dest.display());
+                } else {
+                    eprintln!("warning: AI output was not valid TOML — falling back to template");
+                    let path = config::write_example_template(&cwd, force, template)?;
+                    println!("wrote {}", path.display());
+                }
+            } else {
+                let path = config::write_example_template(&cwd, force, template)?;
+                println!("wrote {}", path.display());
+            }
             println!("edit your agent fleet, then run: agentcom up");
             Ok(())
         }

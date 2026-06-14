@@ -596,7 +596,6 @@ pub fn scan_project(root: &Path) -> String {
 
     walk(
         root,
-        root,
         0,
         3,
         skip_dirs,
