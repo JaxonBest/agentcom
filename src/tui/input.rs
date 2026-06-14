@@ -46,10 +46,27 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         return;
     }
 
-    // Task detail popup: Esc closes it.
-    if app.task_detail_id.is_some() {
-        if key.code == KeyCode::Esc {
-            app.task_detail_id = None;
+    // Task detail popup: Esc closes, 'r' reopens, 'i' toggles pin.
+    if let Some(id) = app.task_detail_id {
+        match key.code {
+            KeyCode::Esc => app.task_detail_id = None,
+            KeyCode::Char('r') => {
+                app.send_request(Request::TaskReopen { id });
+                app.flash = Some(format!("reopened task #{id}"));
+                app.task_detail_id = None;
+            }
+            KeyCode::Char('i') => {
+                let pinned = app.tasks.iter().find(|t| t.id == id).map(|t| t.pinned).unwrap_or(false);
+                if pinned {
+                    app.send_request(Request::TaskUnpin { id });
+                    app.flash = Some(format!("unpinned task #{id}"));
+                } else {
+                    app.send_request(Request::TaskPin { id });
+                    app.flash = Some(format!("pinned task #{id}"));
+                }
+                app.task_detail_id = None;
+            }
+            _ => {}
         }
         return;
     }
@@ -307,6 +324,7 @@ fn handle_modal_key(app: &mut App, key: KeyEvent) {
                         depends_on: vec![],
                         timeout_mins: None,
                         requires: vec![],
+                        recur: None,
                     });
                     app.flash = Some("task added".into());
                 }

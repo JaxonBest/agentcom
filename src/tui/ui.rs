@@ -867,7 +867,14 @@ fn draw_task_detail(f: &mut Frame, task: &crate::store::Task, area: Rect) {
     }
 
     lines.push(Line::from(""));
-    lines.push(Line::from(Span::styled("Esc — close", Style::default().fg(Color::DarkGray))));
+    lines.push(Line::from(vec![
+        Span::styled("Esc", Style::default().fg(Color::DarkGray)),
+        Span::styled(" — close  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("r", Style::default().fg(Color::DarkGray)),
+        Span::styled(" — reopen  ", Style::default().fg(Color::DarkGray)),
+        Span::styled("i", Style::default().fg(Color::DarkGray)),
+        Span::styled(" — pin/unpin", Style::default().fg(Color::DarkGray)),
+    ]));
 
     f.render_widget(
         Paragraph::new(lines)
