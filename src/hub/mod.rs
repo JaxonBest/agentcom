@@ -1119,17 +1119,16 @@ impl Hub {
             return;
         }
 
-        // Build the author string
-        let author_name = self
-            .cfg
-            .auto_commit_author_name
-            .as_deref()
+        // Build the author string — per-agent override, then global, then defaults
+        let agent_cfg = self.cfg.agents.iter().find(|a| a.name == agent);
+        let author_name = agent_cfg
+            .and_then(|a| a.auto_commit_author_name.as_deref())
+            .or_else(|| self.cfg.auto_commit_author_name.as_deref())
             .unwrap_or(agent);
         let default_email = format!("{agent}@agentcom.local");
-        let author_email = self
-            .cfg
-            .auto_commit_author_email
-            .as_deref()
+        let author_email = agent_cfg
+            .and_then(|a| a.auto_commit_author_email.as_deref())
+            .or_else(|| self.cfg.auto_commit_author_email.as_deref())
             .unwrap_or(&default_email);
         let author = format!("{author_name} <{author_email}>");
 
@@ -1141,18 +1140,15 @@ impl Hub {
             format!("{agent}: {file_count} files changed")
         };
 
-        match Command::new("git")
-            .args([
-                "commit",
-                "--author",
-                &author,
-                "-m",
-                &summary,
-                "--no-verify",
-            ])
-            .current_dir(&self.project_root)
-            .output()
-        {
+        let mut commit_cmd = Command::new("git");
+        commit_cmd
+            .args(["commit", "--author", &author, "-m", &summary])
+            .current_dir(&self.project_root);
+        if self.cfg.auto_commit_skip_hooks {
+            commit_cmd.arg("--no-verify");
+        }
+
+        match commit_cmd.output() {
             Ok(o) if o.status.success() => {
                 let hash = String::from_utf8_lossy(&o.stdout)
                     .lines()
@@ -1166,7 +1162,18 @@ impl Hub {
             }
             Ok(o) => {
                 let stderr = String::from_utf8_lossy(&o.stderr);
-                self.log(format!("auto-commit: git commit failed for {agent}: {stderr}"));
+                // Exit code 1 with hook output means a pre-commit hook rejected
+                // the commit — surface it clearly so the operator can act.
+                let hint = if o.status.code() == Some(1)
+                    && (stderr.contains("hook") || stderr.contains("Hook"))
+                {
+                    " (pre-commit hook rejected — set auto_commit_skip_hooks=true to bypass)"
+                } else {
+                    ""
+                };
+                self.log(format!(
+                    "auto-commit: git commit failed for {agent}{hint}: {stderr}"
+                ));
             }
             Err(e) => {
                 self.log(format!("auto-commit: failed to run git for {agent}: {e}"));

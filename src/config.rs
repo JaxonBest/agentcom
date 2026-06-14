@@ -39,6 +39,11 @@ pub struct HubConfig {
     /// "<agent>@agentcom.local").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_commit_author_email: Option<String>,
+    /// Skip pre-commit hooks when auto-committing (--no-verify). Off by
+    /// default — hooks enforce project policy and should run unless you have a
+    /// specific reason to bypass them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auto_commit_skip_hooks: bool,
     #[serde(default, rename = "agent")]
     pub agents: Vec<AgentConfig>,
 }
@@ -70,6 +75,14 @@ pub struct AgentConfig {
     pub max_budget_usd: Option<f64>,
     #[serde(default = "default_true")]
     pub auto_restart: bool,
+    /// Override the global auto-commit author name for this agent.
+    /// Falls back to the agent's name if not set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_commit_author_name: Option<String>,
+    /// Override the global auto-commit author email for this agent.
+    /// Falls back to the agent's email or "<agent>@agentcom.local" if not set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_commit_author_email: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
@@ -158,6 +171,8 @@ pub fn composer_default(default_model: Option<&str>) -> AgentConfig {
         max_turns_per_prompt: Some(30),
         max_budget_usd: None,
         auto_restart: true,
+        auto_commit_author_name: None,
+        auto_commit_author_email: None,
     }
 }
 
