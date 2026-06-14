@@ -83,6 +83,11 @@ pub struct AgentConfig {
     /// Falls back to the agent's email or "<agent>@agentcom.local" if not set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_commit_author_email: Option<String>,
+    /// Extra environment variables injected into this agent's child process.
+    /// Useful for per-agent API keys, debug flags, or tool configuration.
+    /// Example: env = { ANTHROPIC_API_KEY = "sk-...", DEBUG = "1" }
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
@@ -173,6 +178,7 @@ pub fn composer_default(default_model: Option<&str>) -> AgentConfig {
         auto_restart: true,
         auto_commit_author_name: None,
         auto_commit_author_email: None,
+        env: BTreeMap::new(),
     }
 }
 
@@ -363,6 +369,9 @@ allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
 # Restart the agent automatically if it exits.
 # Values: true | false                     Default: true
 # auto_restart = true
+# Extra environment variables injected into this agent's process.
+# Useful for per-agent API keys, debug flags, etc.
+# env = { ANTHROPIC_API_KEY = "sk-...", DEBUG = "1" }
 "#;
 
     let reviewer = r#"
@@ -816,5 +825,28 @@ edition = "2021"
             summary.contains("No README.md found"),
             "Expected 'No README.md found' in summary, got: {summary}"
         );
+    }
+
+    #[test]
+    fn agent_env_field_roundtrips() {
+        let toml = r#"
+project_name = "x"
+[[agent]]
+name = "worker"
+role = "does things"
+[agent.env]
+MY_KEY = "hello"
+ANOTHER = "world"
+"#;
+        let cfg: HubConfig = toml::from_str(toml).unwrap();
+        cfg.validate().unwrap();
+        let env = &cfg.agents[0].env;
+        assert_eq!(env.get("MY_KEY").map(String::as_str), Some("hello"));
+        assert_eq!(env.get("ANOTHER").map(String::as_str), Some("world"));
+
+        // Re-serialize and re-parse to confirm roundtrip.
+        let text = toml::to_string(&cfg).unwrap();
+        let cfg2: HubConfig = toml::from_str(&text).unwrap();
+        assert_eq!(cfg2.agents[0].env, cfg.agents[0].env);
     }
 }

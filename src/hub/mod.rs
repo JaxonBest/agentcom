@@ -6,6 +6,7 @@
 pub mod events;
 pub mod interrupt;
 pub mod scheduler;
+pub mod webhook;
 
 use crate::agent::{spawn, AgentRuntime, AgentState, WriterCmd};
 use crate::config::HubConfig;
@@ -1088,10 +1089,19 @@ impl Hub {
             Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
             _ => return,
         };
+        // Also pick up new (untracked) files within the claimed paths.
+        let untracked = Command::new("git")
+            .args(["ls-files", "--others", "--exclude-standard", "--"])
+            .args(&paths)
+            .current_dir(&self.project_root)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default();
 
         let all_modified: Vec<&str> = modified
             .lines()
             .chain(unstaged.lines())
+            .chain(untracked.lines())
             .filter(|l| !l.is_empty())
             .collect();
         if all_modified.is_empty() {

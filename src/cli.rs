@@ -312,6 +312,11 @@ pub enum AgentCmd {
         /// Git author email for auto-commits by this agent (default: <agent>@agentcom.local)
         #[arg(long)]
         auto_commit_author_email: Option<String>,
+        /// Extra environment variables injected into this agent's process (repeatable)
+        ///
+        /// Example: --env ANTHROPIC_API_KEY=sk-... --env DEBUG=1
+        #[arg(long = "env", value_name = "KEY=VALUE")]
+        env_vars: Vec<String>,
     },
     /// List configured agents (with live state if the hub is running)
     List,
@@ -519,7 +524,15 @@ pub async fn run_agent_cmd(cmd: AgentCmd) -> Result<()> {
             no_spawn,
             auto_commit_author_name,
             auto_commit_author_email,
+            env_vars,
         } => {
+            let env: std::collections::BTreeMap<String, String> = env_vars
+                .into_iter()
+                .filter_map(|s| {
+                    let (k, v) = s.split_once('=')?;
+                    Some((k.to_string(), v.to_string()))
+                })
+                .collect();
             let config = crate::config::AgentConfig {
                 name: name.clone(),
                 role,
@@ -537,7 +550,7 @@ pub async fn run_agent_cmd(cmd: AgentCmd) -> Result<()> {
                 auto_restart: !no_auto_restart,
                 auto_commit_author_name,
                 auto_commit_author_email,
-                env: std::collections::BTreeMap::new(),
+                env,
             };
             // Validate the combined config first; only persist after the
             // hub (if running) has also accepted — a cap rejection must not
