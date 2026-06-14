@@ -556,16 +556,33 @@ fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
                 _ => "",
             };
             let extra: String = extra.chars().take(35).collect();
+            let now_ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let is_overdue = t.due_at.map(|d| d < now_ts).unwrap_or(false);
+            let row_style = if is_overdue && t.status != TaskStatus::Done {
+                Style::default().fg(Color::Red)
+            } else {
+                row_style
+            };
+
+            let mut prefix = String::new();
+            if t.pinned { prefix.push_str("[pin] "); }
+            if is_overdue && t.status != TaskStatus::Done { prefix.push_str("[DUE] "); }
+
             let dep_marker = if !t.depends_on.is_empty() {
                 format!("[{}]", t.depends_on.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join(","))
             } else {
                 String::new()
             };
-            let title_with_deps = if dep_marker.is_empty() {
-                t.title.clone()
+            let tag_marker = if !t.tags.is_empty() {
+                format!(" {}", t.tags.iter().map(|l| format!("[{l}]")).collect::<Vec<_>>().join(""))
             } else {
-                format!("{} {}", t.title, dep_marker)
+                String::new()
             };
+            let title_cell = format!("{}{}{}{}", prefix, t.title, dep_marker, tag_marker);
+
             let selected = i == cursor;
             let base_style = if selected {
                 row_style.add_modifier(Modifier::REVERSED)
@@ -577,7 +594,7 @@ fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
                 Cell::from(format!("p{}", t.priority)).style(priority_style(t.priority)),
                 Cell::from(t.status.as_str()),
                 Cell::from(t.claimed_by.clone().unwrap_or_default()),
-                Cell::from(title_with_deps),
+                Cell::from(title_cell),
                 Cell::from(extra),
             ])
             .style(base_style)
@@ -765,14 +782,37 @@ fn draw_task_detail(f: &mut Frame, task: &crate::store::Task, area: Rect) {
         Span::styled(format!("#{} ", task.id), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         Span::styled(task.title.clone(), Style::default().add_modifier(Modifier::BOLD)),
     ]));
-    lines.push(Line::from(vec![
+    let mut meta_spans = vec![
         Span::styled(format!("status: {}", task.status.as_str()), Style::default().fg(Color::Cyan)),
         Span::raw(format!("  priority: p{}", task.priority)),
-        Span::raw(task.claimed_by.as_deref().map(|a| format!("  agent: {a}")).unwrap_or_default()),
-    ]));
+    ];
+    if let Some(agent) = &task.claimed_by {
+        meta_spans.push(Span::raw(format!("  agent: {agent}")));
+    }
+    if task.pinned {
+        meta_spans.push(Span::styled("  [pinned]", Style::default().fg(Color::Yellow)));
+    }
+    lines.push(Line::from(meta_spans));
     if !task.depends_on.is_empty() {
         let deps = task.depends_on.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join(", ");
         lines.push(Line::from(Span::styled(format!("depends on: {deps}"), Style::default().fg(Color::DarkGray))));
+    }
+    if !task.tags.is_empty() {
+        let tag_str = task.tags.iter().map(|l| format!("[{l}]")).collect::<Vec<_>>().join(" ");
+        lines.push(Line::from(Span::styled(format!("tags: {tag_str}"), Style::default().fg(Color::Magenta))));
+    }
+    if let Some(due) = task.due_at {
+        let now_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let overdue = due < now_ts;
+        let label = if overdue { "due: OVERDUE" } else { "due:" };
+        let color = if overdue { Color::Red } else { Color::Cyan };
+        lines.push(Line::from(Span::styled(
+            format!("{} {}", label, due),
+            Style::default().fg(color),
+        )));
     }
     lines.push(Line::from(""));
 
