@@ -580,6 +580,16 @@ pub enum AgentCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Show declared capabilities and which open tasks this agent qualifies for
+    ///
+    /// Examples:
+    ///   agentcom agent caps builder
+    ///   agentcom agent capabilities reviewer
+    #[command(alias = "caps")]
+    Capabilities {
+        /// Agent name to inspect
+        name: String,
+    },
 }
 
 #[derive(Args, Clone)]
@@ -942,7 +952,7 @@ pub async fn run_agent_cmd(cmd: AgentCmd) -> Result<()> {
             let resp = client.request(&Request::AgentSwapModel { agent: name, model }).await?;
             print_simple(resp)
         }
-        AgentCmd::Budget { .. } => {
+        AgentCmd::Budget { .. } | AgentCmd::Capabilities { .. } => {
             unreachable!("handled in main before run_agent_cmd")
         }
         AgentCmd::Remove { name, no_stop } => {

@@ -85,6 +85,7 @@ async fn main() -> Result<()> {
             run_up(agents, tasks, headless, free_mode, budget, restart).await
         }
         Command::Agent(cli::AgentCmd::Budget { agent, json }) => run_agent_budget(agent, json),
+        Command::Agent(cli::AgentCmd::Capabilities { name }) => run_agent_capabilities(name),
         Command::Agent(cmd) => cli::run_agent_cmd(cmd).await,
         Command::Doctor => run_doctor().await,
         Command::Check => run_check(),
@@ -817,6 +818,52 @@ fn run_agent_budget(agent: Option<String>, json_out: bool) -> Result<()> {
             "{:<14} ${:>9.4}  {:>8}  ${:>11.4}  ${:>13.4}  ({:.1}h active)",
             r.agent, r.total_usd, r.turns, r.cost_per_turn, r.burn_rate_usd_per_hour, active_h
         );
+    }
+    Ok(())
+}
+
+fn run_agent_capabilities(name: String) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let project_root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+    let cfg = config::HubConfig::load(&project_root)?;
+    let agent = cfg.agents.iter().find(|a| a.name == name)
+        .ok_or_else(|| anyhow::anyhow!("agent '{name}' not found in agentcom.toml"))?;
+    let caps = agent.capabilities.clone();
+    if caps.is_empty() {
+        println!("{name}: no capabilities declared");
+    } else {
+        println!("{name} capabilities: {}", caps.join(", "));
+    }
+    let db = paths::db_path(&project_root)?;
+    if !db.exists() {
+        println!("(no hub database — cannot check task requires)");
+        return Ok(());
+    }
+    let store = store::Store::open(&db)?;
+    let tasks = store.task_list(None, None)?;
+    let open_with_req: Vec<_> = tasks.iter()
+        .filter(|t| t.status == store::TaskStatus::Open && !t.requires.is_empty())
+        .collect();
+    if open_with_req.is_empty() {
+        println!("no open tasks have requires constraints");
+        return Ok(());
+    }
+    println!("\n{:<6} {:<40} {:<16} {}", "ID", "TITLE", "REQUIRES", "QUALIFIES");
+    println!("{}", "-".repeat(80));
+    for t in &open_with_req {
+        let qualifies = t.requires.iter().all(|r| caps.contains(r));
+        let missing: Vec<_> = t.requires.iter().filter(|r| !caps.contains(*r)).collect();
+        let qual_str = if qualifies {
+            "yes".to_string()
+        } else {
+            format!("no (missing: {})", missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(","))
+        };
+        println!("{:<6} {:<40} {:<16} {}",
+            t.id,
+            &t.title[..t.title.len().min(38)],
+            t.requires.join(","),
+            qual_str);
     }
     Ok(())
 }
