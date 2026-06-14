@@ -373,7 +373,7 @@ fn run_logs(agent_filter: Option<String>, lines: usize, follow: bool) -> Result<
     }
 
     // Oldest first so we can stream them in order and take last N overall.
-    entries.sort_by(|a, b| a.1.cmp(&b.1));
+    entries.sort_by_key(|a| a.1);
 
     let filter = agent_filter.as_deref().map(|s| s.to_lowercase());
 

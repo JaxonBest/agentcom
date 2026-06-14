@@ -580,10 +580,7 @@ fn print_status(resp: Response) -> Result<()> {
             if let Some(free) = free {
                 println!("  FREE MODE  {free}");
             }
-            println!(
-                "\n  {:<14} {:<8} {:<13} {:<9} {}",
-                "NAME", "PROVIDER", "STATE", "COST", "TURNS"
-            );
+            println!("\n  {:<14} {:<8} {:<13} {:<9} TURNS", "NAME", "PROVIDER", "STATE", "COST");
             for a in agents {
                 let detail = a.detail.map(|d| format!("\n    {d}")).unwrap_or_default();
                 println!(

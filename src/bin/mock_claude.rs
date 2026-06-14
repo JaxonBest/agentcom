@@ -3,26 +3,16 @@
 //! interrupts, crash handling) in `cargo test` at zero API cost.
 //!
 //! Behavior is scripted through environment variables:
-//! - `MOCK_SCRIPT`        — path to an NDJSON file; line N describes the
-//!                          response to the Nth user message:
-//!                          {"text": "...",            assistant text to emit
-//!                           "run": ["cmd", ...],      shell commands to run first
-//!                                                     (lets a fake agent call the
-//!                                                      real `agentcom` CLI)
-//!                           "sleep_ms": 100,          delay before responding
-//!                           "cost": 0.01,             added to cumulative total
-//!                           "await_interrupt": true,  start the turn but never
-//!                                                     finish it (no result) —
-//!                                                     only an interrupt ends it
-//!                           "exit": true}             die instead of responding
-//!                          When the script runs out, every further message
-//!                          gets a plain text + result response.
-//! - `MOCK_SCRIPT_DIR`    — directory of per-agent scripts; the file
-//!                          `<dir>/<AGENTCOM_AGENT>.ndjson` takes precedence
-//!                          over MOCK_SCRIPT (the hub sets AGENTCOM_AGENT).
+//! - `MOCK_SCRIPT` — path to an NDJSON file; line N describes the
+//!   response to the Nth user message:
+//!   `{"text": "...", "run": ["cmd", ...], "sleep_ms": 100, "cost": 0.01,
+//!   "await_interrupt": true, "exit": true}`
+//!   When the script runs out, every further message gets a plain text + result response.
+//! - `MOCK_SCRIPT_DIR` — directory of per-agent scripts; the file
+//!   `<dir>/<AGENTCOM_AGENT>.ndjson` takes precedence over MOCK_SCRIPT.
 //! - `MOCK_IGNORE_INTERRUPT=1` — swallow control_requests without aborting
-//!                          (exercises the hub's kill/escalation path).
-//! - `MOCK_SESSION_ID`    — session id for the init event (default: random-ish).
+//!   (exercises the hub's kill/escalation path).
+//! - `MOCK_SESSION_ID` — session id for the init event (default: random-ish).
 
 use serde_json::{json, Value};
 use std::io::{BufRead, Write};

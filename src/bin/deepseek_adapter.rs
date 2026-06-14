@@ -600,6 +600,7 @@ fn walk_glob(root: &Path, dir: &Path, pattern: &str, out: &mut Vec<String>) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn tool_grep(
     pattern: &str,
     search_path: Option<&str>,
@@ -625,7 +626,7 @@ fn tool_grep(
 
     // 'type' maps to a recursive glob (e.g. "rs" -> "**/*.rs")
     let type_glob = file_type.map(|t| format!("**/*.{t}"));
-    let effective_glob: Option<&str> = glob_filter.or_else(|| type_glob.as_deref());
+    let effective_glob: Option<&str> = glob_filter.or(type_glob.as_deref());
 
     let mut file_paths: Vec<PathBuf> = Vec::new();
     if base.is_file() {
@@ -682,8 +683,8 @@ fn tool_grep(
                     is_match_line[m] = true;
                     let start = m.saturating_sub(context_before);
                     let end = (m + context_after + 1).min(lines.len());
-                    for i in start..end {
-                        included[i] = true;
+                    for included_slot in included.iter_mut().take(end).skip(start) {
+                        *included_slot = true;
                     }
                 }
 
