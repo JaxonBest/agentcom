@@ -329,6 +329,23 @@ impl Hub {
     /// Main loop. Returns when shutdown completes.
     pub async fn run(&mut self) -> Result<()> {
         self.fire_webhook(webhook::Payload::new(webhook::Event::HubStart));
+
+        // agentcom.toml may contain webhook_secret; warn if others can read it.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let cfg_path = self.project_root.join(crate::paths::CONFIG_FILE);
+            if let Ok(meta) = std::fs::metadata(&cfg_path) {
+                let mode = meta.permissions().mode();
+                if mode & 0o044 != 0 {
+                    tracing::warn!(
+                        "agentcom.toml is readable by group or others (mode 0{:03o}) — consider: chmod 600 agentcom.toml",
+                        mode & 0o777
+                    );
+                }
+            }
+        }
+
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 

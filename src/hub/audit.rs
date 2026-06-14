@@ -23,11 +23,15 @@ impl AuditLog {
     /// Append one JSON event line. Silently ignores I/O errors — audit
     /// failures must never crash the hub.
     pub fn write(&self, event: &str, agent: &str, extra: serde_json::Value) {
-        let Ok(mut f) = std::fs::OpenOptions::new()
-            .append(true)
-            .create(true)
-            .open(&self.path)
-        else {
+        let mut opts = std::fs::OpenOptions::new();
+        opts.append(true).create(true);
+        // Restrict new files to owner-only so audit events stay private.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let Ok(mut f) = opts.open(&self.path) else {
             return;
         };
         let ts = crate::store::now_ts();
@@ -81,5 +85,19 @@ mod tests {
         let log = AuditLog::new(Path::new("/nonexistent/path"));
         // Must not panic — audit errors are silently swallowed.
         log.write("agent_spawn", "builder", serde_json::json!({}));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_log_created_with_0600_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = TempDir::new().unwrap();
+        let log = AuditLog::new(dir.path());
+        log.write("task_claim", "builder", serde_json::json!({"task_id": 1}));
+        let mode = fs::metadata(dir.path().join("audit.log"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "audit.log must be owner-read/write only");
     }
 }
