@@ -506,15 +506,7 @@ pub fn render_with_agent(project_root: &Path, agent: &AgentConfig) -> Result<(Pa
     Ok((path, text))
 }
 
-pub fn write_example(project_root: &Path, force: bool) -> Result<PathBuf> {
-    write_example_template(project_root, force, ConfigTemplate::Team)
-}
-
-pub fn write_example_template(
-    project_root: &Path,
-    force: bool,
-    template: ConfigTemplate,
-) -> Result<PathBuf> {
+pub fn write_example(project_root: &Path, force: bool, template: ConfigTemplate) -> Result<PathBuf> {
     let path = project_root.join(crate::paths::CONFIG_FILE);
     if path.exists() && !force {
         bail!(
