@@ -881,7 +881,17 @@ impl Hub {
                 timeout_mins: _,
                 requires,
                 ..
-            } => match self
+            } => {
+                if title.trim().is_empty() {
+                    return Response::err("task title cannot be empty");
+                }
+                if title.len() > 200 {
+                    return Response::err(format!("task title too long ({} chars, max 200)", title.len()));
+                }
+                if description.len() > 4000 {
+                    return Response::err(format!("task description too long ({} chars, max 4000)", description.len()));
+                }
+                match self
                 .store
                 .task_add(&title, &description, priority, &depends_on, identity)
             {
@@ -897,7 +907,8 @@ impl Hub {
                     Response::ok_msg(format!("created task #{id}"))
                 }
                 Err(e) => Response::err(e.to_string()),
-            },
+                }
+            }
             Request::TaskList { status, search, tag, .. } => {
                 let status = match status.as_deref() {
                     None => None,
@@ -1022,7 +1033,15 @@ impl Hub {
                 description,
                 priority,
                 ..
-            } => match self
+            } => {
+                if let Some(ref t) = title {
+                    if t.trim().is_empty() { return Response::err("task title cannot be empty"); }
+                    if t.len() > 200 { return Response::err(format!("task title too long ({} chars, max 200)", t.len())); }
+                }
+                if let Some(ref d) = description {
+                    if d.len() > 4000 { return Response::err(format!("task description too long ({} chars, max 4000)", d.len())); }
+                }
+                match self
                 .store
                 .task_update(id, title.as_deref(), description.as_deref(), priority)
             {
@@ -1030,7 +1049,8 @@ impl Hub {
                     tasks: vec![task],
                 },
                 Err(e) => Response::err(e.to_string()),
-            },
+                }
+            }
             Request::TaskGet { id, .. } => match self.store.task_get(id) {
                 Ok(Some(task)) => Response::Tasks {
                     tasks: vec![task],
