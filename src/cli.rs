@@ -675,6 +675,17 @@ pub enum AgentCmd {
         /// Agent name
         name: String,
     },
+    /// Change an agent's log verbosity level without restarting it
+    ///
+    /// Example:
+    ///   agentcom agent log-level builder debug
+    #[command(name = "log-level")]
+    LogLevel {
+        /// Agent name
+        name: String,
+        /// Log level: debug, info, warn, or error
+        level: String,
+    },
 }
 
 #[derive(Args, Clone)]
@@ -1043,6 +1054,11 @@ pub async fn run_agent_cmd(cmd: AgentCmd) -> Result<()> {
         AgentCmd::SwapModel { name, model } => {
             let mut client = Client::connect().await?;
             let resp = client.request(&Request::AgentSwapModel { agent: name, model }).await?;
+            print_simple(resp)
+        }
+        AgentCmd::LogLevel { name, level } => {
+            let mut client = Client::connect().await?;
+            let resp = client.request(&Request::AgentSetLogLevel { agent: name, level }).await?;
             print_simple(resp)
         }
         AgentCmd::Budget { .. } | AgentCmd::Capabilities { .. } | AgentCmd::Inspect { .. } => {

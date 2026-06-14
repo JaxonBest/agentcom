@@ -178,6 +178,12 @@ pub enum Request {
         agent: String,
         model: String,
     },
+    /// Change an agent's log verbosity level without restarting it.
+    AgentSetLogLevel {
+        agent: String,
+        /// One of: "debug", "info", "warn", "error"
+        level: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

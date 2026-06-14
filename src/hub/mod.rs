@@ -1249,6 +1249,21 @@ impl Hub {
                     Response::err(format!("unknown agent {agent:?}"))
                 }
             }
+            Request::AgentSetLogLevel { agent, level, .. } => {
+                let valid = matches!(level.as_str(), "debug" | "info" | "warn" | "error");
+                if !valid {
+                    return Response::err(format!("invalid log level '{level}' — use: debug, info, warn, error"));
+                }
+                if let Some(rt) = self.agents.get_mut(&agent) {
+                    rt.log_level = Some(level.clone());
+                    let note = format!("Log verbosity set to '{level}'. This takes effect on your next turn.");
+                    let _ = self.store.msg_send("hub", &[agent.clone()], &note, false);
+                    self.log(format!("{agent}: log level set to {level}"));
+                    Response::ok_msg(format!("{agent}: log level is now '{level}'"))
+                } else {
+                    Response::err(format!("unknown agent {agent:?}"))
+                }
+            }
             Request::Tail { .. } => Response::err("tail is handled by the ipc server"),
         }
     }

@@ -77,6 +77,8 @@ pub struct AgentRuntime {
     pub crash_count: u32,
     /// Timestamp of the first crash in the current window.
     pub first_crash_at: Option<Instant>,
+    /// Runtime log verbosity override set via 'agentcom agent log-level'.
+    pub log_level: Option<String>,
 }
 
 impl AgentRuntime {
@@ -102,6 +104,7 @@ impl AgentRuntime {
             paused_at: None,
             crash_count: 0,
             first_crash_at: None,
+            log_level: None,
         }
     }
 
