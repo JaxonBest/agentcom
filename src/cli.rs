@@ -263,6 +263,16 @@ pub enum TaskCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Watch the task board live (polls DB every 2s, Ctrl-C to exit)
+    ///
+    /// Examples:
+    ///   agentcom task watch
+    ///   agentcom task watch --no-color
+    Watch {
+        /// Disable ANSI color in output
+        #[arg(long)]
+        no_color: bool,
+    },
     /// Send an inbox reminder to an agent about a specific task
     ///
     /// Examples:
@@ -421,7 +431,7 @@ pub async fn run_client(command: Command) -> Result<()> {
                     priority,
                     depends_on,
                 },
-                TaskCmd::List { status, search } => Request::TaskList { status, search },
+                TaskCmd::List { status, search } => Request::TaskList { status, search, tag: None },
                 TaskCmd::Claim { id } => Request::TaskClaim { id },
                 TaskCmd::Done { id, note } => Request::TaskDone { id, note },
                 TaskCmd::Block { id, reason } => Request::TaskBlock { id, reason },
@@ -462,7 +472,7 @@ pub async fn run_client(command: Command) -> Result<()> {
                     let resp = client.request(&Request::Send { to: agent, body, urgent: false }).await?;
                     return print_simple(resp);
                 }
-                TaskCmd::Export { .. } | TaskCmd::Stats { .. } => unreachable!("handled in main"),
+                TaskCmd::Export { .. } | TaskCmd::Stats { .. } | TaskCmd::Watch { .. } => unreachable!("handled in main"),
             };
             let resp = client.request(&req).await?;
             match resp {
