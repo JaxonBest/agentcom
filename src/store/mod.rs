@@ -23,6 +23,17 @@ pub struct Store {
 
 impl Store {
     pub fn open(path: &Path) -> Result<Self> {
+        // Pre-create the file with 0600 permissions on Unix so the database
+        // is never momentarily world-readable before rusqlite sets it up.
+        #[cfg(unix)]
+        if !path.exists() {
+            use std::os::unix::fs::OpenOptionsExt;
+            std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .mode(0o600)
+                .open(path)?;
+        }
         let conn = Connection::open(path)?;
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
@@ -236,4 +247,20 @@ pub struct Message {
     pub delivered: bool,
     pub created_at: i64,
     pub delivered_at: Option<i64>,
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    use tempfile::TempDir;
+
+    #[test]
+    fn hub_db_created_with_0600_permissions() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("hub.db");
+        Store::open(&db_path).unwrap();
+        let mode = std::fs::metadata(&db_path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "hub.db must be owner-read/write only, got {mode:o}");
+    }
 }
