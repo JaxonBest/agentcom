@@ -69,18 +69,21 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_task_activity_task ON task_activity (task_id, created_at);
         "#,
     )?;
-    // Idempotent column addition for databases created before tags existed.
-    let has_tags: bool = conn
-        .query_row(
-            "SELECT COUNT(*) > 0 FROM pragma_table_info('tasks') WHERE name='tags'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap_or(false);
-    if !has_tags {
-        conn.execute_batch(
-            "ALTER TABLE tasks ADD COLUMN tags TEXT NOT NULL DEFAULT ''",
-        )?;
+    // Idempotent column additions for databases created before these columns existed.
+    for (col, ddl) in [
+        ("tags", "ALTER TABLE tasks ADD COLUMN tags TEXT NOT NULL DEFAULT ''"),
+        ("pinned", "ALTER TABLE tasks ADD COLUMN pinned INTEGER NOT NULL DEFAULT 0"),
+    ] {
+        let exists: bool = conn
+            .query_row(
+                "SELECT COUNT(*) > 0 FROM pragma_table_info('tasks') WHERE name=?1",
+                [col],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        if !exists {
+            conn.execute_batch(ddl)?;
+        }
     }
     Ok(())
 }

@@ -574,8 +574,10 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let mut tasks: Vec<Task> = {
             let mut stmt = conn.prepare_cached("SELECT * FROM tasks ORDER BY id")?;
-            let rows = stmt.query_map([], task_from_row)?;
-            rows.collect::<rusqlite::Result<_>>()?
+            let collected: Vec<Task> = stmt
+                .query_map([], task_from_row)?
+                .collect::<rusqlite::Result<_>>()?;
+            collected
         };
         for t in &mut tasks {
             load_deps(&conn, t)?;

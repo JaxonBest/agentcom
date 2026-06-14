@@ -120,6 +120,8 @@ pub struct Task {
     pub note: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub pinned: bool,
     pub created_by: String,
     pub created_at: i64,
     pub updated_at: i64,
