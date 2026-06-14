@@ -5,6 +5,7 @@
 //! directly from the hub loop behind a `Mutex` rather than through
 //! `spawn_blocking` plumbing.
 
+pub mod activity;
 pub mod files;
 pub mod messages;
 pub mod schema;
@@ -141,6 +142,15 @@ pub struct TaskSnapshot {
     /// Original source DB id (informational; not used on import).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_id: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskComment {
+    pub id: i64,
+    pub task_id: i64,
+    pub agent: String,
+    pub body: String,
+    pub created_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

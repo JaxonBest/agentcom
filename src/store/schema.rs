@@ -58,6 +58,15 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         -- The CLI re-emits system/init on every fed turn; one runs row per
         -- (agent, session) regardless.
         CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_unique ON runs (agent, session_id);
+
+        CREATE TABLE IF NOT EXISTS task_activity (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id     INTEGER NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+            agent       TEXT NOT NULL,
+            body        TEXT NOT NULL,
+            created_at  INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_task_activity_task ON task_activity (task_id, created_at);
         "#,
     )?;
     // Idempotent column addition for databases created before tags existed.
