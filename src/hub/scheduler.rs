@@ -11,7 +11,9 @@ impl Hub {
     /// Feed an agent its next prompt if it's idle and there is work; route
     /// urgent messages to interrupt handling when it's mid-turn.
     pub(super) fn try_feed(&mut self, name: &str) {
-        let Some(rt) = self.agents.get(name) else { return };
+        let Some(rt) = self.agents.get(name) else {
+            return;
+        };
         if rt.state != AgentState::Idle || self.shutting_down {
             return;
         }

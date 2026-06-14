@@ -137,6 +137,12 @@ pub async fn run(
     )
     .await;
     restore_terminal();
+    // In TUI mode stderr is the alternate screen, so an error returned from
+    // the loop (e.g. a failed `terminal.draw`) would otherwise vanish — log
+    // it to the hub file so the exit reason survives.
+    if let Err(e) = &result {
+        tracing::error!("TUI loop exited with error: {e:#}");
+    }
     result
 }
 
@@ -149,7 +155,23 @@ fn setup_terminal() -> Result<Term> {
     // raw mode left enabled is the classic ratatui-on-Windows footgun.
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
+        // Restore first, so the panic text isn't drawn into the alternate
+        // screen and lost on exit.
         restore_terminal();
+        // Persist the panic to the hub log. Without this a render-path panic
+        // dies to the terminal with no trace (stderr is the alt-screen).
+        let location = info
+            .location()
+            .map(|l| format!("{}:{}", l.file(), l.line()))
+            .unwrap_or_else(|| "unknown".to_string());
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|s| s.to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "<non-string panic payload>".to_string());
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        tracing::error!(location = %location, "TUI panicked: {payload}\nbacktrace:\n{backtrace}");
         original_hook(info);
     }));
     Ok(Terminal::new(CrosstermBackend::new(std::io::stdout()))?)
@@ -213,7 +235,15 @@ async fn run_loop(
                         dirty = true;
                     }
                     Some(Ok(Event::Resize(..))) => dirty = true,
-                    Some(Err(_)) | None => app.should_quit = true,
+                    Some(Err(e)) => {
+                        // crossterm errored reading the console — on Windows
+                        // this can happen when console state is disturbed.
+                        // Log it (it would otherwise be an invisible exit)
+                        // before tearing down.
+                        tracing::error!("terminal event stream error: {e} — shutting down TUI");
+                        app.should_quit = true;
+                    }
+                    None => app.should_quit = true,
                     _ => {}
                 }
             }

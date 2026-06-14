@@ -56,6 +56,19 @@ pub fn log_dir(project_root: &Path) -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// Stable location for the hub binary + adapters, decoupled from any project's
+/// `target/` dir. The hub copies itself here and relaunches when started from
+/// build output, so rebuilds can't clobber the running executables.
+pub fn bin_dir() -> Result<PathBuf> {
+    let base = directories::ProjectDirs::from("", "", "agentcom")
+        .context("could not determine local data directory")?
+        .data_local_dir()
+        .to_path_buf();
+    let dir = base.join("bin");
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating bin dir {}", dir.display()))?;
+    Ok(dir)
+}
+
 /// Walk up from `start` looking for `agentcom.toml`; returns the directory
 /// containing it. Used by client-mode commands so they work from any
 /// subdirectory of the project (including agent cwds).

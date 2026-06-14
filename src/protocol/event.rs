@@ -208,7 +208,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(stream_text_delta(&ev), Some("hi"));
-        let stop: Value = serde_json::from_str(r#"{"type":"content_block_stop","index":0}"#).unwrap();
+        let stop: Value =
+            serde_json::from_str(r#"{"type":"content_block_stop","index":0}"#).unwrap();
         assert!(stream_block_end(&stop));
     }
 
@@ -247,7 +248,9 @@ mod tests {
         match parse_line(line) {
             ParsedLine::Event(CliEvent::Assistant { message }) => {
                 assert_eq!(message.content.len(), 2);
-                assert!(matches!(&message.content[0], ContentBlock::Text { text } if text == "hello"));
+                assert!(
+                    matches!(&message.content[0], ContentBlock::Text { text } if text == "hello")
+                );
                 assert!(
                     matches!(&message.content[1], ContentBlock::ToolUse { name, .. } if name == "Bash")
                 );

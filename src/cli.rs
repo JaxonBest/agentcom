@@ -10,7 +10,7 @@ use clap::{Args, Parser, Subcommand};
 #[command(
     name = "agentcom",
     version,
-    about = "Local coordination hub for mixed Claude Code and Codex coding-agent fleets."
+    about = "Local coordination hub for mixed Claude Code, Codex, and DeepSeek coding-agent fleets."
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -158,7 +158,7 @@ pub enum AgentCmd {
         /// What this agent owns and how it should behave
         #[arg(short, long)]
         role: String,
-        /// Runtime provider: claude or codex
+        /// Runtime provider: claude, codex, or deepseek
         #[arg(long)]
         provider: Option<crate::config::AgentProvider>,
         #[arg(short, long)]
@@ -442,13 +442,10 @@ fn print_status(resp: Response) -> Result<()> {
                 println!("  FREE MODE · {free}");
             }
             for a in agents {
-                let detail = a
-                    .detail
-                    .map(|d| format!(" — {d}"))
-                    .unwrap_or_default();
+                let detail = a.detail.map(|d| format!(" — {d}")).unwrap_or_default();
                 println!(
-                    "  {:<14} {:<13} ${:<8.2} {} turns{detail}",
-                    a.name, a.state, a.spent_usd, a.turns
+                    "  {:<14} {:<6} {:<13} ${:<8.2} {} turns{detail}",
+                    a.name, a.provider, a.state, a.spent_usd, a.turns
                 );
             }
             Ok(())

@@ -89,8 +89,9 @@ impl Store {
 
     pub fn files_list(&self) -> Result<Vec<FileClaim>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare_cached("SELECT path, agent, claimed_at FROM file_claims ORDER BY agent, path")?;
+        let mut stmt = conn.prepare_cached(
+            "SELECT path, agent, claimed_at FROM file_claims ORDER BY agent, path",
+        )?;
         let rows = stmt.query_map([], |r| {
             Ok(FileClaim {
                 path: r.get(0)?,
@@ -135,6 +136,9 @@ mod tests {
         let s = Store::open_in_memory().unwrap();
         s.files_claim("alice", &["x.js".into()]).unwrap();
         assert_eq!(s.files_release("bob", &["x.js".into()], false).unwrap(), 0);
-        assert_eq!(s.files_release("alice", &["x.js".into()], false).unwrap(), 1);
+        assert_eq!(
+            s.files_release("alice", &["x.js".into()], false).unwrap(),
+            1
+        );
     }
 }

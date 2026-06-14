@@ -18,6 +18,10 @@ name = "agentcom-codex-adapter"
 path = "src/bin/codex_adapter.rs"
 
 [[bin]]
+name = "agentcom-deepseek-adapter"
+path = "src/bin/deepseek_adapter.rs"
+
+[[bin]]
 name = "mock-codex"
 path = "src/bin/mock_codex.rs"
 
@@ -41,6 +45,7 @@ directories = "5"
 rand = "0.8"
 sha2 = "0.10"
 futures = "0.3"
+regex = "1"
 
 [dev-dependencies]
 tempfile = "3"

@@ -23,8 +23,7 @@ fn task_from_row(row: &Row) -> rusqlite::Result<Task> {
 }
 
 fn load_deps(conn: &Connection, task: &mut Task) -> rusqlite::Result<()> {
-    let mut stmt =
-        conn.prepare_cached("SELECT depends_on_id FROM task_deps WHERE task_id = ?1")?;
+    let mut stmt = conn.prepare_cached("SELECT depends_on_id FROM task_deps WHERE task_id = ?1")?;
     task.depends_on = stmt
         .query_map([task.id], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
@@ -44,10 +43,11 @@ impl Store {
         let tx = guard.transaction()?;
         let now = now_ts();
         for dep in depends_on {
-            let exists: bool =
-                tx.query_row("SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1)", [dep], |r| {
-                    r.get(0)
-                })?;
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1)",
+                [dep],
+                |r| r.get(0),
+            )?;
             if !exists {
                 bail!("dependency task #{dep} does not exist");
             }

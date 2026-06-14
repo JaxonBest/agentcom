@@ -102,10 +102,7 @@ async fn handle_conn(
     // First frame must be a valid Hello.
     let identity = match lines.next_line().await? {
         Some(line) => match serde_json::from_str::<Request>(&line) {
-            Ok(Request::Hello {
-                token: t,
-                identity,
-            }) if t == token => identity,
+            Ok(Request::Hello { token: t, identity }) if t == token => identity,
             Ok(Request::Hello { .. }) => {
                 write_frame(&mut write_half, &Response::err("invalid token")).await?;
                 return Ok(());
@@ -126,8 +123,7 @@ async fn handle_conn(
         let req: Request = match serde_json::from_str(&line) {
             Ok(r) => r,
             Err(e) => {
-                write_frame(&mut write_half, &Response::err(format!("bad request: {e}")))
-                    .await?;
+                write_frame(&mut write_half, &Response::err(format!("bad request: {e}"))).await?;
                 continue;
             }
         };
@@ -199,10 +195,7 @@ async fn handle_conn(
     Ok(())
 }
 
-async fn write_frame(
-    w: &mut (impl AsyncWriteExt + Unpin),
-    resp: &Response,
-) -> std::io::Result<()> {
+async fn write_frame(w: &mut (impl AsyncWriteExt + Unpin), resp: &Response) -> std::io::Result<()> {
     let mut line = serde_json::to_string(resp).expect("response serializes");
     line.push('\n');
     w.write_all(line.as_bytes()).await

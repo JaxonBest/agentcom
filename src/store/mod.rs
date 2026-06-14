@@ -67,7 +67,6 @@ impl Store {
         )?;
         Ok(())
     }
-
 }
 
 pub fn now_ts() -> i64 {

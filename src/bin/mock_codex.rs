@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use serde_json::json;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
@@ -24,9 +24,21 @@ fn main() -> Result<()> {
                 json!({"type":"item.started","item":{"type":"command_execution","command":cmd}})
             );
             let ok = if cfg!(windows) {
-                Command::new("cmd.exe").arg("/C").arg(cmd).status()?.success()
+                Command::new("cmd.exe")
+                    .arg("/C")
+                    .arg(cmd)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()?
+                    .success()
             } else {
-                Command::new("sh").arg("-c").arg(cmd).status()?.success()
+                Command::new("sh")
+                    .arg("-c")
+                    .arg(cmd)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()?
+                    .success()
             };
             println!(
                 "{}",

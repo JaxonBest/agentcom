@@ -71,14 +71,18 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::End => app.scroll_back = None,
         KeyCode::Char('m') => open_modal(app, InputKind::Message),
         KeyCode::Char('u') => open_modal(app, InputKind::Urgent),
-        KeyCode::Char('M') => app.modal = Some(InputModal {
-            kind: InputKind::Broadcast,
-            buffer: String::new(),
-        }),
-        KeyCode::Char('a') => app.modal = Some(InputModal {
-            kind: InputKind::AddTask,
-            buffer: String::new(),
-        }),
+        KeyCode::Char('M') => {
+            app.modal = Some(InputModal {
+                kind: InputKind::Broadcast,
+                buffer: String::new(),
+            })
+        }
+        KeyCode::Char('a') => {
+            app.modal = Some(InputModal {
+                kind: InputKind::AddTask,
+                buffer: String::new(),
+            })
+        }
         KeyCode::Char('p') => {
             if let Some(name) = app.selected_agent().map(str::to_string) {
                 let paused = app
@@ -151,7 +155,9 @@ fn open_modal(app: &mut App, kind: InputKind) {
 }
 
 fn handle_modal_key(app: &mut App, key: KeyEvent) {
-    let Some(modal) = app.modal.as_mut() else { return };
+    let Some(modal) = app.modal.as_mut() else {
+        return;
+    };
     match key.code {
         KeyCode::Esc => app.modal = None,
         KeyCode::Enter => {

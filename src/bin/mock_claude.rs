@@ -124,9 +124,8 @@ fn run_command(cmdline: &str) -> String {
 }
 
 fn main() {
-    let session_id = std::env::var("MOCK_SESSION_ID").unwrap_or_else(|_| {
-        format!("mock-{}", std::process::id())
-    });
+    let session_id =
+        std::env::var("MOCK_SESSION_ID").unwrap_or_else(|_| format!("mock-{}", std::process::id()));
     let ignore_interrupt = std::env::var("MOCK_IGNORE_INTERRUPT").is_ok();
     let script = load_script();
     let mut step_idx = 0usize;

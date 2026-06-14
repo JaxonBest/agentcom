@@ -104,9 +104,11 @@ mod tests {
     #[test]
     fn take_pending_marks_delivered() {
         let s = Store::open_in_memory().unwrap();
-        s.msg_send("alice", &["bob".into()], "hi bob", false).unwrap();
+        s.msg_send("alice", &["bob".into()], "hi bob", false)
+            .unwrap();
         s.msg_send("alice", &["bob".into()], "again", true).unwrap();
-        s.msg_send("alice", &["carol".into()], "hi carol", false).unwrap();
+        s.msg_send("alice", &["carol".into()], "hi carol", false)
+            .unwrap();
 
         let taken = s.msg_take_pending("bob").unwrap();
         assert_eq!(taken.len(), 2);

@@ -43,7 +43,6 @@ impl AgentState {
             AgentState::Stopped => "stopped",
         }
     }
-
 }
 
 /// Hub-owned runtime record for one agent.

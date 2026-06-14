@@ -192,14 +192,17 @@ fn render_event(
             for block in &message.content {
                 match block {
                     // With partial messages enabled, text streams in via
-                    // deltas; the full text block would duplicate it.
+                    // deltas; the trailing full text block then duplicates it,
+                    // so we seal the streamed line instead of reprinting.
+                    // Providers that never stream (DeepSeek, Codex) leave
+                    // `saw_delta` false, so their full text always renders.
                     ContentBlock::Text { text } => {
-                        if buf.read().unwrap().is_empty() {
+                        if buf.write().unwrap().take_saw_delta() {
+                            buf.write().unwrap().close_line();
+                        } else {
                             for l in text.lines() {
                                 push(l.to_string());
                             }
-                        } else {
-                            buf.write().unwrap().close_line();
                         }
                     }
                     ContentBlock::ToolUse { name, input } => {

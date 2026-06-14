@@ -24,14 +24,18 @@ pub fn discover() -> Result<(u16, String, String)> {
         std::env::var("AGENTCOM_PORT"),
         std::env::var("AGENTCOM_TOKEN"),
     ) {
-        let identity =
-            std::env::var("AGENTCOM_AGENT").unwrap_or_else(|_| "human".to_string());
-        return Ok((port.parse().context("AGENTCOM_PORT is not a port")?, token, identity));
+        let identity = std::env::var("AGENTCOM_AGENT").unwrap_or_else(|_| "human".to_string());
+        return Ok((
+            port.parse().context("AGENTCOM_PORT is not a port")?,
+            token,
+            identity,
+        ));
     }
 
     let cwd = std::env::current_dir()?;
-    let root = crate::paths::find_project_root(&cwd)
-        .context("no agentcom.toml found here or in any parent directory (and no AGENTCOM_PORT env)")?;
+    let root = crate::paths::find_project_root(&cwd).context(
+        "no agentcom.toml found here or in any parent directory (and no AGENTCOM_PORT env)",
+    )?;
     let hub_path = crate::paths::hub_json_path(&root)?;
     let info = read_hub_json(&hub_path)?;
     Ok((info.port, info.token, "human".to_string()))

@@ -11,7 +11,7 @@ without letting agents silently overwrite each other.
 
 ## Current Shape
 
-- **Mixed providers**: per-agent `provider = "claude"` or `provider = "codex"`.
+- **Mixed providers**: per-agent `provider = "claude"`, `provider = "codex"`, or `provider = "deepseek"`.
 - **Composer-first UI**: `agentcom up` opens a chat with the composer; agent
   output is one tab away.
 - **Shared board**: tasks are persisted in SQLite and claimed before work starts.
@@ -43,6 +43,7 @@ The install includes:
 
 - `agentcom`
 - `agentcom-codex-adapter`
+- `agentcom-deepseek-adapter`
 - `mock-claude` and `mock-codex` for tests
 
 ## Quick Start
@@ -79,10 +80,11 @@ subdirectory; agentcom walks upward to find the config.
 project_name = "my-project"
 
 # Runtime for agents that do not set one directly.
-# default_provider = "claude"        # or "codex"
+# default_provider = "claude"        # or "codex" or "deepseek"
 
 # Model for agents that do not set one directly.
 # For Claude this is a Claude Code model name; for Codex this is a Codex model.
+# For DeepSeek this is usually "deepseek-chat" or "deepseek-reasoner".
 # default_model = "sonnet"
 
 # Stop all work once total tracked spend crosses this.
@@ -125,9 +127,10 @@ provider = "claude"
 allowed_tools = ["Bash", "Read", "Glob", "Grep"]
 ```
 
-## Mixed Claude and Codex Fleets
+## Mixed Claude, Codex, and DeepSeek Fleets
 
-You can mix providers freely:
+You can mix providers freely. DeepSeek is useful as a lower-cost lane for
+review, triage, planning, and simple scripted work:
 
 ```toml
 default_provider = "claude"
@@ -146,7 +149,8 @@ model = "gpt-5.4"
 [[agent]]
 name = "reviewer"
 role = "Reviews the final diff and checks for missed edge cases"
-provider = "codex"
+provider = "deepseek"
+model = "deepseek-chat"
 ```
 
 They share the same board, message bus, file claims, composer, and TUI.
@@ -157,6 +161,10 @@ Provider differences:
   --output-format stream-json` sessions.
 - Codex agents run through `agentcom-codex-adapter`, which keeps the hub protocol
   persistent and launches `codex exec --json` for each fed turn.
+- DeepSeek agents run through `agentcom-deepseek-adapter`, which calls the
+  DeepSeek OpenAI-compatible chat API. Because the API does not run local tools
+  natively, the adapter executes commands the model places in fenced shell
+  blocks, limited by the agent's `allowed_tools`.
 - Claude supports native mid-turn control requests. Codex turns are stopped by
   tree-killing the active `codex exec` process and delivering the urgent message
   on the next turn.
@@ -191,6 +199,18 @@ Common keys:
 The chat view includes an activity panel so you can see what agents are doing
 while they are thinking: current state, recent tool activity, task claims,
 completions, recruitment, interrupts, and crashes.
+
+The dashboard header shows total usage plus per-provider usage:
+
+```text
+$0.18 total | claude $0.12/4t | codex $0.06/2t
+```
+
+Each agent row also shows its provider badge, such as `[claude]`, `[codex]`,
+or `[deepseek]`, so mixed fleets are easy to scan. Human-directed messages are highlighted in
+the header, chat, and message feed. If an agent appears to be asking you a
+question, the TUI labels it as `QUESTION` and keeps a visible count in the chat
+footer until you handle it.
 
 ## Free Mode
 
@@ -256,7 +276,7 @@ agentcom files list
 | `agentcom task done <id> --note "<note>"` | Mark task done |
 | `agentcom task block <id> --reason "<reason>"` | Block a task |
 | `agentcom task reopen <id>` | Reopen a blocked/claimed/done task |
-| `agentcom agent add <name> --role "<role>" [--provider claude\|codex]` | Add an agent |
+| `agentcom agent add <name> --role "<role>" [--provider claude\|codex\|deepseek]` | Add an agent |
 | `agentcom agent list` | List configured agents and live states |
 | `agentcom files claim <paths...>` | Claim files before editing |
 | `agentcom files release <paths...>` | Release file claims |
@@ -274,9 +294,32 @@ agentcom files list
 | `AGENTCOM_CLAUDE_EXE` | Override `claude` executable path |
 | `AGENTCOM_CODEX_EXE` | Override `codex` executable path |
 | `AGENTCOM_CODEX_ADAPTER_EXE` | Override bundled Codex adapter path |
+| `AGENTCOM_CODEX_VERBOSE_STDERR` | Show raw Codex adapter stderr chatter |
+| `AGENTCOM_DEEPSEEK_ADAPTER_EXE` | Override bundled DeepSeek adapter path |
+| `DEEPSEEK_API_KEY` | API key for DeepSeek agents |
+| `DEEPSEEK_BASE_URL` | Override API base URL; defaults to `https://api.deepseek.com` |
+| `AGENTCOM_DEEPSEEK_INPUT_PER_MTOK` | Estimated input price for budget tracking |
+| `AGENTCOM_DEEPSEEK_OUTPUT_PER_MTOK` | Estimated output price for budget tracking |
 | `AGENTCOM_INTERRUPT_SUBTYPE` | Override Claude control-request interrupt subtype |
 | `AGENTCOM_CAPTURE_RAW` | Tee raw child stdout lines to `<dir>/<agent>.ndjson` |
 | `AGENTCOM_FREE_NUDGE_SECS` | Override free-mode idle nudge delay |
+
+On Windows, `agentcom` first looks for the Codex app executable under
+`%LOCALAPPDATA%\OpenAI\Codex\bin\...\codex.exe`, then falls back to `codex` on
+`PATH`. If startup says Codex is missing, verify the CLI directly:
+
+```powershell
+codex --version
+codex exec --json "say hello"
+```
+
+If the Microsoft Store `WindowsApps` alias is present but cannot run, point
+agentcom at the real Codex executable:
+
+```powershell
+$env:AGENTCOM_CODEX_EXE = "$env:LOCALAPPDATA\OpenAI\Codex\bin\<id>\codex.exe"
+agentcom up
+```
 
 The hub injects these into child agents:
 
@@ -322,7 +365,7 @@ cargo test
 ```
 
 The test suite runs a real headless hub against zero-cost `mock-claude` and
-`mock-codex` binaries. It covers task lifecycle, message passing, interrupts,
+`mock-codex` binaries plus the DeepSeek adapter's mock mode. It covers task lifecycle, message passing, interrupts,
 ignored-interrupt escalation, pause/resume, provider switching, file claims,
 free mode, recruitment, composer chat, and graceful shutdown.
 

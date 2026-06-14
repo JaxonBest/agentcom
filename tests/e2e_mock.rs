@@ -16,6 +16,9 @@ fn mock_claude_bin() -> &'static str {
 fn codex_adapter_bin() -> &'static str {
     env!("CARGO_BIN_EXE_agentcom-codex-adapter")
 }
+fn deepseek_adapter_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_agentcom-deepseek-adapter")
+}
 fn mock_codex_bin() -> &'static str {
     env!("CARGO_BIN_EXE_mock-codex")
 }
@@ -54,7 +57,12 @@ fn write_config(project: &Path, agents: &[(&str, &str)], extra: &str) {
     std::fs::write(project.join("agentcom.toml"), cfg).unwrap();
 }
 
-fn start_hub(project: &Path, script_dir: &Path, tasks: &[&str], extra_env: &[(&str, &str)]) -> HubGuard {
+fn start_hub(
+    project: &Path,
+    script_dir: &Path,
+    tasks: &[&str],
+    extra_env: &[(&str, &str)],
+) -> HubGuard {
     start_hub_args(project, script_dir, tasks, extra_env, &[])
 }
 
@@ -75,6 +83,7 @@ fn start_hub_args(
         .env("AGENTCOM_CLAUDE_EXE", mock_claude_bin())
         .env("AGENTCOM_CODEX_ADAPTER_EXE", codex_adapter_bin())
         .env("AGENTCOM_CODEX_EXE", mock_codex_bin())
+        .env("AGENTCOM_DEEPSEEK_ADAPTER_EXE", deepseek_adapter_bin())
         .env("MOCK_SCRIPT_DIR", script_dir)
         .env("RUST_LOG", "agentcom=debug")
         .stdout(Stdio::piped())
@@ -118,7 +127,12 @@ fn agent_in_state(status_out: &str, agent: &str, state: &str) -> bool {
 }
 
 /// Poll a CLI command until its output satisfies `pred`.
-fn wait_for(project: &Path, args: &[&str], timeout: Duration, pred: impl Fn(&str) -> bool) -> String {
+fn wait_for(
+    project: &Path,
+    args: &[&str],
+    timeout: Duration,
+    pred: impl Fn(&str) -> bool,
+) -> String {
     let deadline = Instant::now() + timeout;
     let mut last = String::new();
     while Instant::now() < deadline {
@@ -187,12 +201,9 @@ fn fleet_completes_task_and_passes_messages() {
     );
 
     // Cost from result events is tracked.
-    let status = wait_for(
-        &project,
-        &["status"],
-        Duration::from_secs(10),
-        |out| out.contains("e2e —"),
-    );
+    let status = wait_for(&project, &["status"], Duration::from_secs(10), |out| {
+        out.contains("e2e —")
+    });
     assert!(status.contains("alice"), "status lists agents: {status}");
     assert!(status.contains("bob"), "status lists agents: {status}");
 
@@ -202,7 +213,11 @@ fn fleet_completes_task_and_passes_messages() {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Ok(Some(exit)) = hub.child.try_wait() {
-            assert!(exit.success(), "hub exits cleanly; logs:\n{}", hub_logs(&mut hub));
+            assert!(
+                exit.success(),
+                "hub exits cleanly; logs:\n{}",
+                hub_logs(&mut hub)
+            );
             break;
         }
         if Instant::now() > deadline {
@@ -251,6 +266,53 @@ fn codex_provider_uses_adapter_and_completes_task() {
 }
 
 #[test]
+fn deepseek_provider_uses_adapter_and_completes_task() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    let scripts = tmp.path().join("scripts");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+
+    write_config(
+        &project,
+        &[("seeker", "deepseek-backed worker")],
+        "default_provider = \"deepseek\"\n",
+    );
+
+    let _hub = start_hub(
+        &project,
+        &scripts,
+        &["prove deepseek provider works"],
+        &[
+            (
+                "MOCK_DEEPSEEK_RUN",
+                "agentcom task claim 1;;agentcom task done 1 --note deepseek-finished",
+            ),
+            ("MOCK_DEEPSEEK_RESPONSE", "mock deepseek done"),
+        ],
+    );
+
+    let done = wait_for(
+        &project,
+        &["task", "list", "--status", "done"],
+        Duration::from_secs(20),
+        |out| out.contains("deepseek-finished"),
+    );
+    assert!(
+        done.contains("#1"),
+        "deepseek-backed task completed: {done}"
+    );
+
+    let status = wait_for(&project, &["status"], Duration::from_secs(10), |out| {
+        out.contains("seeker")
+    });
+    assert!(
+        status.contains("deepseek"),
+        "status shows provider badge/name: {status}"
+    );
+}
+
+#[test]
 fn interrupt_aborts_turn_and_delivers_urgent_message() {
     let tmp = tempfile::tempdir().unwrap();
     let project = tmp.path().join("proj");
@@ -277,7 +339,10 @@ fn interrupt_aborts_turn_and_delivers_urgent_message() {
         agent_in_state(out, "worker", "working")
     });
 
-    let (ok, out) = cli(&project, &["interrupt", "worker", "stop what you are doing"]);
+    let (ok, out) = cli(
+        &project,
+        &["interrupt", "worker", "stop what you are doing"],
+    );
     assert!(ok, "interrupt accepted: {out}");
     assert!(
         out.contains("interrupting"),
@@ -444,7 +509,10 @@ fn agent_can_recruit_a_teammate_and_cap_is_enforced() {
     let (_, status) = cli(&project, &["status"]);
     assert!(!status.contains("third"), "cap enforced: {status}");
     let cfg = std::fs::read_to_string(project.join("agentcom.toml")).unwrap();
-    assert!(!cfg.contains("one too many"), "cap rejection not persisted:\n{cfg}");
+    assert!(
+        !cfg.contains("one too many"),
+        "cap rejection not persisted:\n{cfg}"
+    );
 }
 
 #[test]
@@ -492,10 +560,16 @@ fn composer_chat_and_file_claims() {
     });
 
     // The composer's file claim is on record...
-    let files = wait_for(&project, &["files", "list"], Duration::from_secs(10), |out| {
-        out.contains("src/app.js")
-    });
-    assert!(files.contains("composer"), "composer holds the claim: {files}");
+    let files = wait_for(
+        &project,
+        &["files", "list"],
+        Duration::from_secs(10),
+        |out| out.contains("src/app.js"),
+    );
+    assert!(
+        files.contains("composer"),
+        "composer holds the claim: {files}"
+    );
 
     // ...and the worker's conflicting claim was rejected (it filed the marker
     // task from the `||` fallback branch).
@@ -529,7 +603,12 @@ fn free_mode_nudges_composer_when_fleet_idles() {
         &scripts,
         &[],
         &[("AGENTCOM_FREE_NUDGE_SECS", "1")],
-        &["--free", "continuously improve this project", "--for", "10m"],
+        &[
+            "--free",
+            "continuously improve this project",
+            "--for",
+            "10m",
+        ],
     );
 
     // No seed tasks, everyone idles -> the hub nudges the composer, which

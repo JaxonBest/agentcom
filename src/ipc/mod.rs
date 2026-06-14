@@ -129,6 +129,7 @@ pub enum Response {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AgentStatusRow {
     pub name: String,
+    pub provider: String,
     pub state: String,
     pub detail: Option<String>,
     pub session_id: Option<String>,

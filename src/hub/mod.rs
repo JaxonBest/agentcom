@@ -31,6 +31,7 @@ pub struct Hub {
     claude_exe: PathBuf,
     codex_exe: PathBuf,
     codex_adapter_exe: PathBuf,
+    deepseek_adapter_exe: PathBuf,
     agents: HashMap<String, AgentRuntime>,
     /// Cumulative cost/turn baselines: `total_cost_usd` in result events is
     /// cumulative per session, so per-agent totals are base + latest.
@@ -78,6 +79,10 @@ impl Hub {
             .agents
             .iter()
             .any(|a| cfg.agent_provider(a) == crate::config::AgentProvider::Codex);
+        let uses_deepseek = cfg
+            .agents
+            .iter()
+            .any(|a| cfg.agent_provider(a) == crate::config::AgentProvider::Deepseek);
         let claude_exe = if uses_claude {
             spawn::resolve_claude_exe()?
         } else {
@@ -92,6 +97,11 @@ impl Hub {
             spawn::resolve_codex_adapter_exe(agentcom_dir.as_deref())?
         } else {
             PathBuf::from("agentcom-codex-adapter")
+        };
+        let deepseek_adapter_exe = if uses_deepseek {
+            spawn::resolve_deepseek_adapter_exe(agentcom_dir.as_deref())?
+        } else {
+            PathBuf::from("agentcom-deepseek-adapter")
         };
 
         let (bus_tx, bus_rx) = mpsc::channel::<HubEvent>(1024);
@@ -117,10 +127,7 @@ impl Hub {
         let mut agents = HashMap::new();
         for a in &cfg.agents {
             let buf = Arc::new(RwLock::new(RingBuf::new()));
-            buffers
-                .write()
-                .unwrap()
-                .insert(a.name.clone(), buf.clone());
+            buffers.write().unwrap().insert(a.name.clone(), buf.clone());
             agents.insert(a.name.clone(), AgentRuntime::new(a.clone(), buf));
         }
 
@@ -131,6 +138,7 @@ impl Hub {
             claude_exe,
             codex_exe,
             codex_adapter_exe,
+            deepseek_adapter_exe,
             agents,
             session_base: HashMap::new(),
             buffers,
@@ -208,12 +216,25 @@ impl Hub {
             .ok()
             .and_then(|p| p.parent().map(|d| d.to_path_buf()));
 
+        // Isolate agent `cargo` builds from the live hub's binaries. agentcom
+        // runs out of its own `target/`; an agent rebuilding the project would
+        // otherwise relink and lock the running `agentcom.exe`/adapter exes and
+        // take the hub down. Honor an explicit user CARGO_TARGET_DIR if set.
+        let cargo_target_dir = if std::env::var_os("CARGO_TARGET_DIR").is_some() {
+            None
+        } else {
+            crate::paths::data_dir(&self.project_root)
+                .ok()
+                .map(|d| d.join("agent-target"))
+        };
+
         let child = spawn::spawn_agent(&spawn::SpawnSpec {
             hub_cfg: &self.cfg,
             agent_cfg: &agent_cfg,
             claude_exe: &self.claude_exe,
             codex_exe: &self.codex_exe,
             codex_adapter_exe: &self.codex_adapter_exe,
+            deepseek_adapter_exe: &self.deepseek_adapter_exe,
             project_root: &self.project_root,
             session_id: &session_id,
             resume_session: resume.as_deref(),
@@ -221,6 +242,7 @@ impl Hub {
             ipc_port: self.ipc_port,
             ipc_token: &self.ipc_token,
             agentcom_dir: agentcom_dir.as_deref(),
+            cargo_target_dir: cargo_target_dir.as_deref(),
         })?;
 
         let rt = self.agents.get_mut(name).expect("agent exists");
@@ -314,7 +336,9 @@ impl Hub {
                 session_id,
                 ..
             } if subtype == "init" => {
-                let Some(rt) = self.agents.get_mut(agent) else { return };
+                let Some(rt) = self.agents.get_mut(agent) else {
+                    return;
+                };
                 if let Some(sid) = session_id {
                     rt.session_id = Some(sid);
                 }
@@ -326,7 +350,9 @@ impl Hub {
                     rt.state_detail = None;
                     self.emit_state(agent);
                 }
-                let Some(rt) = self.agents.get(agent) else { return };
+                let Some(rt) = self.agents.get(agent) else {
+                    return;
+                };
                 if let Some(sid) = rt.session_id.clone() {
                     let _ = self
                         .store
@@ -364,7 +390,9 @@ impl Hub {
         num_turns: Option<u64>,
     ) {
         let base = self.session_base.get(agent).copied().unwrap_or((0.0, 0));
-        let Some(rt) = self.agents.get_mut(agent) else { return };
+        let Some(rt) = self.agents.get_mut(agent) else {
+            return;
+        };
 
         if let Some(cost) = total_cost_usd {
             rt.spent_usd = base.0 + cost;
@@ -434,7 +462,9 @@ impl Hub {
 
     fn handle_exit(&mut self, agent: &str, code: Option<i32>) {
         self.stop_deadlines.remove(agent);
-        let Some(rt) = self.agents.get_mut(agent) else { return };
+        let Some(rt) = self.agents.get_mut(agent) else {
+            return;
+        };
         rt.stdin_tx = None;
         rt.child_pid = None;
 
@@ -522,7 +552,12 @@ impl Hub {
             .stop_deadlines
             .iter()
             .filter(|(_, d)| now >= **d)
-            .filter_map(|(n, _)| self.agents.get(n).and_then(|a| a.child_pid).map(|p| (n.clone(), p)))
+            .filter_map(|(n, _)| {
+                self.agents
+                    .get(n)
+                    .and_then(|a| a.child_pid)
+                    .map(|p| (n.clone(), p))
+            })
             .collect();
         for (name, pid) in overdue {
             self.stop_deadlines.remove(&name);
@@ -547,7 +582,9 @@ impl Hub {
     /// Free mode: enforce time/usage stop conditions; when the whole fleet
     /// goes idle, nudge the composer to generate the next round of work.
     fn free_mode_tick(&mut self) {
-        let Some(free) = self.free.clone() else { return };
+        let Some(free) = self.free.clone() else {
+            return;
+        };
         if self.shutting_down {
             return;
         }
@@ -683,9 +720,7 @@ impl Hub {
                         // Close the loop: whoever filed the task hears that
                         // it's finished (the composer relies on this to
                         // report completions to the human).
-                        if t.created_by != identity
-                            && self.agents.contains_key(&t.created_by)
-                        {
+                        if t.created_by != identity && self.agents.contains_key(&t.created_by) {
                             let body = format!(
                                 "task #{} \"{}\" completed by {}{}",
                                 t.id,
@@ -766,7 +801,11 @@ impl Hub {
     /// Hot-add an agent while the hub is running. Existing agents learn
     /// about the newcomer when they next check `agentcom status`; their
     /// system prompts list teammates from spawn time only.
-    fn add_agent_live(&mut self, requested_by: &str, config: crate::config::AgentConfig) -> Response {
+    fn add_agent_live(
+        &mut self,
+        requested_by: &str,
+        config: crate::config::AgentConfig,
+    ) -> Response {
         if let Err(e) = crate::config::validate_agent_name(&config.name) {
             return Response::err(e.to_string());
         }
@@ -785,7 +824,10 @@ impl Hub {
             config.role
         ));
         let buf = Arc::new(RwLock::new(RingBuf::new()));
-        self.buffers.write().unwrap().insert(name.clone(), buf.clone());
+        self.buffers
+            .write()
+            .unwrap()
+            .insert(name.clone(), buf.clone());
         self.cfg.agents.push(config.clone());
         self.agents
             .insert(name.clone(), AgentRuntime::new(config, buf));
@@ -813,6 +855,7 @@ impl Hub {
             .filter_map(|a| self.agents.get(&a.name))
             .map(|rt| AgentStatusRow {
                 name: rt.cfg.name.clone(),
+                provider: self.cfg.agent_provider(&rt.cfg).to_string(),
                 state: rt.state.as_str().to_string(),
                 detail: rt.state_detail.clone(),
                 session_id: rt.session_id.clone(),

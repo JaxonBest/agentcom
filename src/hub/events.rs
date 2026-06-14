@@ -29,7 +29,10 @@ pub struct IpcMsg {
 #[derive(Debug, Clone)]
 pub enum UiEvent {
     /// A display line appended to an agent's output buffer.
-    AgentLine { agent: String, line: String },
+    AgentLine {
+        agent: String,
+        line: String,
+    },
     /// Streaming text delta appended to some agent's open tail line
     /// (redraw signal; the buffer itself holds the content).
     AgentDelta,

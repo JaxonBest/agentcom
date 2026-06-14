@@ -61,16 +61,22 @@ async fn run_up(
     let cwd = std::env::current_dir()?;
     let project_root = paths::find_project_root(&cwd)
         .context("no agentcom.toml found — run `agentcom init` first")?;
+
+    // If we're running straight out of the project's `target/` dir, agent (or
+    // manual) rebuilds will relink the very binary we're executing and the
+    // adapter exes we spawn children from — which kills the hub. Stage a copy
+    // in a stable location and relaunch from there. This never returns when it
+    // relaunches (it exits with the child's status).
+    maybe_relaunch_from_stable(&project_root).await?;
+
     let mut cfg = config::HubConfig::load(&project_root)?;
 
     // Every fleet gets a composer: the coordinator the human talks to in
     // the chat pane. Define your own [[agent]] name = "composer" to
     // customize it; it sits outside the max_agents worker cap.
     if cfg.agent(config::COMPOSER_NAME).is_none() {
-        cfg.agents.insert(
-            0,
-            config::composer_default(cfg.default_model.as_deref()),
-        );
+        cfg.agents
+            .insert(0, config::composer_default(cfg.default_model.as_deref()));
         // max_agents is the WORKER cap — the injected composer gets its own
         // slot on top of it.
         cfg.max_agents = (cfg.max_agents + 1).max(cfg.agents.len());
@@ -118,9 +124,108 @@ async fn run_up(
         let tui_result = tui::run(project, agent_names, ipc_tx, ui_tx, buffers, store).await;
         let hub_result = hub_task.await;
         tui_result?;
-        hub_result??;
+        // Distinguish a hub-task panic (JoinError) from a hub error so the
+        // reason lands in the log rather than a torn-down terminal.
+        match hub_result {
+            Ok(inner) => inner?,
+            Err(join_err) => {
+                tracing::error!("hub task terminated abnormally: {join_err}");
+                return Err(anyhow::anyhow!("hub task panicked: {join_err}"));
+            }
+        }
         Ok(())
     }
+}
+
+/// When the running hub binary lives inside the project's `target/` dir, copy
+/// it (and its adapters) to a stable dir and relaunch from there, so rebuilds
+/// of the project can't clobber the executables in use. Returns normally when
+/// no relaunch is needed; otherwise it runs the staged copy to completion and
+/// exits the process with the child's status.
+async fn maybe_relaunch_from_stable(project_root: &std::path::Path) -> Result<()> {
+    // Already relaunched, or the user opted out — run in place.
+    if std::env::var_os("AGENTCOM_RELAUNCHED").is_some()
+        || std::env::var_os("AGENTCOM_NO_RELAUNCH").is_some()
+    {
+        return Ok(());
+    }
+    let exe = std::env::current_exe().context("locating current exe")?;
+    if !is_inside_build_output(&exe, project_root) {
+        return Ok(());
+    }
+
+    let stable_dir = paths::bin_dir()?;
+    let exe_name = exe
+        .file_name()
+        .context("current exe has no file name")?
+        .to_owned();
+    let dest_exe = stable_dir.join(&exe_name);
+
+    if let Err(e) = stage_runtime_binaries(&exe, &stable_dir) {
+        // Don't block startup — fall back to running in place, but warn loudly.
+        eprintln!(
+            "agentcom: could not stage a stable copy ({e:#}); running from build \
+             output — a rebuild while this is running may crash the hub. \
+             Stop the hub before rebuilding, or set AGENTCOM_NO_RELAUNCH=1 to silence this."
+        );
+        return Ok(());
+    }
+
+    eprintln!(
+        "agentcom: started from build output ({}). Relaunching from {} so \
+         rebuilds can't clobber the running hub…",
+        exe.display(),
+        dest_exe.display()
+    );
+
+    // Supervisor: run the staged copy attached to this console, and swallow
+    // Ctrl+C here so only the child handles graceful shutdown.
+    let mut child = tokio::process::Command::new(&dest_exe)
+        .args(std::env::args_os().skip(1))
+        .env("AGENTCOM_RELAUNCHED", "1")
+        .spawn()
+        .with_context(|| format!("relaunching {}", dest_exe.display()))?;
+    loop {
+        tokio::select! {
+            status = child.wait() => {
+                let code = status.ok().and_then(|s| s.code()).unwrap_or(0);
+                std::process::exit(code);
+            }
+            // The child shares the console and gets the same Ctrl+C; let it run
+            // its own shutdown. We just keep waiting.
+            _ = tokio::signal::ctrl_c() => {}
+        }
+    }
+}
+
+/// True when `exe` lives under `<project_root>/target` (a Cargo build dir).
+fn is_inside_build_output(exe: &std::path::Path, project_root: &std::path::Path) -> bool {
+    let exe_c = std::fs::canonicalize(exe).unwrap_or_else(|_| exe.to_path_buf());
+    let target = project_root.join("target");
+    let target_c = std::fs::canonicalize(&target).unwrap_or(target);
+    exe_c.starts_with(&target_c)
+}
+
+/// Copy the hub binary and any sibling adapter exes into `stable_dir`.
+fn stage_runtime_binaries(exe: &std::path::Path, stable_dir: &std::path::Path) -> Result<()> {
+    let src_dir = exe.parent().context("current exe has no parent dir")?;
+    let exe_name = exe.file_name().context("current exe has no file name")?;
+    std::fs::copy(exe, stable_dir.join(exe_name))
+        .with_context(|| format!("copying {} to {}", exe.display(), stable_dir.display()))?;
+
+    let adapters: [&str; 2] = if cfg!(windows) {
+        ["agentcom-codex-adapter.exe", "agentcom-deepseek-adapter.exe"]
+    } else {
+        ["agentcom-codex-adapter", "agentcom-deepseek-adapter"]
+    };
+    for adapter in adapters {
+        let src = src_dir.join(adapter);
+        if src.exists() {
+            std::fs::copy(&src, stable_dir.join(adapter))
+                .with_context(|| format!("copying adapter {}", src.display()))?;
+        }
+    }
+    Ok(())
 }
 
 fn init_logging(project_root: &std::path::Path, headless: bool) -> Result<()> {

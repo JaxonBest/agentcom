@@ -17,17 +17,14 @@ use crate::ipc::Response;
 use std::time::{Duration, Instant};
 
 impl Hub {
-    pub(super) fn do_send(
-        &mut self,
-        from: &str,
-        to: &str,
-        body: &str,
-        urgent: bool,
-    ) -> Response {
+    pub(super) fn do_send(&mut self, from: &str, to: &str, body: &str, urgent: bool) -> Response {
         // Agents report to the human through the same message system; those
         // messages land in the TUI chat / `agentcom inbox`.
         if to == "human" {
-            if let Err(e) = self.store.msg_send(from, &["human".to_string()], body, urgent) {
+            if let Err(e) = self
+                .store
+                .msg_send(from, &["human".to_string()], body, urgent)
+            {
                 return Response::err(e.to_string());
             }
             let _ = self.ui_tx.send(super::events::UiEvent::MessagesChanged);
@@ -55,9 +52,7 @@ impl Hub {
         if let Err(e) = self.store.msg_send(from, &recipients, body, urgent) {
             return Response::err(e.to_string());
         }
-        let _ = self
-            .ui_tx
-            .send(super::events::UiEvent::MessagesChanged);
+        let _ = self.ui_tx.send(super::events::UiEvent::MessagesChanged);
 
         let mut notes = Vec::new();
         for r in recipients {
@@ -89,7 +84,9 @@ impl Hub {
 
     pub(super) fn start_interrupt(&mut self, name: &str) {
         let timeout = Duration::from_secs(self.cfg.interrupt_timeout_secs);
-        let Some(rt) = self.agents.get_mut(name) else { return };
+        let Some(rt) = self.agents.get_mut(name) else {
+            return;
+        };
         if rt.state != AgentState::Working {
             return;
         }

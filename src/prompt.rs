@@ -95,7 +95,11 @@ The human talks to YOU in their chat pane; messages from "human" in your [INBOX]
 
 /// Compose the next turn's prompt from pending messages and the task context.
 /// Returns `None` when there is nothing to do (agent should go idle).
-pub fn turn_prompt(inbox: &[Message], claimed: Option<&Task>, suggested: Option<&Task>) -> Option<String> {
+pub fn turn_prompt(
+    inbox: &[Message],
+    claimed: Option<&Task>,
+    suggested: Option<&Task>,
+) -> Option<String> {
     if inbox.is_empty() && claimed.is_none() && suggested.is_none() {
         return None;
     }
@@ -105,7 +109,13 @@ pub fn turn_prompt(inbox: &[Message], claimed: Option<&Task>, suggested: Option<
         out.push_str("[INBOX]\n");
         for (i, m) in inbox.iter().enumerate() {
             let urgency = if m.urgent { " (URGENT)" } else { "" };
-            out.push_str(&format!("{}. from {}{}: {}\n", i + 1, m.from_who, urgency, m.body));
+            out.push_str(&format!(
+                "{}. from {}{}: {}\n",
+                i + 1,
+                m.from_who,
+                urgency,
+                m.body
+            ));
         }
         out.push('\n');
     }

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 #[serde(deny_unknown_fields)]
 pub struct HubConfig {
     pub project_name: String,
-    /// Default child runtime for agents: Claude Code or Codex.
+    /// Default child runtime for agents: Claude Code, Codex, or DeepSeek.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_provider: Option<AgentProvider>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -65,6 +65,17 @@ pub struct AgentConfig {
 pub enum AgentProvider {
     Claude,
     Codex,
+    Deepseek,
+}
+
+impl std::fmt::Display for AgentProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AgentProvider::Claude => f.write_str("claude"),
+            AgentProvider::Codex => f.write_str("codex"),
+            AgentProvider::Deepseek => f.write_str("deepseek"),
+        }
+    }
 }
 
 pub const COMPOSER_NAME: &str = "composer";
@@ -126,9 +137,7 @@ pub fn composer_default(default_model: Option<&str>) -> AgentConfig {
         cwd: None,
         provider: None,
         model: default_model.map(str::to_string),
-        allowed_tools: Some(
-            ["Bash", "Read", "Glob", "Grep"].map(String::from).to_vec(),
-        ),
+        allowed_tools: Some(["Bash", "Read", "Glob", "Grep"].map(String::from).to_vec()),
         permission_mode: "acceptEdits".to_string(),
         max_turns_per_prompt: Some(30),
         max_budget_usd: None,
@@ -225,7 +234,7 @@ pub const EXAMPLE_CONFIG: &str = r#"# agentcom configuration
 
 project_name = "my-project"
 
-# Runtime for agents that don't set one: "claude" or "codex".
+# Runtime for agents that don't set one: "claude", "codex", or "deepseek".
 # default_provider = "claude"
 
 # Default model for agents that don't set one. Omit to use your `claude` default.
@@ -251,7 +260,7 @@ role = "Implements features and fixes. Owns src/. Coordinates with reviewer befo
 # work too.
 allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
 # cwd = "."                      # working dir, relative to this file
-# provider = "claude"            # or "codex"
+# provider = "claude"            # or "codex" or "deepseek"
 # model = "sonnet"
 # permission_mode = "acceptEdits"  # or "plan", "default", "bypassPermissions"
 # max_turns_per_prompt = 50
@@ -274,16 +283,15 @@ pub fn render_with_agent(project_root: &Path, agent: &AgentConfig) -> Result<(Pa
         agent: [&'a AgentConfig; 1],
     }
     let path = project_root.join(crate::paths::CONFIG_FILE);
-    let mut text = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let mut text =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     if !text.ends_with('\n') {
         text.push('\n');
     }
     text.push('\n');
     text.push_str(&toml::to_string(&Wrap { agent: [agent] })?);
 
-    let combined: HubConfig =
-        toml::from_str(&text).context("config invalid after adding agent")?;
+    let combined: HubConfig = toml::from_str(&text).context("config invalid after adding agent")?;
     combined.validate()?;
     Ok((path, text))
 }

@@ -132,37 +132,46 @@ struct TurnResult {
     failed: bool,
 }
 
-async fn run_codex_turn(args: &Args, resume: Option<&str>, prompt: &str) -> Result<TurnResult> {
+async fn run_codex_turn(args: &Args, _resume: Option<&str>, prompt: &str) -> Result<TurnResult> {
     let mut cmd = Command::new(&args.codex_exe);
-    cmd.arg("exec").arg("--json");
+    cmd.arg("exec")
+        .arg("--json")
+        .arg("--ephemeral")
+        .arg("--ignore-user-config")
+        .arg("--ignore-rules");
     if let Some(model) = &args.model {
         cmd.arg("--model").arg(model);
     }
-    cmd.arg("--cd")
+    cmd.arg("-c")
+        .arg("approval_policy=\"never\"")
+        .arg("--cd")
         .arg(&args.cwd)
         .arg("--sandbox")
-        .arg("workspace-write")
-        .arg("--ask-for-approval")
-        .arg("never");
-    if let Some(session) = resume {
-        cmd.arg("resume").arg(session).arg(prompt);
-    } else {
-        cmd.arg(prompt);
-    }
+        .arg("workspace-write");
+    cmd.arg("-");
     cmd.current_dir(&args.cwd)
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
 
     let mut child = cmd.spawn().context("spawning codex exec")?;
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(prompt.as_bytes())
+            .await
+            .context("writing prompt to codex stdin")?;
+        stdin.shutdown().await.ok();
+    }
     let stdout = child.stdout.take().expect("codex stdout piped");
     let stderr = child.stderr.take().expect("codex stderr piped");
 
     let stderr_task = tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            eprintln!("{line}");
+            if should_forward_stderr(&line) {
+                eprintln!("{line}");
+            }
         }
     });
 
@@ -180,9 +189,23 @@ async fn run_codex_turn(args: &Args, resume: Option<&str>, prompt: &str) -> Resu
     Ok(result)
 }
 
+fn should_forward_stderr(line: &str) -> bool {
+    if std::env::var_os("AGENTCOM_CODEX_VERBOSE_STDERR").is_some() {
+        return true;
+    }
+    let trimmed = line.trim();
+    if trimmed == "Reading additional input from stdin..." {
+        return false;
+    }
+    if trimmed.contains("codex_core::tools::router") {
+        return false;
+    }
+    true
+}
+
 async fn handle_codex_event(line: &str, result: &mut TurnResult) -> Result<()> {
-    let v: Value = serde_json::from_str(line)
-        .with_context(|| format!("parsing codex jsonl event: {line}"))?;
+    let v: Value =
+        serde_json::from_str(line).with_context(|| format!("parsing codex jsonl event: {line}"))?;
     match v.get("type").and_then(|t| t.as_str()) {
         Some("thread.started") => {
             result.thread_id = v

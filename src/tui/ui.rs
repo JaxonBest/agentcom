@@ -1,20 +1,22 @@
 //! TUI rendering.
 
 use super::{App, InputKind, Tab};
-use crate::store::TaskStatus;
+use crate::store::{Message, TaskStatus};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Tabs};
 use ratatui::Frame;
 
+const SPINNER: [&str; 4] = ["|", "/", "-", "\\"];
+
 pub fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1), // header
-            Constraint::Min(5),    // body
-            Constraint::Length(1), // footer / input
+            Constraint::Length(1),
+            Constraint::Min(5),
+            Constraint::Length(1),
         ])
         .split(f.area());
 
@@ -22,7 +24,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     let body = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(24), Constraint::Min(20)])
+        .constraints([Constraint::Length(32), Constraint::Min(20)])
         .split(chunks[1]);
     draw_sidebar(f, app, body[0]);
     draw_main(f, app, body[1]);
@@ -44,29 +46,96 @@ fn state_style(state: &str) -> Style {
 
 fn state_glyph(state: &str) -> &'static str {
     match state {
-        "working" => "▶",
+        "working" => ">",
         "interrupting" => "!",
-        "idle" => "·",
-        "paused" => "⏸",
-        "crashed" => "✗",
-        "starting" => "…",
-        _ => "□",
+        "idle" => ".",
+        "paused" => "||",
+        "crashed" => "x",
+        "starting" => "...",
+        _ => "-",
     }
 }
 
+fn provider_badge(provider: &str) -> Span<'static> {
+    match provider {
+        "claude" => Span::styled("[claude]", Style::default().fg(Color::Magenta)),
+        "codex" => Span::styled("[codex]", Style::default().fg(Color::Blue)),
+        "deepseek" => Span::styled("[deepseek]", Style::default().fg(Color::Cyan)),
+        other => Span::styled(format!("[{other}]"), Style::default().fg(Color::DarkGray)),
+    }
+}
+
+fn provider_usage(app: &App) -> Vec<(String, f64, u64)> {
+    let mut usage = std::collections::BTreeMap::<String, (f64, u64)>::new();
+    for agent in &app.agents {
+        let entry = usage.entry(agent.provider.clone()).or_default();
+        entry.0 += agent.spent_usd;
+        entry.1 += agent.turns;
+    }
+    usage
+        .into_iter()
+        .map(|(provider, (cost, turns))| (provider, cost, turns))
+        .collect()
+}
+
+fn looks_like_question(body: &str) -> bool {
+    let b = body.trim();
+    b.contains('?')
+}
+
+fn human_attention(app: &App) -> (usize, usize) {
+    let pending = app
+        .messages
+        .iter()
+        .filter(|m| m.to_who == "human" && !m.delivered)
+        .count();
+    let questions = app
+        .messages
+        .iter()
+        .filter(|m| m.to_who == "human" && !m.delivered && looks_like_question(&m.body))
+        .count();
+    (pending, questions)
+}
+
 fn draw_header(f: &mut Frame, app: &App, area: Rect) {
-    let text = Line::from(vec![
+    let usage = provider_usage(app)
+        .into_iter()
+        .map(|(provider, cost, turns)| format!("{provider} ${cost:.2}/{turns}t"))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let usage = if usage.is_empty() {
+        String::new()
+    } else {
+        format!(" | {usage}")
+    };
+    let (human_pending, human_questions) = human_attention(app);
+    let mut spans = vec![
         Span::styled(
-            format!(" agentcom — {} ", app.project),
+            format!(" agentcom - {} ", app.project),
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!(
-            "· ${:.2} · {} open task(s) ",
+            "| ${:.2} total{usage} | {} open",
             app.total_cost, app.open_tasks
         )),
-    ]);
+    ];
+    if human_questions > 0 {
+        spans.push(Span::styled(
+            format!(" | {human_questions} QUESTION(S)"),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    } else if human_pending > 0 {
+        spans.push(Span::styled(
+            format!(" | {human_pending} message(s) to you"),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     f.render_widget(
-        Paragraph::new(text).style(Style::default().bg(Color::Indexed(236))),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Indexed(236))),
         area,
     );
 }
@@ -79,6 +148,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
         .map(|(i, name)| {
             let row = app.agent_row(name);
             let state = row.map(|r| r.state.as_str()).unwrap_or("stopped");
+            let provider = row.map(|r| r.provider.as_str()).unwrap_or("?");
             let cost = row.map(|r| r.spent_usd).unwrap_or(0.0);
             let marker = if i == app.selected { ">" } else { " " };
             let glyph = if state == "working" {
@@ -88,9 +158,10 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
             };
             let line = Line::from(vec![
                 Span::raw(format!("{marker} ")),
-                Span::styled(format!("{glyph} "), state_style(state)),
-                Span::raw(format!("{name:<10}")),
-                Span::styled(format!("${cost:.2}"), Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{glyph:<2} "), state_style(state)),
+                Span::raw(format!("{name:<10} ")),
+                provider_badge(provider),
+                Span::styled(format!(" ${cost:.2}"), Style::default().fg(Color::DarkGray)),
             ]);
             let item = ListItem::new(line);
             if i == app.selected {
@@ -101,7 +172,7 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
         })
         .collect();
     f.render_widget(
-        List::new(items).block(Block::default().borders(Borders::RIGHT).title("agents")),
+        List::new(items).block(Block::default().borders(Borders::RIGHT).title(" agents ")),
         area,
     );
 }
@@ -116,7 +187,11 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(
         Tabs::new(Tab::ALL.iter().map(|t| t.title()).collect::<Vec<_>>())
             .select(idx)
-            .highlight_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+            .highlight_style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
         chunks[0],
     );
 
@@ -129,10 +204,6 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect) {
     }
 }
 
-const SPINNER: [&str; 8] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"];
-
-/// The conversation with the composer (top) plus a live activity panel
-/// (bottom) showing what every busy agent is doing right now.
 fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -144,40 +215,31 @@ fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_conversation(f: &mut Frame, app: &App, area: Rect) {
     let inner = area.height.saturating_sub(2) as usize;
-    let chat: Vec<&crate::store::Message> = app
+    let chat: Vec<&Message> = app
         .messages
         .iter()
         .filter(|m| m.from_who == "human" || m.to_who == "human")
         .collect();
+    let question_count = chat
+        .iter()
+        .filter(|m| m.to_who == "human" && !m.delivered && looks_like_question(&m.body))
+        .count();
+    let title = if question_count > 0 {
+        format!(" composer - {question_count} question(s) need your reply ")
+    } else {
+        " composer ".to_string()
+    };
     let lines: Vec<Line> = chat
         .iter()
         .rev()
         .take(inner.max(1))
         .rev()
-        .map(|m| {
-            if m.from_who == "human" {
-                Line::from(vec![
-                    Span::styled(
-                        format!("you → {}: ", m.to_who),
-                        Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(m.body.clone()),
-                ])
-            } else {
-                Line::from(vec![
-                    Span::styled(
-                        format!("{}: ", m.from_who),
-                        Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw(m.body.clone()),
-                ])
-            }
-        })
+        .map(|m| conversation_line(m))
         .collect();
     let lines = if lines.is_empty() {
         vec![
             Line::from(Span::styled(
-                "Tell the composer what you want done — it will plan, recruit, and report back.",
+                "Tell the composer what you want done. It will plan, recruit, and report back.",
                 Style::default().fg(Color::DarkGray),
             )),
             Line::from(Span::styled(
@@ -188,16 +250,72 @@ fn draw_conversation(f: &mut Frame, app: &App, area: Rect) {
     } else {
         lines
     };
+    let block_style = if question_count > 0 {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default()
+    };
     f.render_widget(
         Paragraph::new(lines)
             .wrap(ratatui::widgets::Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).title(" composer ")),
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(title)
+                    .border_style(block_style),
+            ),
         area,
     );
 }
 
-/// What is everyone doing right now: spinner + state + the last line of
-/// each busy agent's output, then the most recent hub events.
+fn conversation_line(m: &Message) -> Line<'static> {
+    if m.from_who == "human" {
+        return Line::from(vec![
+            Span::styled(
+                format!("you -> {}: ", m.to_who),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(m.body.clone()),
+        ]);
+    }
+
+    let is_question = m.to_who == "human" && !m.delivered && looks_like_question(&m.body);
+    let is_pending = m.to_who == "human" && !m.delivered;
+    if is_question {
+        Line::from(vec![
+            Span::styled(
+                format!("QUESTION from {}: ", m.from_who),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(m.body.clone()),
+        ])
+    } else if is_pending {
+        Line::from(vec![
+            Span::styled(
+                format!("MESSAGE from {}: ", m.from_who),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(m.body.clone()),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled(
+                format!("{}: ", m.from_who),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(m.body.clone()),
+        ])
+    }
+}
+
 fn draw_activity(f: &mut Frame, app: &App, area: Rect) {
     let spinner = SPINNER[app.spin % SPINNER.len()];
     let mut lines: Vec<Line> = Vec::new();
@@ -223,10 +341,9 @@ fn draw_activity(f: &mut Frame, app: &App, area: Rect) {
         };
         lines.push(Line::from(vec![
             Span::styled(format!("{spinner} "), style),
-            Span::styled(
-                format!("{} · {}", row.name, row.state),
-                style.add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(format!("{} ", row.name), style.add_modifier(Modifier::BOLD)),
+            provider_badge(&row.provider),
+            Span::styled(format!(" {}", row.state), style),
             Span::styled(
                 if last_action.is_empty() {
                     String::new()
@@ -244,17 +361,18 @@ fn draw_activity(f: &mut Frame, app: &App, area: Rect) {
         )));
     }
 
-    // Recent hub events (task lifecycle, recruits, interrupts) fill the rest.
     let remaining = (area.height.saturating_sub(2) as usize).saturating_sub(lines.len());
     for event in app.hub_log.iter().rev().take(remaining).rev() {
         lines.push(Line::from(Span::styled(
-            format!("· {event}"),
+            format!("- {event}"),
             Style::default().fg(Color::DarkGray),
         )));
     }
 
     f.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" activity ")),
+        Paragraph::new(lines)
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).title(" activity ")),
         area,
     );
 }
@@ -265,13 +383,14 @@ fn draw_output(f: &mut Frame, app: &App, area: Rect) {
         return;
     };
     let row = app.agent_row(name);
+    let provider = row.map(|r| r.provider.as_str()).unwrap_or("?");
     let title = format!(
-        " {name} · {} · {} turns · ${:.2}{} ",
+        " {name} [{provider}] - {} - {} turns - ${:.2}{} ",
         row.map(|r| r.state.clone()).unwrap_or_default(),
         row.map(|r| r.turns).unwrap_or(0),
         row.map(|r| r.spent_usd).unwrap_or(0.0),
         row.and_then(|r| r.detail.clone())
-            .map(|d| format!(" · {d}"))
+            .map(|d| format!(" - {d}"))
             .unwrap_or_default(),
     );
 
@@ -302,11 +421,17 @@ fn draw_output(f: &mut Frame, app: &App, area: Rect) {
         .iter()
         .map(|l| {
             if l.starts_with("[stderr]") {
-                Line::from(Span::styled(l.clone(), Style::default().fg(Color::Red).dim()))
+                Line::from(Span::styled(
+                    l.clone(),
+                    Style::default().fg(Color::Red).dim(),
+                ))
             } else if l.starts_with("[tool]") {
                 Line::from(Span::styled(l.clone(), Style::default().fg(Color::Cyan)))
             } else if l.starts_with("[turn end]") || l.starts_with("[session]") {
-                Line::from(Span::styled(l.clone(), Style::default().fg(Color::DarkGray)))
+                Line::from(Span::styled(
+                    l.clone(),
+                    Style::default().fg(Color::DarkGray),
+                ))
             } else {
                 Line::from(l.clone())
             }
@@ -317,7 +442,12 @@ fn draw_output(f: &mut Frame, app: &App, area: Rect) {
     if app.scroll_back.is_some() {
         block = block.title_bottom(" SCROLLED (End to follow) ");
     }
-    f.render_widget(Paragraph::new(text).block(block), area);
+    f.render_widget(
+        Paragraph::new(text)
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .block(block),
+        area,
+    );
 }
 
 fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
@@ -361,18 +491,28 @@ fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
 
 fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
     let inner = area.height.saturating_sub(2) as usize;
-    let msgs = app
-        .messages
-        .iter()
-        .rev()
-        .take(inner)
-        .rev();
+    let msgs = app.messages.iter().rev().take(inner).rev();
     let lines: Vec<Line> = msgs
         .map(|m| {
             let mut spans = vec![Span::styled(
-                format!("{} → {} ", m.from_who, m.to_who),
+                format!("{} -> {} ", m.from_who, m.to_who),
                 Style::default().fg(Color::Cyan),
             )];
+            if m.to_who == "human" && !m.delivered && looks_like_question(&m.body) {
+                spans.push(Span::styled(
+                    "QUESTION ",
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            } else if m.to_who == "human" && !m.delivered {
+                spans.push(Span::styled(
+                    "TO YOU ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ));
+            }
             if m.urgent {
                 spans.push(Span::styled(
                     "URGENT ",
@@ -380,14 +520,19 @@ fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
                 ));
             }
             if !m.delivered {
-                spans.push(Span::styled("(queued) ", Style::default().fg(Color::Yellow)));
+                spans.push(Span::styled(
+                    "(queued) ",
+                    Style::default().fg(Color::Yellow),
+                ));
             }
             spans.push(Span::raw(m.body.clone()));
             Line::from(spans)
         })
         .collect();
     f.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" messages ")),
+        Paragraph::new(lines)
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).title(" messages ")),
         area,
     );
 }
@@ -403,29 +548,26 @@ fn draw_hub_log(f: &mut Frame, app: &App, area: Rect) {
         .map(|l| Line::from(l.clone()))
         .collect();
     f.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" hub log ")),
+        Paragraph::new(lines)
+            .wrap(ratatui::widgets::Wrap { trim: false })
+            .block(Block::default().borders(Borders::ALL).title(" hub log ")),
         area,
     );
 }
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
+    let (_, human_questions) = human_attention(app);
     let content: Line = if let Some(modal) = &app.modal {
         let label = match modal.kind {
-            InputKind::Message => format!(
-                "message → {}: ",
-                app.selected_agent().unwrap_or("?")
-            ),
-            InputKind::Urgent => format!(
-                "INTERRUPT → {}: ",
-                app.selected_agent().unwrap_or("?")
-            ),
-            InputKind::Broadcast => "broadcast → all: ".to_string(),
+            InputKind::Message => format!("message -> {}: ", app.selected_agent().unwrap_or("?")),
+            InputKind::Urgent => format!("INTERRUPT -> {}: ", app.selected_agent().unwrap_or("?")),
+            InputKind::Broadcast => "broadcast -> all: ".to_string(),
             InputKind::AddTask => "new task title: ".to_string(),
         };
         Line::from(vec![
             Span::styled(label, Style::default().fg(Color::Yellow)),
             Span::raw(modal.buffer.clone()),
-            Span::styled("▏", Style::default().fg(Color::Yellow)),
+            Span::styled("|", Style::default().fg(Color::Yellow)),
         ])
     } else if app.confirm_quit {
         Line::from(Span::styled(
@@ -433,15 +575,24 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
         ))
     } else if app.tab == Tab::Chat {
-        Line::from(vec![
+        let mut spans = vec![
             Span::styled("> ", Style::default().fg(Color::Green)),
             Span::raw(app.chat_input.clone()),
-            Span::styled("▏", Style::default().fg(Color::Green)),
+            Span::styled("|", Style::default().fg(Color::Green)),
             Span::styled(
-                "  (Enter send · Tab panes · Ctrl+C quit)",
+                "  (Enter send - Tab panes - Ctrl+C quit)",
                 Style::default().fg(Color::DarkGray),
             ),
-        ])
+        ];
+        if human_questions > 0 {
+            spans.push(Span::styled(
+                format!("  {human_questions} question(s) waiting"),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        Line::from(spans)
     } else if let Some(flash) = &app.flash {
         Line::from(vec![
             Span::styled(format!(" {flash} "), Style::default().fg(Color::Green)),
@@ -452,7 +603,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         ])
     } else {
         Line::from(Span::styled(
-            " [m]sg [u]rgent [M]broadcast [a]dd-task [p]ause [s]top [↑↓]agent [PgUp/PgDn]scroll [Tab]pane [q]uit",
+            " [m]sg [u]rgent [M]broadcast [a]dd-task [p]ause [s]top [Up/Down]agent [PgUp/PgDn]scroll [Tab]pane [q]uit",
             Style::default().fg(Color::DarkGray),
         ))
     };
