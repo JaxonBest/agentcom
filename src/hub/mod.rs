@@ -891,6 +891,11 @@ impl Hub {
                 if description.len() > 4000 {
                     return Response::err(format!("task description too long ({} chars, max 4000)", description.len()));
                 }
+                for label in &requires {
+                    if let Err(e) = crate::config::validate_capability_label(label) {
+                        return Response::err(format!("invalid requires label: {e}"));
+                    }
+                }
                 match self
                 .store
                 .task_add(&title, &description, priority, &depends_on, identity)
