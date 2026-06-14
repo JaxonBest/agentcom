@@ -46,6 +46,8 @@ pub enum Request {
     },
     TaskList {
         status: Option<String>,
+        /// Filter tasks by keyword (matches title or description, case-insensitive)
+        search: Option<String>,
     },
     TaskClaim {
         id: i64,
@@ -60,6 +62,24 @@ pub enum Request {
     },
     TaskReopen {
         id: i64,
+    },
+    TaskEdit {
+        id: i64,
+        title: Option<String>,
+        description: Option<String>,
+        priority: Option<i64>,
+    },
+    TaskGet {
+        id: i64,
+    },
+    /// Permanently delete a task from the board.
+    TaskDelete {
+        id: i64,
+    },
+    /// Prune old done/blocked tasks.
+    TaskPrune {
+        /// Delete tasks whose updated_at is more than this many seconds ago.
+        before_secs: i64,
     },
     Status,
     /// Hot-add an agent to the running hub (already persisted to
@@ -119,6 +139,10 @@ pub enum Response {
     },
     Files {
         claims: Vec<crate::store::files::FileClaim>,
+    },
+    /// Result of a prune operation.
+    Pruned {
+        count: usize,
     },
     /// Streamed repeatedly in `Tail { follow: true }` mode.
     TailLine {

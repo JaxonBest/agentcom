@@ -68,6 +68,48 @@ impl Store {
         Ok(id)
     }
 
+    pub fn task_update(
+        &self,
+        id: i64,
+        title: Option<&str>,
+        description: Option<&str>,
+        priority: Option<i64>,
+    ) -> Result<Task> {
+        let mut sets: Vec<String> = Vec::new();
+        let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        if let Some(t) = title {
+            sets.push("title = ?".to_string());
+            params.push(Box::new(t.to_string()));
+        }
+        if let Some(d) = description {
+            sets.push("description = ?".to_string());
+            params.push(Box::new(d.to_string()));
+        }
+        if let Some(p) = priority {
+            sets.push("priority = ?".to_string());
+            params.push(Box::new(p));
+        }
+        if sets.is_empty() {
+            bail!("nothing to update");
+        }
+        sets.push("updated_at = ?".to_string());
+        params.push(Box::new(now_ts()));
+
+        params.push(Box::new(id));
+        let sql = format!(
+            "UPDATE tasks SET {} WHERE id = ?",
+            sets.join(", ")
+        );
+
+        let conn = self.conn.lock().unwrap();
+        let updated = conn.execute(&sql, rusqlite::params_from_iter(params.iter().map(|p| p.as_ref())))?;
+        if updated == 0 {
+            bail!("task #{id} not found");
+        }
+        drop(conn);
+        Ok(self.task_get(id)?.expect("just updated"))
+    }
+
     pub fn task_get(&self, id: i64) -> Result<Option<Task>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare_cached("SELECT * FROM tasks WHERE id = ?1")?;
@@ -82,25 +124,59 @@ impl Store {
         }
     }
 
-    pub fn task_list(&self, status: Option<TaskStatus>) -> Result<Vec<Task>> {
+    pub fn task_list(
+        &self,
+        status: Option<TaskStatus>,
+        search: Option<&str>,
+    ) -> Result<Vec<Task>> {
         let conn = self.conn.lock().unwrap();
-        let mut tasks = match status {
+        let search_clause = search
+            .filter(|s| !s.is_empty())
+            .map(|s| {
+                let pattern = format!("%{}%", s.replace('%', "%%"));
+                (pattern, "(title LIKE ? OR description LIKE ?)".to_string())
+            });
+
+        let mut tasks: Vec<Task> = match status {
             Some(s) => {
-                let mut stmt = conn.prepare_cached(
-                    "SELECT * FROM tasks WHERE status = ?1 ORDER BY priority, id",
-                )?;
-                let rows = stmt.query_map([s.as_str()], task_from_row)?;
-                rows.collect::<rusqlite::Result<Vec<_>>>()?
+                let mut sql = "SELECT * FROM tasks WHERE status = ?1".to_string();
+                if let Some((_, clause)) = &search_clause {
+                    sql.push_str(&format!(" AND {clause}"));
+                }
+                sql.push_str(" ORDER BY priority, id");
+                let mut stmt = conn.prepare_cached(&sql)?;
+                if let Some((pattern, _)) = search_clause.as_ref() {
+                    let rows = stmt.query_map(params![s.as_str(), pattern, pattern], task_from_row)?;
+                    rows.collect::<rusqlite::Result<Vec<_>>>()?
+                } else {
+                    let rows = stmt.query_map([s.as_str()], task_from_row)?;
+                    rows.collect::<rusqlite::Result<Vec<_>>>()?
+                }
             }
             None => {
-                let mut stmt = conn.prepare_cached(
+                let mut sql = String::from(
                     "SELECT * FROM tasks ORDER BY
                        CASE status WHEN 'claimed' THEN 0 WHEN 'open' THEN 1
                                    WHEN 'blocked' THEN 2 ELSE 3 END,
                        priority, id",
-                )?;
-                let rows = stmt.query_map([], task_from_row)?;
-                rows.collect::<rusqlite::Result<Vec<_>>>()?
+                );
+                if let Some((pattern, clause)) = &search_clause {
+                    // Subquery: first gather matching IDs, then sort them
+                    sql = format!(
+                        "SELECT * FROM tasks WHERE id IN (SELECT id FROM tasks WHERE {clause})
+                         ORDER BY
+                           CASE status WHEN 'claimed' THEN 0 WHEN 'open' THEN 1
+                                       WHEN 'blocked' THEN 2 ELSE 3 END,
+                           priority, id",
+                    );
+                    let mut stmt = conn.prepare_cached(&sql)?;
+                    let rows = stmt.query_map(params![pattern, pattern], task_from_row)?;
+                    rows.collect::<rusqlite::Result<Vec<_>>>()?
+                } else {
+                    let mut stmt = conn.prepare_cached(&sql)?;
+                    let rows = stmt.query_map([], task_from_row)?;
+                    rows.collect::<rusqlite::Result<Vec<_>>>()?
+                }
             }
         };
         for t in &mut tasks {
@@ -228,6 +304,73 @@ impl Store {
         Ok(self.task_get(id)?.expect("just reopened"))
     }
 
+    /// Permanently delete a task. Only allowed for open, done, or blocked
+    /// tasks — claimed tasks must be released or completed first.
+    pub fn task_delete(&self, id: i64) -> Result<()> {
+        let conn = self.conn.lock().unwrap();
+
+        // Check the current status — refuse to delete claimed tasks.
+        let status: Option<String> = conn
+            .query_row("SELECT status FROM tasks WHERE id = ?1", [id], |r| r.get(0))
+            .ok();
+        match status {
+            None => bail!("task #{id} not found"),
+            Some(ref s) if s == "claimed" => {
+                bail!("task #{id} is claimed — release or complete it first");
+            }
+            Some(_) => {}
+        }
+
+        // Remove dependency links where this task depends on others.
+        conn.execute("DELETE FROM task_deps WHERE task_id = ?1", [id])?;
+        // Remove dependency links where other tasks depend on this one.
+        conn.execute("DELETE FROM task_deps WHERE depends_on_id = ?1", [id])?;
+        // Delete the task itself.
+        conn.execute("DELETE FROM tasks WHERE id = ?1", [id])?;
+        Ok(())
+    }
+
+    /// Delete old done/blocked tasks older than `before_secs` seconds.
+    /// Also cleans up dependency links. Returns the number of tasks removed.
+    pub fn task_prune(&self, before_secs: i64) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let cutoff = now_ts() - before_secs;
+
+        // Gather IDs of tasks to prune.
+        let mut stmt = conn.prepare_cached(
+            "SELECT id FROM tasks WHERE status IN ('done','blocked') AND updated_at < ?1",
+        )?;
+        let ids: Vec<i64> = stmt
+            .query_map([cutoff], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        // Delete dependency links involving these tasks.
+        let placeholders: Vec<String> = ids.iter().map(|_| "?".to_string()).collect();
+        let placeholders = placeholders.join(",");
+        let params: Vec<&dyn rusqlite::types::ToSql> =
+            ids.iter().map(|id| id as &dyn rusqlite::types::ToSql).collect();
+
+        conn.execute(
+            &format!("DELETE FROM task_deps WHERE task_id IN ({placeholders})"),
+            params.as_slice(),
+        )?;
+        conn.execute(
+            &format!("DELETE FROM task_deps WHERE depends_on_id IN ({placeholders})"),
+            params.as_slice(),
+        )?;
+
+        // Delete the tasks themselves.
+        let count = conn.execute(
+            &format!("DELETE FROM tasks WHERE id IN ({placeholders})"),
+            params.as_slice(),
+        )?;
+        Ok(count)
+    }
+
     /// Release an agent's claims back to open (used when an agent crashes
     /// without resume, so its work isn't stranded).
     pub fn release_claims(&self, agent: &str) -> Result<usize> {
@@ -320,5 +463,104 @@ mod tests {
     fn missing_dep_rejected() {
         let s = Store::open_in_memory().unwrap();
         assert!(s.task_add("t", "", 2, &[999], "human").is_err());
+    }
+
+    #[test]
+    fn task_delete_removes_task_and_deps() {
+        let s = Store::open_in_memory().unwrap();
+        let a = s.task_add("parent", "", 1, &[], "human").unwrap();
+        let b = s.task_add("child", "", 0, &[a], "human").unwrap();
+
+        // Can't delete claimed task.
+        s.task_claim(a, "alice").unwrap();
+        assert!(s.task_delete(a).is_err());
+        s.task_done(a, "alice", None).unwrap();
+
+        // Delete the parent (now done) — child's dep link is cleaned up.
+        s.task_delete(a).unwrap();
+        assert!(s.task_get(a).unwrap().is_none());
+
+        // Child should have no remaining deps.
+        let child = s.task_get(b).unwrap().unwrap();
+        assert!(child.depends_on.is_empty());
+    }
+
+    #[test]
+    fn task_update_changes_fields() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.task_add("original title", "original desc", 2, &[], "human").unwrap();
+        let t = s.task_update(id, Some("new title"), None, Some(0)).unwrap();
+        assert_eq!(t.title, "new title");
+        assert_eq!(t.description, "original desc");
+        assert_eq!(t.priority, 0);
+    }
+
+    #[test]
+    fn task_prune_removes_old_done_tasks() {
+        let s = Store::open_in_memory().unwrap();
+        let now = now_ts();
+
+        // Create tasks with artificially old updated_at timestamps
+        // by manipulating the database directly (since task_add uses now_ts()).
+        let fresh = s.task_add("fresh task", "", 2, &[], "human").unwrap();
+        let old_done = s.task_add("old done", "", 2, &[], "human").unwrap();
+        let old_blocked = s.task_add("old blocked", "", 2, &[], "human").unwrap();
+        let recent_done = s.task_add("recent done", "", 2, &[], "human").unwrap();
+
+        // Set old tasks to have very old timestamps.
+        let conn = s.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE tasks SET updated_at = ?1, status = 'done' WHERE id = ?2",
+            params![now - 100_000, old_done],
+        ).unwrap();
+        conn.execute(
+            "UPDATE tasks SET updated_at = ?1, status = 'blocked' WHERE id = ?2",
+            params![now - 100_000, old_blocked],
+        ).unwrap();
+        conn.execute(
+            "UPDATE tasks SET updated_at = ?1, status = 'done' WHERE id = ?2",
+            params![now - 100, recent_done],
+        ).unwrap();
+        // fresh stays as 'open' with current timestamp.
+        drop(conn);
+
+        // Prune tasks older than 1 day (86400 seconds).
+        let count = s.task_prune(86_400).unwrap();
+        assert_eq!(count, 2, "should prune old_done and old_blocked");
+
+        assert!(s.task_get(old_done).unwrap().is_none());
+        assert!(s.task_get(old_blocked).unwrap().is_none());
+        assert!(s.task_get(recent_done).unwrap().is_some());
+        assert!(s.task_get(fresh).unwrap().is_some());
+    }
+
+    #[test]
+    fn task_prune_respects_deps_cleanup() {
+        let s = Store::open_in_memory().unwrap();
+        let now = now_ts();
+
+        let parent = s.task_add("parent", "", 1, &[], "human").unwrap();
+        let child = s.task_add("child", "", 0, &[parent], "human").unwrap();
+
+        let conn = s.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE tasks SET updated_at = ?1, status = 'done' WHERE id = ?2",
+            params![now - 200_000, parent],
+        ).unwrap();
+        conn.execute(
+            "UPDATE tasks SET updated_at = ?1, status = 'done' WHERE id = ?2",
+            params![now - 200_000, child],
+        ).unwrap();
+        drop(conn);
+
+        let count = s.task_prune(86_400).unwrap();
+        assert_eq!(count, 2, "should prune both done tasks");
+
+        // Deps table should have no stale rows.
+        let conn = s.conn.lock().unwrap();
+        let remaining_deps: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM task_deps", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(remaining_deps, 0, "all dep links should be cleaned up");
     }
 }

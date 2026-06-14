@@ -313,6 +313,6 @@ async fn refresh_status(app: &mut App, ipc_tx: &mpsc::Sender<IpcMsg>) {
 }
 
 fn refresh_board(app: &mut App, store: &Store) {
-    app.tasks = store.task_list(None).unwrap_or_default();
+    app.tasks = store.task_list(None, None).unwrap_or_default();
     app.messages = store.msg_recent(200).unwrap_or_default();
 }

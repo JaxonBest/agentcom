@@ -703,7 +703,7 @@ impl Hub {
                 }
                 Err(e) => Response::err(e.to_string()),
             },
-            Request::TaskList { status } => {
+            Request::TaskList { status, search } => {
                 let status = match status.as_deref() {
                     None => None,
                     Some(s) => match crate::store::TaskStatus::parse(s) {
@@ -711,7 +711,7 @@ impl Hub {
                         None => return Response::err(format!("unknown status {s:?}")),
                     },
                 };
-                match self.store.task_list(status) {
+                match self.store.task_list(status, search.as_deref()) {
                     Ok(tasks) => Response::Tasks { tasks },
                     Err(e) => Response::err(e.to_string()),
                 }
@@ -771,6 +771,35 @@ impl Hub {
                     self.wake_idle();
                     Response::ok_msg(format!("task #{} reopened", t.id))
                 }
+                Err(e) => Response::err(e.to_string()),
+            },
+            Request::TaskEdit {
+                id,
+                title,
+                description,
+                priority,
+            } => match self
+                .store
+                .task_update(id, title.as_deref(), description.as_deref(), priority)
+            {
+                Ok(task) => Response::Tasks {
+                    tasks: vec![task],
+                },
+                Err(e) => Response::err(e.to_string()),
+            },
+            Request::TaskGet { id } => match self.store.task_get(id) {
+                Ok(Some(task)) => Response::Tasks {
+                    tasks: vec![task],
+                },
+                Ok(None) => Response::err(format!("task #{id} not found")),
+                Err(e) => Response::err(e.to_string()),
+            },
+            Request::TaskDelete { id } => match self.store.task_delete(id) {
+                Ok(()) => Response::ok_msg(format!("task #{id} deleted")),
+                Err(e) => Response::err(e.to_string()),
+            },
+            Request::TaskPrune { before_secs } => match self.store.task_prune(before_secs) {
+                Ok(count) => Response::Pruned { count },
                 Err(e) => Response::err(e.to_string()),
             },
             Request::Status => self.status_response(),

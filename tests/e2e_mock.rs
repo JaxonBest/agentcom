@@ -132,6 +132,23 @@ fn agent_in_state(status_out: &str, agent: &str, state: &str) -> bool {
         .any(|l| l.contains(agent) && l.contains(state))
 }
 
+/// Run a CLI command and return (success, stdout-only, stderr-only).
+fn cli_split(project: &Path, args: &[&str]) -> (bool, String, String) {
+    let out = Command::new(agentcom_bin())
+        .args(args)
+        .current_dir(project)
+        .env_remove("AGENTCOM_PORT")
+        .env_remove("AGENTCOM_TOKEN")
+        .env_remove("AGENTCOM_AGENT")
+        .output()
+        .expect("cli runs");
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
 /// Poll a CLI command until its output satisfies `pred`.
 fn wait_for(
     project: &Path,
@@ -707,4 +724,111 @@ fn pause_resume_and_inbox() {
     wait_for(&project, &["status"], Duration::from_secs(10), |out| {
         out.contains("0 pending message(s)")
     });
+}
+
+#[test]
+fn task_edit_and_show() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    let scripts = tmp.path().join("scripts");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+
+    write_config(&project, &[("worker", "does the work")], "");
+    let _hub = start_hub(&project, &scripts, &[], &[]);
+
+    wait_for(&project, &["status"], Duration::from_secs(15), |out| {
+        out.contains("idle") || out.contains("working")
+    });
+
+    // Add a task via CLI.
+    let (ok, out) = cli(&project, &["task", "add", "original title", "-d", "original desc"]);
+    assert!(ok, "task add: {out}");
+
+    // Edit just the title; description should be preserved.
+    let (ok, out) = cli(&project, &["task", "edit", "1", "--title", "updated title"]);
+    assert!(ok, "task edit: {out}");
+    assert!(out.contains("updated title"), "edit returns new title: {out}");
+
+    // task show returns the single-task view with the updated title.
+    let (ok, out) = cli(&project, &["task", "show", "1"]);
+    assert!(ok, "task show: {out}");
+    assert!(out.contains("updated title"), "show reflects edit: {out}");
+    assert!(out.contains("original desc"), "show keeps original desc: {out}");
+
+    // Editing with no fields errors gracefully.
+    let (ok, out) = cli(&project, &["task", "edit", "1"]);
+    assert!(!ok, "edit with no fields should fail: {out}");
+    assert!(out.contains("nothing to update"), "proper error message: {out}");
+
+    // show on a non-existent task errors gracefully.
+    let (ok, out) = cli(&project, &["task", "show", "999"]);
+    assert!(!ok, "show nonexistent task should fail: {out}");
+    assert!(out.contains("not found"), "proper error message: {out}");
+}
+
+#[test]
+fn json_output() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    let scripts = tmp.path().join("scripts");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+
+    write_config(&project, &[("worker", "does the work")], "");
+    let _hub = start_hub(&project, &scripts, &["do something"], &[]);
+
+    wait_for(&project, &["status"], Duration::from_secs(15), |out| {
+        out.contains("idle") || out.contains("working")
+    });
+
+    // agentcom status --json should produce a valid JSON object on stdout.
+    let (ok, stdout, stderr) = cli_split(&project, &["status", "--json"]);
+    assert!(ok, "status --json: {stdout}{stderr}");
+    let val: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("status --json is valid JSON");
+    assert!(val["agents"].is_array(), "has agents array: {stdout}");
+    assert!(val["open_tasks"].is_number(), "has open_tasks: {stdout}");
+    assert!(val["total_cost_usd"].is_number(), "has total_cost_usd: {stdout}");
+
+    // agentcom task list --json should produce a valid JSON array on stdout.
+    let (ok, stdout, stderr) = cli_split(&project, &["task", "list", "--json"]);
+    assert!(ok, "task list --json: {stdout}{stderr}");
+    let arr: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("task list --json is valid JSON array");
+    assert!(arr.is_array(), "task list --json is an array: {stdout}");
+    // Seed task should be present.
+    let tasks = arr.as_array().unwrap();
+    assert!(!tasks.is_empty(), "seed task present: {stdout}");
+    assert_eq!(tasks[0]["id"], 1, "first task has id 1: {stdout}");
+}
+
+#[test]
+fn logs_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    let scripts = tmp.path().join("scripts");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+
+    write_config(&project, &[("worker", "does the work")], "");
+    let _hub = start_hub(&project, &scripts, &[], &[]);
+
+    // Give the hub a moment to emit logs.
+    wait_for(&project, &["status"], Duration::from_secs(15), |out| {
+        out.contains("idle") || out.contains("working")
+    });
+
+    // agentcom logs reads hub log files without a running hub connection.
+    let (ok, out) = cli(&project, &["logs"]);
+    assert!(ok, "logs command succeeds: {out}");
+
+    // -n limits output lines; should still succeed even if log is small.
+    let (ok, out) = cli(&project, &["logs", "-n", "5"]);
+    assert!(ok, "logs -n 5 succeeds: {out}");
+
+    // --agent filter is case-insensitive; hub log contains "hub" entries.
+    let (ok, out) = cli(&project, &["logs", "--agent", "HUB"]);
+    assert!(ok, "logs --agent filter succeeds: {out}");
+    let _ = out;
 }
