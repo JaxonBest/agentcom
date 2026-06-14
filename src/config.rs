@@ -99,6 +99,11 @@ pub struct AgentConfig {
     /// global HubConfig.auto_commit setting. Use false to opt this agent out.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_commit: Option<bool>,
+    /// Max API requests per minute for this agent. Hub skips feeding a new
+    /// prompt if the agent has already completed this many turns in the last
+    /// 60 seconds — preventing one agent from burning through quota too fast.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_rpm: Option<u32>,
     /// Extra environment variables injected into this agent's child process.
     /// Useful for per-agent API keys, debug flags, or tool configuration.
     /// Example: env = { ANTHROPIC_API_KEY = "sk-...", DEBUG = "1" }
@@ -195,6 +200,7 @@ pub fn composer_default(default_model: Option<&str>) -> AgentConfig {
         auto_commit_author_name: None,
         auto_commit_author_email: None,
         auto_commit: None,
+        max_rpm: None,
         env: BTreeMap::new(),
     }
 }
@@ -715,6 +721,209 @@ pub fn scan_project(root: &Path) -> String {
 fn push_unique(vec: &mut Vec<String>, val: &str) {
     if !vec.iter().any(|v| v == val) {
         vec.push(val.to_string());
+    }
+}
+
+/// Set a config value in agentcom.toml using `toml_edit` for non-destructive
+/// edits (preserving comments and formatting).
+///
+/// Supports top-level keys (`project_name`, `auto_commit`, etc.) and nested
+/// agent fields via dot notation (`agent.<name>.model`).
+///
+/// The value string is auto-parsed as boolean, integer, float, or string.
+pub fn config_set(project_root: &Path, key: &str, value: &str) -> Result<()> {
+    let path = project_root.join(crate::paths::CONFIG_FILE);
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let mut doc = text
+        .parse::<toml_edit::DocumentMut>()
+        .with_context(|| format!("parsing {}", path.display()))?;
+
+    let parts: Vec<&str> = key.split('.').collect();
+    if parts.is_empty() || parts[0].is_empty() {
+        bail!("key cannot be empty");
+    }
+
+    let toml_value = infer_toml_value(value);
+
+    if parts.len() == 1 {
+        doc[parts[0]] = toml_edit::Item::Value(toml_value);
+    } else if parts[0] == "agent" && parts.len() >= 3 {
+        let agent_name = parts[1];
+        let field_parts = &parts[2..];
+
+        let agents = doc
+            .get_mut("agent")
+            .and_then(|e| e.as_array_of_tables_mut())
+            .ok_or_else(|| anyhow::anyhow!("no [[agent]] tables found in config"))?;
+
+        let agent_table = agents
+            .iter_mut()
+            .find(|t| t.get("name").and_then(|v| v.as_str()) == Some(agent_name))
+            .ok_or_else(|| anyhow::anyhow!("agent {agent_name:?} not found in agentcom.toml"))?;
+
+        set_nested_table(agent_table, field_parts, &toml_value)?;
+    } else {
+        bail!("unsupported key path {key:?} — use top-level keys or 'agent.<name>.<field>'");
+    }
+
+    let new_text = doc.to_string();
+    // Parse-validate the new TOML to catch schema errors before writing.
+    let _: HubConfig = toml::from_str(&new_text)
+        .context("config invalid after set — rejecting write")?;
+
+    std::fs::write(&path, &new_text)
+        .with_context(|| format!("writing {}", path.display()))?;
+    println!("  set {key} = {value}");
+    Ok(())
+}
+
+/// Recursively set a value at `parts` path within a `toml_edit::Table`.
+fn set_nested_table(table: &mut toml_edit::Table, parts: &[&str], value: &toml_edit::Value) -> Result<()> {
+    match parts {
+        [] => bail!("empty field path"),
+        [key] => {
+            table[*key] = toml_edit::Item::Value(value.clone());
+            Ok(())
+        }
+        [key, rest @ ..] => {
+            if !table.contains_key(*key) {
+                table.insert(*key, toml_edit::table());
+            }
+            let sub = table[*key]
+                .as_table_mut()
+                .ok_or_else(|| anyhow::anyhow!("expected a table at key {key:?}"))?;
+            set_nested_table(sub, rest, value)
+        }
+    }
+}
+
+/// Infer a `toml_edit::Value` from a string, auto-detecting booleans,
+/// integers, floats, or falling back to a string.
+fn infer_toml_value(s: &str) -> toml_edit::Value {
+    if let Ok(b) = s.parse::<bool>() {
+        return toml_edit::Value::from(b);
+    }
+    if let Ok(i) = s.parse::<i64>() {
+        return toml_edit::Value::from(i);
+    }
+    if let Ok(f) = s.parse::<f64>() {
+        return toml_edit::Value::from(f);
+    }
+    toml_edit::Value::from(s)
+}
+
+#[cfg(test)]
+mod config_set_tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn infer_value_types() {
+        // Booleans
+        assert!(infer_toml_value("true").as_bool() == Some(true));
+        assert!(infer_toml_value("false").as_bool() == Some(false));
+
+        // Integers
+        assert!(infer_toml_value("42").as_integer() == Some(42));
+        assert!(infer_toml_value("-1").as_integer() == Some(-1));
+
+        // Floats
+        let f = infer_toml_value("3.14");
+        assert!((f.as_float().unwrap() - 3.14).abs() < 1e-10);
+
+        // Strings
+        assert!(infer_toml_value("hello").as_str() == Some("hello"));
+        assert!(infer_toml_value("true_story").as_str() == Some("true_story"));
+    }
+
+    #[test]
+    fn set_top_level_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let toml_path = root.join("agentcom.toml");
+
+        let base = r#"
+project_name = "my-app"
+auto_commit = true
+max_agents = 8
+"#;
+        fs::write(&toml_path, base).unwrap();
+
+        config_set(root, "project_name", "renamed-app").unwrap();
+        config_set(root, "auto_commit", "false").unwrap();
+        config_set(root, "max_agents", "16").unwrap();
+
+        let result = fs::read_to_string(&toml_path).unwrap();
+        let cfg: HubConfig = toml::from_str(&result).unwrap();
+        assert_eq!(cfg.project_name, "renamed-app");
+        assert!(!cfg.auto_commit);
+        assert_eq!(cfg.max_agents, 16);
+    }
+
+    #[test]
+    fn set_agent_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let toml_path = root.join("agentcom.toml");
+
+        let base = r#"
+project_name = "my-app"
+[[agent]]
+name = "builder"
+role = "Implements features"
+model = "claude-sonnet-4-5"
+"#;
+        fs::write(&toml_path, base).unwrap();
+
+        config_set(root, "agent.builder.model", "claude-sonnet-4-6").unwrap();
+
+        let result = fs::read_to_string(&toml_path).unwrap();
+        let cfg: HubConfig = toml::from_str(&result).unwrap();
+        assert_eq!(cfg.agents[0].model.as_deref(), Some("claude-sonnet-4-6"));
+    }
+
+    #[test]
+    fn set_throws_on_nonexistent_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let toml_path = root.join("agentcom.toml");
+
+        let base = r#"
+project_name = "my-app"
+[[agent]]
+name = "builder"
+role = "Implements features"
+"#;
+        fs::write(&toml_path, base).unwrap();
+
+        let err = config_set(root, "agent.nobody.model", "something").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("not found"), "expected 'not found' error, got: {msg}");
+    }
+
+    #[test]
+    fn set_env_var_for_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let toml_path = root.join("agentcom.toml");
+
+        let base = r#"
+project_name = "my-app"
+[[agent]]
+name = "builder"
+role = "Implements features"
+[agent.env]
+EXISTING = "old"
+"#;
+        fs::write(&toml_path, base).unwrap();
+
+        config_set(root, "agent.builder.env.NEWKEY", "newvalue").unwrap();
+
+        let result = fs::read_to_string(&toml_path).unwrap();
+        let cfg: HubConfig = toml::from_str(&result).unwrap();
+        assert_eq!(cfg.agents[0].env.get("NEWKEY").map(String::as_str), Some("newvalue"));
+        assert_eq!(cfg.agents[0].env.get("EXISTING").map(String::as_str), Some("old"));
     }
 }
 

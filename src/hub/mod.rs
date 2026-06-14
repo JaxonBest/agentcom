@@ -60,6 +60,8 @@ pub struct Hub {
     last_nudge: Instant,
     /// Latest observed 5h usage-limit percentage (from rate_limit_event).
     usage_observed_pct: Option<f64>,
+    /// Per-agent sliding window of prompt-send Instants for RPM tracking.
+    rpm_window: HashMap<String, std::collections::VecDeque<Instant>>,
 }
 
 impl Hub {
@@ -159,6 +161,7 @@ impl Hub {
             started: Instant::now(),
             last_nudge: Instant::now(),
             usage_observed_pct: None,
+            rpm_window: HashMap::new(),
         })
     }
 
@@ -866,6 +869,14 @@ impl Hub {
                 Ok(None) => Response::err(format!("task #{id} not found")),
                 Err(e) => Response::err(e.to_string()),
             },
+            Request::TaskClone { id } => match self.store.task_clone(id, identity) {
+                Ok(t) => {
+                    self.log(format!("{identity} cloned task #{id} → #{}", t.id));
+                    let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
+                    Response::ok_msg(format!("cloned task #{id} → new task #{}", t.id))
+                }
+                Err(e) => Response::err(e.to_string()),
+            },
             Request::TaskDelete { id } => match self.store.task_delete(id) {
                 Ok(()) => Response::ok_msg(format!("task #{id} deleted")),
                 Err(e) => Response::err(e.to_string()),
@@ -907,6 +918,7 @@ impl Hub {
                         if effective_auto_commit && !claimed_paths.is_empty() {
                             self.auto_commit_changes(identity, &claimed_paths);
                         }
+                        self.log(format!("{identity}: released {n} file claim(s)"));
                         Response::ok_msg(format!("released {n} file claim(s)"))
                     }
                     Err(e) => Response::err(e.to_string()),
