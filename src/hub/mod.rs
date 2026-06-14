@@ -858,12 +858,17 @@ impl Hub {
                 priority,
                 depends_on,
                 timeout_mins: _,
-                ..
+                requires,
             } => match self
                 .store
                 .task_add(&title, &description, priority, &depends_on, identity)
             {
                 Ok(id) => {
+                    if !requires.is_empty() {
+                        if let Err(e) = self.store.task_set_requires(id, &requires) {
+                            tracing::warn!("task #{id}: failed to set requires: {e}");
+                        }
+                    }
                     self.log(format!("{identity} added task #{id}: {title}"));
                     let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
                     self.wake_idle();
