@@ -392,6 +392,9 @@ pub enum TaskCmd {
         /// Expand a plain-English description into a structured task via claude
         #[arg(long)]
         nl: bool,
+        /// Recurrence interval (e.g. "1d", "7d", "1h", "1w"); hub recreates the task each time it's done
+        #[arg(long)]
+        recur: Option<String>,
     },
     /// List tasks
     List {
@@ -823,6 +826,7 @@ pub async fn run_client(command: Command) -> Result<()> {
                     timeout,
                     requires,
                     nl: _,
+                    recur,
                 } => Request::TaskAdd {
                     title,
                     description,
@@ -830,7 +834,7 @@ pub async fn run_client(command: Command) -> Result<()> {
                     depends_on,
                     timeout_mins: timeout,
                     requires,
-                    recur: None,
+                    recur,
                 },
                 TaskCmd::Due { .. } | TaskCmd::Graph => unreachable!("handled in main"),
                 TaskCmd::List { status, search, tag } => Request::TaskList { status, search, tag },

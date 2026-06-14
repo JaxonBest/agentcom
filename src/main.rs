@@ -142,7 +142,7 @@ async fn main() -> Result<()> {
         Command::Task(cli::TaskCmd::FromTemplate { name, title }) => {
             run_task_from_template(name, title).await
         }
-        Command::Task(cli::TaskCmd::Add { title, description, priority, depends_on, timeout, requires, nl: true }) => {
+        Command::Task(cli::TaskCmd::Add { title, description, priority, depends_on, timeout, requires, nl: true, recur: _ }) => {
             run_task_add_nl(title, description, priority, depends_on, timeout, requires).await
         }
         Command::Metrics { agent, json } => run_metrics(agent, json),
