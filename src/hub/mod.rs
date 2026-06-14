@@ -907,6 +907,7 @@ impl Hub {
                         }
                     }
                     self.log(format!("{identity} added task #{id}: {title}"));
+                    self.audit.write("task_add", identity, serde_json::json!({"task_id": id, "title": title}));
                     let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
                     self.wake_idle();
                     Response::ok_msg(format!("created task #{id}"))
@@ -1052,9 +1053,10 @@ impl Hub {
                 .store
                 .task_update(id, title.as_deref(), description.as_deref(), priority)
             {
-                Ok(task) => Response::Tasks {
-                    tasks: vec![task],
-                },
+                Ok(task) => {
+                    self.audit.write("task_edit", identity, serde_json::json!({"task_id": id, "title": title, "priority": priority}));
+                    Response::Tasks { tasks: vec![task] }
+                }
                 Err(e) => Response::err(e.to_string()),
                 }
             }
@@ -1286,6 +1288,7 @@ impl Hub {
                     let note = format!("Log verbosity set to '{level}'. This takes effect on your next turn.");
                     let _ = self.store.msg_send("hub", &[agent.clone()], &note, false);
                     self.log(format!("{agent}: log level set to {level}"));
+                    self.audit.write("agent_set_log_level", identity, serde_json::json!({"agent": agent, "level": level}));
                     Response::ok_msg(format!("{agent}: log level is now '{level}'"))
                 } else {
                     Response::err(format!("unknown agent {agent:?}"))
