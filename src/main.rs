@@ -94,6 +94,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Command::Budget => run_budget(),
+        Command::Messages { from, to, count, json } => run_messages(from, to, count, json),
         Command::Config(cli::ConfigCmd::Show) => {
             let cwd = std::env::current_dir()?;
             let project_root = paths::find_project_root(&cwd)
@@ -713,6 +714,36 @@ fn run_budget() -> Result<()> {
     }
     println!("{}", "-".repeat(36));
     println!("{:<14} ${:>9.4}  {:>8}", "TOTAL", total_cost, total_turns);
+    Ok(())
+}
+
+fn run_messages(from: Option<String>, to: Option<String>, count: usize, json: bool) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let project_root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+    let db = paths::db_path(&project_root)?;
+    if !db.exists() {
+        anyhow::bail!("no hub data found — run `agentcom up` first");
+    }
+    let store = store::Store::open(&db)?;
+    let messages = store.msg_list(from.as_deref(), to.as_deref(), count)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&messages)?);
+        return Ok(());
+    }
+    if messages.is_empty() {
+        println!("no messages");
+        return Ok(());
+    }
+    for m in &messages {
+        let urgent = if m.urgent { " [URGENT]" } else { "" };
+        let status = if m.delivered { "" } else { " (undelivered)" };
+        println!("{} -> {}{}{}", m.from_who, m.to_who, urgent, status);
+        for line in m.body.lines() {
+            println!("  {}", line);
+        }
+        println!();
+    }
     Ok(())
 }
 

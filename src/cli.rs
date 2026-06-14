@@ -158,6 +158,26 @@ pub enum Command {
     },
     /// Show per-agent spend and turn counts from the local DB (no hub needed)
     Budget,
+    /// Browse agent message history offline (no hub needed)
+    ///
+    /// Examples:
+    ///   agentcom messages
+    ///   agentcom messages --from composer --to builder
+    ///   agentcom messages --to reviewer -n 100 --json
+    Messages {
+        /// Only show messages sent by this agent
+        #[arg(long)]
+        from: Option<String>,
+        /// Only show messages sent to this agent
+        #[arg(long)]
+        to: Option<String>,
+        /// Maximum number of messages to return (most recent first)
+        #[arg(short = 'n', long, default_value_t = 50)]
+        count: usize,
+        /// Output as JSON array
+        #[arg(long)]
+        json: bool,
+    },
     /// Print version and build metadata (git commit, build time, rustc version)
     Version,
     /// Read the loaded agentcom.toml config
@@ -574,6 +594,7 @@ pub async fn run_client(command: Command) -> Result<()> {
         | Command::Logs { .. }
         | Command::Completions { .. }
         | Command::Budget
+        | Command::Messages { .. }
         | Command::Version
         | Command::Config(_) => {
             unreachable!("handled in main")
