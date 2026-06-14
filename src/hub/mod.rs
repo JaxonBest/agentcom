@@ -802,7 +802,7 @@ impl Hub {
         tracing::debug!(identity, request = ?request, "ipc request");
         match request {
             Request::Hello { .. } => Response::err("unexpected hello"),
-            Request::Send { to, body, urgent } => self.do_send(identity, &to, &body, urgent),
+            Request::Send { to, body, urgent, .. } => self.do_send(identity, &to, &body, urgent),
             Request::Inbox => match self.store.msg_take_pending(identity) {
                 Ok(messages) => Response::Inbox { messages },
                 Err(e) => Response::err(e.to_string()),
@@ -813,6 +813,7 @@ impl Hub {
                 priority,
                 depends_on,
                 timeout_mins: _,
+                ..
             } => match self
                 .store
                 .task_add(&title, &description, priority, &depends_on, identity)
@@ -825,7 +826,7 @@ impl Hub {
                 }
                 Err(e) => Response::err(e.to_string()),
             },
-            Request::TaskList { status, search, tag } => {
+            Request::TaskList { status, search, tag, .. } => {
                 let status = match status.as_deref() {
                     None => None,
                     Some(s) => match crate::store::TaskStatus::parse(s) {
@@ -838,7 +839,7 @@ impl Hub {
                     Err(e) => Response::err(e.to_string()),
                 }
             }
-            Request::TaskClaim { id } => match self.store.task_claim(id, identity) {
+            Request::TaskClaim { id, .. } => match self.store.task_claim(id, identity) {
                 Ok(t) => {
                     self.clear_declined(id);
                     self.log(format!("{identity} claimed task #{} — {}", t.id, t.title));
@@ -848,7 +849,7 @@ impl Hub {
                 }
                 Err(e) => Response::err(e.to_string()),
             },
-            Request::TaskDone { id, note } => {
+            Request::TaskDone { id, note, .. } => {
                 match self.store.task_done(id, identity, note.as_deref()) {
                     Ok(t) => {
                         self.log(format!("{identity} completed task #{} — {}", t.id, t.title));
@@ -883,7 +884,7 @@ impl Hub {
                     Err(e) => Response::err(e.to_string()),
                 }
             }
-            Request::TaskBlock { id, reason } => {
+            Request::TaskBlock { id, reason, .. } => {
                 match self.store.task_block(id, identity, &reason) {
                     Ok(t) => {
                         self.log(format!("{identity} blocked task #{}: {reason}", t.id));
@@ -899,7 +900,7 @@ impl Hub {
                     Err(e) => Response::err(e.to_string()),
                 }
             }
-            Request::TaskReopen { id } => match self.store.task_reopen(id) {
+            Request::TaskReopen { id, .. } => match self.store.task_reopen(id) {
                 Ok(t) => {
                     self.clear_declined(id);
                     let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
@@ -908,7 +909,7 @@ impl Hub {
                 }
                 Err(e) => Response::err(e.to_string()),
             },
-            Request::TaskAssign { id, agent } => match self.store.task_assign(id, &agent) {
+            Request::TaskAssign { id, agent, .. } => match self.store.task_assign(id, &agent) {
                 Ok(t) => {
                     self.log(format!("{identity} assigned task #{} to {agent}", t.id));
                     let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
@@ -933,6 +934,7 @@ impl Hub {
                 title,
                 description,
                 priority,
+                ..
             } => match self
                 .store
                 .task_update(id, title.as_deref(), description.as_deref(), priority)
@@ -942,14 +944,14 @@ impl Hub {
                 },
                 Err(e) => Response::err(e.to_string()),
             },
-            Request::TaskGet { id } => match self.store.task_get(id) {
+            Request::TaskGet { id, .. } => match self.store.task_get(id) {
                 Ok(Some(task)) => Response::Tasks {
                     tasks: vec![task],
                 },
                 Ok(None) => Response::err(format!("task #{id} not found")),
                 Err(e) => Response::err(e.to_string()),
             },
-            Request::TaskClone { id } => match self.store.task_clone(id, identity) {
+            Request::TaskClone { id, .. } => match self.store.task_clone(id, identity) {
                 Ok(t) => {
                     self.log(format!("{identity} cloned task #{id} → #{}", t.id));
                     let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
@@ -957,15 +959,15 @@ impl Hub {
                 }
                 Err(e) => Response::err(e.to_string()),
             },
-            Request::TaskDelete { id } => match self.store.task_delete(id) {
+            Request::TaskDelete { id, .. } => match self.store.task_delete(id) {
                 Ok(()) => Response::ok_msg(format!("task #{id} deleted")),
                 Err(e) => Response::err(e.to_string()),
             },
-            Request::TaskPrune { before_secs } => match self.store.task_prune(before_secs) {
+            Request::TaskPrune { before_secs, .. } => match self.store.task_prune(before_secs) {
                 Ok(count) => Response::Pruned { count },
                 Err(e) => Response::err(e.to_string()),
             },
-            Request::TaskComment { id, body } => {
+            Request::TaskComment { id, body, .. } => {
                 match self.store.task_comment(id, identity, &body) {
                     Ok(_) => {
                         let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
@@ -974,39 +976,39 @@ impl Hub {
                     Err(e) => Response::err(e.to_string()),
                 }
             }
-            Request::TaskComments { id } => match self.store.task_comments(id) {
+            Request::TaskComments { id, .. } => match self.store.task_comments(id) {
                 Ok(comments) => Response::Comments { comments },
                 Err(e) => Response::err(e.to_string()),
             },
-            Request::TaskPin { id } => match self.store.task_pin(id) {
+            Request::TaskPin { id, .. } => match self.store.task_pin(id) {
                 Ok(()) => {
                     let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
                     Response::ok_msg(format!("task #{id} pinned"))
                 }
                 Err(e) => Response::err(e.to_string()),
             },
-            Request::TaskUnpin { id } => match self.store.task_unpin(id) {
+            Request::TaskUnpin { id, .. } => match self.store.task_unpin(id) {
                 Ok(()) => {
                     let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
                     Response::ok_msg(format!("task #{id} unpinned"))
                 }
                 Err(e) => Response::err(e.to_string()),
             },
-            Request::TaskTag { id, label } => match self.store.task_tag(id, &label) {
+            Request::TaskTag { id, label, .. } => match self.store.task_tag(id, &label) {
                 Ok(()) => {
                     let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
                     Response::ok_msg(format!("tagged task #{id} with {label:?}"))
                 }
                 Err(e) => Response::err(e.to_string()),
             },
-            Request::TaskUntag { id, label } => match self.store.task_untag(id, &label) {
+            Request::TaskUntag { id, label, .. } => match self.store.task_untag(id, &label) {
                 Ok(()) => {
                     let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
                     Response::ok_msg(format!("removed tag {label:?} from task #{id}"))
                 }
                 Err(e) => Response::err(e.to_string()),
             },
-            Request::TaskSetDue { id, due_at } => {
+            Request::TaskSetDue { id, due_at, .. } => {
                 match self.store.task_set_due(id, due_at) {
                     Ok(()) => {
                         self.audit.write(
@@ -1021,10 +1023,15 @@ impl Hub {
                 }
             }
             Request::Status => self.status_response(),
-            Request::AgentAdd { config } => self.add_agent_live(identity, config),
-            Request::FilesClaim { paths } => match self.store.files_claim(identity, &paths) {
+            Request::AgentAdd { config, .. } => self.add_agent_live(identity, config),
+            Request::FilesClaim { paths, .. } => match self.store.files_claim(identity, &paths) {
                 Ok(()) => {
                     self.audit.write("file_claim", identity, serde_json::json!({"paths": paths}));
+                    self.fire_webhook(
+                        webhook::Payload::new(webhook::Event::FileClaim)
+                            .with_agent(identity)
+                            .with_paths(paths.clone()),
+                    );
                     Response::ok_msg(format!("claimed {} file(s)", paths.len()))
                 }
                 Err(conflicts) => {
@@ -1038,7 +1045,7 @@ impl Hub {
                     ))
                 }
             },
-            Request::FilesRelease { paths, all } => {
+            Request::FilesRelease { paths, all, .. } => {
                 let claimed_paths = self
                     .store
                     .files_list_for_agent(identity)
@@ -1057,6 +1064,13 @@ impl Hub {
                             self.auto_commit_changes(identity, &claimed_paths);
                         }
                         self.audit.write("file_release", identity, serde_json::json!({"count": n}));
+                        let released_paths: Vec<String> =
+                            claimed_paths.iter().map(|c| c.path.clone()).collect();
+                        self.fire_webhook(
+                            webhook::Payload::new(webhook::Event::FileRelease)
+                                .with_agent(identity)
+                                .with_paths(released_paths),
+                        );
                         self.log(format!("{identity}: released {n} file claim(s)"));
                         Response::ok_msg(format!("released {n} file claim(s)"))
                     }
@@ -1067,7 +1081,7 @@ impl Hub {
                 Ok(claims) => Response::Files { claims },
                 Err(e) => Response::err(e.to_string()),
             },
-            Request::Stop { agent } => match agent {
+            Request::Stop { agent, .. } => match agent {
                 Some(name) => self.stop_agent(&name),
                 None => {
                     if identity != "human" {
@@ -1083,8 +1097,30 @@ impl Hub {
                     Response::ok_msg("hub shutting down")
                 }
             },
-            Request::Pause { agent } => self.pause_agent(&agent),
-            Request::Resume { agent } => self.resume_agent(&agent),
+            Request::Pause { agent, .. } => {
+                if agent == "all" {
+                    let names: Vec<String> = self.agents.keys().cloned().collect();
+                    for name in &names {
+                        self.pause_agent(name);
+                    }
+                    self.fire_webhook(webhook::Payload::new(webhook::Event::FleetPaused));
+                    Response::ok_msg(format!("paused {} agent(s)", names.len()))
+                } else {
+                    self.pause_agent(&agent)
+                }
+            }
+            Request::Resume { agent, .. } => {
+                if agent == "all" {
+                    let names: Vec<String> = self.agents.keys().cloned().collect();
+                    for name in &names {
+                        self.resume_agent(name);
+                    }
+                    self.fire_webhook(webhook::Payload::new(webhook::Event::FleetResumed));
+                    Response::ok_msg(format!("resumed {} agent(s)", names.len()))
+                } else {
+                    self.resume_agent(&agent)
+                }
+            }
             Request::Tail { .. } => Response::err("tail is handled by the ipc server"),
         }
     }
