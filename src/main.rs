@@ -133,6 +133,8 @@ async fn main() -> Result<()> {
         Command::Task(cli::TaskCmd::Deps { id }) => run_task_deps(id),
         Command::Task(cli::TaskCmd::Graph) => run_task_graph(),
         Command::Task(cli::TaskCmd::Due { id, date, clear }) => run_task_due(id, date, clear).await,
+        Command::Task(cli::TaskCmd::BulkDone { ids, note }) => run_bulk_done(ids, note).await,
+        Command::Task(cli::TaskCmd::BulkClaim { ids }) => run_bulk_claim(ids).await,
         Command::Task(cli::TaskCmd::Add { title, description, priority, depends_on, timeout, requires, nl: true }) => {
             run_task_add_nl(title, description, priority, depends_on, timeout, requires).await
         }
@@ -2097,6 +2099,64 @@ fn run_task_graph() -> Result<()> {
         println!("  N{dep_id} --> N{task_id}");
     }
     println!("```");
+    Ok(())
+}
+
+async fn run_bulk_done(ids: Vec<i64>, note: Option<String>) -> Result<()> {
+    let mut client = ipc::client::Client::connect()
+        .await
+        .context("hub not running — start it with: agentcom up")?;
+    let mut ok = 0u32;
+    let mut errs = 0u32;
+    for id in &ids {
+        let resp = client
+            .request(&ipc::Request::TaskDone { id: *id, note: note.clone() })
+            .await?;
+        match resp {
+            ipc::Response::Ok { .. } => {
+                println!("#{id} done");
+                ok += 1;
+            }
+            ipc::Response::Err { message } => {
+                eprintln!("#{id} error: {message}");
+                errs += 1;
+            }
+            _ => { errs += 1; }
+        }
+    }
+    println!("{ok}/{} marked done", ids.len());
+    if errs > 0 {
+        anyhow::bail!("{errs} task(s) failed");
+    }
+    Ok(())
+}
+
+async fn run_bulk_claim(ids: Vec<i64>) -> Result<()> {
+    let mut client = ipc::client::Client::connect()
+        .await
+        .context("hub not running — start it with: agentcom up")?;
+    let mut ok = 0u32;
+    let mut errs = 0u32;
+    for id in &ids {
+        let resp = client
+            .request(&ipc::Request::TaskClaim { id: *id })
+            .await?;
+        match resp {
+            ipc::Response::Ok { .. } => {
+                println!("#{id} claimed");
+                ok += 1;
+            }
+            ipc::Response::Err { message } => {
+                eprintln!("#{id} error: {message}");
+                errs += 1;
+            }
+            _ => { errs += 1; }
+        }
+    }
+    println!("{ok}/{} claimed", ids.len());
+    if errs > 0 {
+        anyhow::bail!("{errs} task(s) failed");
+    }
     Ok(())
 }
 

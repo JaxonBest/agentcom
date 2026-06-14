@@ -487,6 +487,27 @@ pub enum TaskCmd {
         id: i64,
         text: String,
     },
+    /// Mark multiple tasks done in one command
+    ///
+    /// Example:
+    ///   agentcom task bulk-done 10 11 12
+    #[command(name = "bulk-done")]
+    BulkDone {
+        #[arg(required = true)]
+        ids: Vec<i64>,
+        /// Optional note attached to every task
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Claim multiple tasks in one command
+    ///
+    /// Example:
+    ///   agentcom task bulk-claim 10 11 12
+    #[command(name = "bulk-claim")]
+    BulkClaim {
+        #[arg(required = true)]
+        ids: Vec<i64>,
+    },
     /// Soft-delete a task (hidden from list but recoverable)
     ///
     /// Example:
@@ -769,7 +790,9 @@ pub async fn run_client(command: Command) -> Result<()> {
                 | TaskCmd::Stats { .. }
                 | TaskCmd::Watch { .. }
                 | TaskCmd::Trace { .. }
-                | TaskCmd::Deps { .. } => unreachable!("handled in main"),
+                | TaskCmd::Deps { .. }
+                | TaskCmd::BulkDone { .. }
+                | TaskCmd::BulkClaim { .. } => unreachable!("handled in main"),
             };
             let resp = client.request(&req).await?;
             match resp {
