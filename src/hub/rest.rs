@@ -97,7 +97,11 @@ async fn handle_conn(
     }
 
     let expected = format!("Bearer {token}");
-    if auth_header.as_deref() != Some(&expected) {
+    let authed = auth_header
+        .as_deref()
+        .map(|h| ct_eq(h, &expected))
+        .unwrap_or(false);
+    if !authed {
         writer
             .write_all(
                 b"HTTP/1.1 401 Unauthorized\r\nContent-Type: text/plain\r\nContent-Length: 13\r\n\r\nunauthorized\n",
@@ -188,4 +192,15 @@ async fn query_ipc(port: u16, token: &str, req_json: &str) -> anyhow::Result<Str
     let mut resp = String::new();
     reader.read_line(&mut resp).await?;
     Ok(resp.trim().to_string())
+}
+
+/// Compare two strings in constant time to prevent timing attacks on the
+/// Bearer token. Processes all bytes even after a mismatch.
+fn ct_eq(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
