@@ -45,7 +45,12 @@ async fn main() -> Result<()> {
                 (None, Some(_), _) | (None, None, Some(_)) => {
                     anyhow::bail!("--for/--usage require --free \"<goal>\"")
                 }
-                _ => None,
+                _ => {
+                    if finish_tasks {
+                        anyhow::bail!("--finish-tasks has no effect without --free")
+                    }
+                    None
+                }
             };
             run_up(agents, tasks, headless, free_mode, budget).await
         }
