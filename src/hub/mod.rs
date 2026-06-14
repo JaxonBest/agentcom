@@ -540,6 +540,7 @@ impl Hub {
             rt.pause_requested = false;
             rt.state = AgentState::Paused;
             rt.state_detail = None;
+            rt.paused_at = Some(std::time::Instant::now());
             self.emit_state(agent);
             return;
         }
@@ -1180,14 +1181,31 @@ impl Hub {
             .agents
             .iter()
             .filter_map(|a| self.agents.get(&a.name))
-            .map(|rt| AgentStatusRow {
-                name: rt.cfg.name.clone(),
-                provider: self.cfg.agent_provider(&rt.cfg).to_string(),
-                state: rt.state.as_str().to_string(),
-                detail: rt.state_detail.clone(),
-                session_id: rt.session_id.clone(),
-                spent_usd: rt.spent_usd,
-                turns: rt.turns,
+            .map(|rt| {
+                // Augment state_detail for paused agents with pause duration.
+                let detail = if rt.state == crate::agent::AgentState::Paused {
+                    if let Some(paused_at) = rt.paused_at {
+                        let mins = paused_at.elapsed().as_secs() / 60;
+                        if mins > 0 {
+                            Some(format!("paused {}m", mins))
+                        } else {
+                            Some("paused <1m".to_string())
+                        }
+                    } else {
+                        rt.state_detail.clone()
+                    }
+                } else {
+                    rt.state_detail.clone()
+                };
+                AgentStatusRow {
+                    name: rt.cfg.name.clone(),
+                    provider: self.cfg.agent_provider(&rt.cfg).to_string(),
+                    state: rt.state.as_str().to_string(),
+                    detail,
+                    session_id: rt.session_id.clone(),
+                    spent_usd: rt.spent_usd,
+                    turns: rt.turns,
+                }
             })
             .collect();
         rows.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1242,6 +1260,7 @@ impl Hub {
         match rt.state {
             AgentState::Idle => {
                 rt.state = AgentState::Paused;
+                rt.paused_at = Some(std::time::Instant::now());
                 self.emit_state(name);
                 Response::ok_msg(format!("{name} paused"))
             }
@@ -1261,6 +1280,7 @@ impl Hub {
         rt.pause_requested = false;
         if rt.state == AgentState::Paused {
             rt.state = AgentState::Idle;
+            rt.paused_at = None;
             self.emit_state(name);
             self.try_feed(name);
             Response::ok_msg(format!("{name} resumed"))
