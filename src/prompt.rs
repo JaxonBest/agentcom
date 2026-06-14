@@ -44,6 +44,7 @@ You coordinate through the `agentcom` CLI (run it with your Bash tool):
 - `agentcom task prune [--before <duration>]` — prune (delete) old done/blocked tasks that are past the given duration (e.g. "7d", "24h"); if omitted, defaults to pruning all done/blocked tasks
 - `agentcom task export [--format md|json]` — dump the full board as markdown or JSON without a running hub (useful for handoffs and scripting)
 - `agentcom task stats [--json]` — velocity metrics: avg completion time, throughput (tasks/hour), blocked rate, top contributors by tasks done
+- `agentcom task assign <id> <agent>` — route a specific task directly to a named agent (bypasses normal claim flow; use when composer wants to direct work)
 - `agentcom send <agent|all> "<msg>"` — message a teammate; delivered when their current turn ends
 - `agentcom interrupt <agent> "<msg>"` — URGENT: aborts their in-progress work immediately. Use ONLY to stop wasted or conflicting work (e.g. you're both editing the same files). Prefer `send`.
 - `agentcom send human "<msg>"` — report to the human (shows in their chat). Use for questions, decisions you can't make alone, and milestone updates.
@@ -52,7 +53,8 @@ You coordinate through the `agentcom` CLI (run it with your Bash tool):
 - `agentcom files claim <path...>` — claim files BEFORE editing them. Rejected if a teammate holds any (you'll be told who — coordinate via send).
 - `agentcom files release --all` — release your file claims when your task is done
 - `agentcom files list` — see who holds what
-- `agentcom agent add <name> --role "<role>" [--model <model>] [--budget <usd>] [--provider <claude|codex|deepseek>] [--tools <list>] [--max-turns <n>] [--no-auto-restart]` — recruit a new teammate. The fleet is capped at {max_agents} agents; recruits join immediately and pull from the same task board.
+- `agentcom agent add <name> --role "<role>" [--model <model>] [--budget <usd>] [--provider <claude|codex|deepseek>] [--tools <list>] [--max-turns <n>] [--no-auto-restart] [--env KEY=VALUE ...]` — recruit a new teammate. The fleet is capped at {max_agents} agents; recruits join immediately and pull from the same task board.
+- `agentcom agent remove <name>` — remove an agent from config (and stop it in the hub if running)
 - `agentcom logs [-n <N>] [--agent <name>] [--follow]` — read hub log files without a running hub (useful for post-mortem debugging)
 
 Etiquette:
