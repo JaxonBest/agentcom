@@ -396,6 +396,12 @@ pub enum AgentCmd {
         /// Example: --env ANTHROPIC_API_KEY=sk-... --env DEBUG=1
         #[arg(long = "env", value_name = "KEY=VALUE")]
         env_vars: Vec<String>,
+        /// First user message sent immediately after spawn — agent starts on this goal
+        #[arg(long)]
+        initial_prompt: Option<String>,
+        /// Milliseconds to delay before spawning this agent (useful with stagger_agents_ms)
+        #[arg(long)]
+        spawn_delay: Option<u64>,
     },
     /// List configured agents (with live state if the hub is running)
     List,
@@ -625,6 +631,8 @@ pub async fn run_agent_cmd(cmd: AgentCmd) -> Result<()> {
             auto_commit_author_name,
             auto_commit_author_email,
             env_vars,
+            initial_prompt,
+            spawn_delay,
         } => {
             let env: std::collections::BTreeMap<String, String> = env_vars
                 .into_iter()
@@ -653,8 +661,9 @@ pub async fn run_agent_cmd(cmd: AgentCmd) -> Result<()> {
                 auto_commit: None,
                 max_rpm: None,
                 env,
-                initial_prompt: None,
-                spawn_delay_ms: None,
+                initial_prompt,
+                spawn_delay_ms: spawn_delay,
+                capabilities: vec![],
             };
             // Validate the combined config first; only persist after the
             // hub (if running) has also accepted — a cap rejection must not
