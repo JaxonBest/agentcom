@@ -120,13 +120,26 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
     let (human_pending, human_questions) = human_attention(app);
     let working = app.agents.iter().filter(|a| a.state == "working").count();
     let idle = app.agents.iter().filter(|a| a.state == "idle").count();
+    let paused = app.agents.iter().filter(|a| a.state == "paused").count();
+    let crashed = app.agents.iter().filter(|a| a.state == "crashed").count();
+    let state_summary = {
+        let mut parts = vec![format!("{working}w/{idle}i")];
+        if paused > 0 { parts.push(format!("{paused}p")); }
+        if crashed > 0 { parts.push(format!("{crashed}!")); }
+        parts.join("/")
+    };
+    let free_indicator = app
+        .free_mode
+        .as_deref()
+        .map(|f| format!(" | {f}"))
+        .unwrap_or_default();
     let mut spans = vec![
         Span::styled(
             format!(" agentcom - {} ", app.project),
             Style::default().add_modifier(Modifier::BOLD),
         ),
         Span::raw(format!(
-            "| ${:.2} total{usage} | {} open | {working} working / {idle} idle",
+            "| ${:.2} total{usage} | {} open | {state_summary}{free_indicator}",
             app.total_cost, app.open_tasks
         )),
     ];

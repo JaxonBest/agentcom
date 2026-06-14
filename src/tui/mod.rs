@@ -81,6 +81,8 @@ pub struct App {
     pub task_detail_id: Option<i64>,
     pub open_tasks: u64,
     pub total_cost: f64,
+    /// Free-mode summary (e.g. "95m left") from hub status, or None.
+    pub free_mode: Option<String>,
     /// `None` = follow live output; `Some(n)` = scrolled up by n lines.
     pub scroll_back: Option<usize>,
     /// Always-on input line in the Chat tab (talks to the composer).
@@ -216,6 +218,7 @@ async fn run_loop(
         task_detail_id: None,
         open_tasks: 0,
         total_cost: 0.0,
+        free_mode: None,
         scroll_back: None,
         chat_input: String::new(),
         spin: 0,
@@ -309,6 +312,7 @@ async fn refresh_status(app: &mut App, ipc_tx: &mpsc::Sender<IpcMsg>) {
         agents,
         open_tasks,
         total_cost_usd,
+        free,
         ..
     }) = request(ipc_tx, Request::Status).await
     {
@@ -322,6 +326,7 @@ async fn refresh_status(app: &mut App, ipc_tx: &mpsc::Sender<IpcMsg>) {
         app.agents = agents;
         app.open_tasks = open_tasks;
         app.total_cost = total_cost_usd;
+        app.free_mode = free;
     }
 }
 
