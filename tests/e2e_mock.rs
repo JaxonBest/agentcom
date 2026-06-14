@@ -1407,3 +1407,112 @@ fn replay_command() {
         "replay produces output or graceful message: stdout={stdout} stderr={stderr}"
     );
 }
+
+#[test]
+fn task_bulk_operations() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    let scripts = tmp.path().join("scripts");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+
+    write_config(&project, &[("bulker", "bulk worker")], "");
+    // Agent adds 3 tasks, bulk-claims and bulk-dones them.
+    std::fs::write(
+        scripts.join("bulker.ndjson"),
+        r#"{"run": ["agentcom task add \"task-a\"", "agentcom task add \"task-b\"", "agentcom task add \"task-c\"", "agentcom task bulk-claim 1 2 3", "agentcom task bulk-done 1 2 3 --note bulk-finished"], "text": "done"}
+"#,
+    )
+    .unwrap();
+
+    let hub = start_hub(&project, &scripts, &[], &[]);
+    // Wait until at least task 1 is done.
+    wait_for(
+        &project,
+        &["task", "list", "--status", "done"],
+        Duration::from_secs(25),
+        |out| out.contains("bulk-finished"),
+    );
+    drop(hub);
+
+    // All three tasks should be done.
+    let (ok, stdout, _) = cli_split(&project, &["task", "list", "--status", "done"]);
+    assert!(ok, "task list done: {stdout}");
+    assert!(stdout.contains("task-a"), "task-a done: {stdout}");
+    assert!(stdout.contains("task-b"), "task-b done: {stdout}");
+    assert!(stdout.contains("task-c"), "task-c done: {stdout}");
+}
+
+#[test]
+fn preflight_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
+        project.join("agentcom.toml"),
+        "project_name = \"test\"\n[[agent]]\nname = \"w\"\nrole = \"worker\"\n",
+    )
+    .unwrap();
+
+    // preflight with no staged changes should succeed gracefully.
+    let (ok, stdout, stderr) = cli_split(&project, &["preflight"]);
+    assert!(ok, "preflight exits 0: stderr={stderr}");
+    // Either shows no changes or a report — just must not crash.
+    let _ = stdout;
+}
+
+#[test]
+fn task_archive_and_restore() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    let scripts = tmp.path().join("scripts");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+
+    write_config(&project, &[("archivist", "archives tasks")], "");
+    std::fs::write(
+        scripts.join("archivist.ndjson"),
+        r#"{"run": ["agentcom task claim 1", "agentcom task done 1 --note arc-done", "agentcom task archive 1"], "text": "done"}
+"#,
+    )
+    .unwrap();
+
+    let hub = start_hub(&project, &scripts, &["archive test task"], &[]);
+    wait_for(
+        &project,
+        &["task", "list", "--status", "done"],
+        Duration::from_secs(20),
+        |out| out.contains("arc-done"),
+    );
+    // Give the archive command a moment to execute.
+    std::thread::sleep(Duration::from_secs(2));
+    drop(hub);
+
+    // Archived task should not appear in normal list.
+    let (ok, stdout, _) = cli_split(&project, &["task", "list"]);
+    assert!(ok, "task list: {stdout}");
+    assert!(
+        !stdout.contains("archive test task"),
+        "archived task hidden from normal list: {stdout}"
+    );
+
+    // agentcom task archived shows it.
+    let (ok, stdout, stderr) = cli_split(&project, &["task", "archived"]);
+    assert!(ok, "task archived exits 0: stderr={stderr}");
+    assert!(
+        stdout.contains("archive test task"),
+        "archived list shows task: {stdout}"
+    );
+
+    // Restore it.
+    let (ok, _, stderr) = cli_split(&project, &["task", "restore", "1"]);
+    assert!(ok, "task restore exits 0: stderr={stderr}");
+
+    // Now it should appear in normal list again.
+    let (ok, stdout, _) = cli_split(&project, &["task", "list", "--status", "done"]);
+    assert!(ok, "task list after restore: {stdout}");
+    assert!(
+        stdout.contains("archive test task"),
+        "restored task visible: {stdout}"
+    );
+}
