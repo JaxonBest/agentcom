@@ -79,8 +79,18 @@ impl IpcServer {
     }
 
     /// Persist hub.json so human terminals can discover us.
+    ///
+    /// On Unix, sets the file to 0600 so only the owner can read the IPC
+    /// token. Agents receive the token via `AGENTCOM_TOKEN` env var instead.
     pub fn write_hub_json(&self, path: &std::path::Path) -> Result<()> {
         std::fs::write(path, serde_json::to_string_pretty(&self.info)?)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(path)?.permissions();
+            perms.set_mode(0o600);
+            std::fs::set_permissions(path, perms)?;
+        }
         Ok(())
     }
 

@@ -195,6 +195,7 @@ mod tests {
             blocked_reason: None,
             note: None,
             tags: vec![],
+            pinned: false,
             created_by: "human".into(),
             created_at: 0,
             updated_at: 0,
