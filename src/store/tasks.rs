@@ -1,7 +1,7 @@
 //! Task board queries. The scheduler's key query is [`Store::next_claimable`]:
 //! highest-priority open task whose dependencies are all done.
 
-use super::{now_ts, Store, Task, TaskStatus};
+use super::{now_ts, Store, Task, TaskSnapshot, TaskStatus};
 use anyhow::{bail, Result};
 use rusqlite::{params, Connection, Row};
 
@@ -539,6 +539,80 @@ impl Store {
             .map_err(|_| anyhow::anyhow!("task #{id} does not exist"))?;
         Ok(parse_tags(&raw.unwrap_or_default()))
     }
+
+    /// Export every task as a portable snapshot (all statuses, ordered by id).
+    pub fn task_export_all(&self) -> Result<Vec<TaskSnapshot>> {
+        let tasks = self.task_list(None, None)?;
+        let snapshots = tasks
+            .into_iter()
+            .map(|t| TaskSnapshot {
+                source_id: Some(t.id),
+                title: t.title,
+                description: t.description,
+                priority: t.priority,
+                status: t.status.as_str().to_string(),
+                tags: t.tags,
+                depends_on: t.depends_on,
+            })
+            .collect();
+        Ok(snapshots)
+    }
+
+    /// Bulk-import tasks from a snapshot, remapping dep IDs from the source
+    /// DB to the newly created task IDs in this DB.
+    /// Returns the list of new task IDs in snapshot order.
+    pub fn bulk_import_tasks(
+        &self,
+        snapshots: &[TaskSnapshot],
+        created_by: &str,
+    ) -> Result<Vec<i64>> {
+        use std::collections::HashMap;
+
+        // Map source_id -> new_id so we can remap dep edges.
+        let mut id_map: HashMap<i64, i64> = HashMap::new();
+        let mut new_ids: Vec<i64> = Vec::with_capacity(snapshots.len());
+
+        // First pass: create all tasks without deps so we can build the id map.
+        for snap in snapshots {
+            let new_id =
+                self.task_add(&snap.title, &snap.description, snap.priority, &[], created_by)?;
+            if let Some(src) = snap.source_id {
+                id_map.insert(src, new_id);
+            }
+            new_ids.push(new_id);
+        }
+
+        // Second pass: wire up deps and restore tags + status.
+        let conn = self.conn.lock().unwrap();
+        for (snap, &new_id) in snapshots.iter().zip(new_ids.iter()) {
+            // Remap dep IDs.
+            for src_dep in &snap.depends_on {
+                if let Some(&new_dep) = id_map.get(src_dep) {
+                    let _ = conn.execute(
+                        "INSERT OR IGNORE INTO task_deps (task_id, depends_on_id) VALUES (?1, ?2)",
+                        params![new_id, new_dep],
+                    );
+                }
+            }
+            // Restore tags.
+            if !snap.tags.is_empty() {
+                let raw = snap.tags.join(",");
+                let _ = conn.execute(
+                    "UPDATE tasks SET tags = ?1 WHERE id = ?2",
+                    params![raw, new_id],
+                );
+            }
+            // Restore status if not open (e.g. done tasks in an archive import).
+            let status = snap.status.as_str();
+            if status != "open" {
+                let _ = conn.execute(
+                    "UPDATE tasks SET status = ?1 WHERE id = ?2",
+                    params![status, new_id],
+                );
+            }
+        }
+        Ok(new_ids)
+    }
 }
 
 #[cfg(test)]
@@ -719,6 +793,74 @@ mod tests {
     fn task_clone_nonexistent_errors() {
         let s = Store::open_in_memory().unwrap();
         assert!(s.task_clone(9999, "builder").is_err());
+    }
+
+    #[test]
+    fn export_all_and_bulk_import_roundtrip() {
+        let src = Store::open_in_memory().unwrap();
+        let a = src.task_add("alpha", "first task", 1, &[], "human").unwrap();
+        let b = src.task_add("beta", "second task", 0, &[a], "human").unwrap();
+        src.task_tag(a, "bug").unwrap();
+        src.task_claim(a, "alice").unwrap();
+        src.task_done(a, "alice", Some("done")).unwrap();
+
+        let snapshots = src.task_export_all().unwrap();
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].title, "alpha");
+        assert_eq!(snapshots[0].tags, vec!["bug"]);
+        assert_eq!(snapshots[0].status, "done");
+        assert_eq!(snapshots[1].depends_on, vec![a]);
+
+        // Import into a fresh DB.
+        let dst = Store::open_in_memory().unwrap();
+        let new_ids = dst.bulk_import_tasks(&snapshots, "importer").unwrap();
+        assert_eq!(new_ids.len(), 2);
+
+        let na = new_ids[0];
+        let nb = new_ids[1];
+
+        let ta = dst.task_get(na).unwrap().unwrap();
+        assert_eq!(ta.title, "alpha");
+        assert_eq!(ta.tags, vec!["bug"]);
+        assert_eq!(ta.status, TaskStatus::Done);
+
+        let tb = dst.task_get(nb).unwrap().unwrap();
+        assert_eq!(tb.title, "beta");
+        assert_eq!(tb.depends_on, vec![na], "dep remapped to new ID");
+
+        // Dep gate: beta should not be claimable because alpha is not done
+        // in the original — but we imported alpha as done, so beta IS claimable.
+        assert!(dst.next_claimable(&[]).unwrap().is_some());
+    }
+
+    #[test]
+    fn import_without_source_id_still_creates_tasks() {
+        let dst = Store::open_in_memory().unwrap();
+        use crate::store::TaskSnapshot;
+        let snaps = vec![
+            TaskSnapshot {
+                title: "t1".into(),
+                description: "".into(),
+                priority: 2,
+                status: "open".into(),
+                tags: vec![],
+                depends_on: vec![],
+                source_id: None,
+            },
+            TaskSnapshot {
+                title: "t2".into(),
+                description: "".into(),
+                priority: 2,
+                status: "open".into(),
+                tags: vec![],
+                depends_on: vec![],
+                source_id: None,
+            },
+        ];
+        let ids = dst.bulk_import_tasks(&snaps, "bot").unwrap();
+        assert_eq!(ids.len(), 2);
+        assert!(dst.task_get(ids[0]).unwrap().is_some());
+        assert!(dst.task_get(ids[1]).unwrap().is_some());
     }
 
     #[test]

@@ -125,6 +125,24 @@ pub struct Task {
     pub depends_on: Vec<i64>,
 }
 
+/// Portable snapshot of a task used for export/import.
+/// `depends_on` holds the original source task IDs; the importer remaps them.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskSnapshot {
+    pub title: String,
+    pub description: String,
+    pub priority: i64,
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
+    /// Source-DB task IDs this task depends on. Remapped to new IDs on import.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<i64>,
+    /// Original source DB id (informational; not used on import).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_id: Option<i64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
     pub id: i64,
