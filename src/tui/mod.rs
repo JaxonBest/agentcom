@@ -10,7 +10,7 @@ pub mod ui;
 use crate::hub::events::{IpcMsg, UiEvent};
 use crate::ipc::server::Buffers;
 use crate::ipc::{AgentStatusRow, Request, Response};
-use crate::store::{Message, Store, Task};
+use crate::store::{files::FileClaim, Message, Store, Task};
 use anyhow::Result;
 use crossterm::event::{Event, EventStream};
 use futures::StreamExt;
@@ -71,6 +71,7 @@ pub struct App {
     pub tasks: Vec<Task>,
     pub messages: Vec<Message>,
     pub hub_log: VecDeque<String>,
+    pub file_claims: Vec<FileClaim>,
     pub open_tasks: u64,
     pub total_cost: f64,
     /// `None` = follow live output; `Some(n)` = scrolled up by n lines.
@@ -201,6 +202,7 @@ async fn run_loop(
         tasks: Vec::new(),
         messages: Vec::new(),
         hub_log: VecDeque::with_capacity(500),
+        file_claims: Vec::new(),
         open_tasks: 0,
         total_cost: 0.0,
         scroll_back: None,
@@ -315,4 +317,5 @@ async fn refresh_status(app: &mut App, ipc_tx: &mpsc::Sender<IpcMsg>) {
 fn refresh_board(app: &mut App, store: &Store) {
     app.tasks = store.task_list(None, None).unwrap_or_default();
     app.messages = store.msg_recent(200).unwrap_or_default();
+    app.file_claims = store.files_list().unwrap_or_default();
 }

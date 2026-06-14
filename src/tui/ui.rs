@@ -147,6 +147,29 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
+    let claim_count = app.file_claims.len();
+    let claim_height = if claim_count == 0 {
+        0
+    } else {
+        (claim_count + 2).min(area.height as usize / 3) as u16
+    };
+
+    let chunks = if claim_height > 0 {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(3),
+                Constraint::Length(claim_height),
+            ])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Min(3)])
+            .split(area)
+    };
+
+    // Agent list
     let items: Vec<ListItem> = app
         .agent_names
         .iter()
@@ -180,8 +203,32 @@ fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
         .collect();
     f.render_widget(
         List::new(items).block(Block::default().borders(Borders::RIGHT).title(" agents ")),
-        area,
+        chunks[0],
     );
+
+    // File claims panel (only when there are active claims)
+    if claim_height > 0 {
+        let claim_items: Vec<ListItem> = app
+            .file_claims
+            .iter()
+            .map(|c| {
+                let path = c.path.trim_start_matches("src/");
+                let label = format!(" {path}");
+                ListItem::new(Line::from(vec![
+                    Span::styled(label, Style::default().fg(Color::Yellow)),
+                    Span::styled(
+                        format!(" ({})", c.agent),
+                        Style::default().fg(Color::DarkGray),
+                    ),
+                ]))
+            })
+            .collect();
+        f.render_widget(
+            List::new(claim_items)
+                .block(Block::default().borders(Borders::TOP | Borders::RIGHT).title(" files ")),
+            chunks[1],
+        );
+    }
 }
 
 fn draw_main(f: &mut Frame, app: &App, area: Rect) {
