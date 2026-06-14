@@ -119,6 +119,16 @@ pub enum Command {
     Resume { agent: String },
     /// Pre-flight check for all providers and config — no hub required
     Doctor,
+    /// Load, validate, and print agentcom.toml in a CI-friendly format
+    ///
+    /// Exits with code 0 if the config is valid, 1 if not.
+    /// Prints a human-readable summary of agents, global settings, and warnings.
+    /// Unlike `doctor`, this only checks the config file — no external CLI checks.
+    ///
+    /// Examples:
+    ///   agentcom check
+    ///   agentcom check && agentcom up
+    Check,
     /// Read hub log files without needing a running hub
     ///
     /// Examples:
@@ -430,6 +440,7 @@ pub async fn run_client(command: Command) -> Result<()> {
                     description,
                     priority,
                     depends_on,
+                    timeout_mins: None,
                 },
                 TaskCmd::List { status, search } => Request::TaskList { status, search, tag: None },
                 TaskCmd::Claim { id } => Request::TaskClaim { id },
@@ -546,6 +557,7 @@ pub async fn run_client(command: Command) -> Result<()> {
         | Command::Up { .. }
         | Command::Agent(_)
         | Command::Doctor
+        | Command::Check
         | Command::Logs { .. }
         | Command::Completions { .. }
         | Command::Budget
@@ -608,6 +620,7 @@ pub async fn run_agent_cmd(cmd: AgentCmd) -> Result<()> {
                 max_rpm: None,
                 env,
                 initial_prompt: None,
+                spawn_delay_ms: None,
             };
             // Validate the combined config first; only persist after the
             // hub (if running) has also accepted — a cap rejection must not

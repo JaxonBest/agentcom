@@ -208,8 +208,16 @@ impl Hub {
                     || only.map(|o| o.iter().any(|x| x == n)).unwrap_or(true)
             })
             .collect();
-        for name in names {
-            self.spawn_agent(&name, None)?;
+        let stagger_ms = self.cfg.stagger_agents_ms.unwrap_or(0);
+        for (idx, name) in names.iter().enumerate() {
+            if stagger_ms > 0 && idx > 0 {
+                let delay = stagger_ms * idx as u64;
+                self.log(format!(
+                    "stagger: waiting {delay}ms before spawning {name}"
+                ));
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+            }
+            self.spawn_agent(name, None)?;
         }
         Ok(())
     }
@@ -220,6 +228,12 @@ impl Hub {
             .agent(name)
             .with_context(|| format!("unknown agent {name:?}"))?
             .clone();
+        if let Some(delay_ms) = agent_cfg.spawn_delay_ms {
+            if delay_ms > 0 {
+                self.log(format!("spawn_delay: waiting {delay_ms}ms before spawning {name}"));
+                std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+            }
+        }
         let session_id = uuid::Uuid::new_v4().to_string();
         let sys_prompt =
             crate::prompt::system_prompt_append(&self.cfg, &agent_cfg, self.free.as_ref());
@@ -781,6 +795,7 @@ impl Hub {
                 description,
                 priority,
                 depends_on,
+                timeout_mins: _,
             } => match self
                 .store
                 .task_add(&title, &description, priority, &depends_on, identity)
@@ -974,6 +989,20 @@ impl Hub {
                 }
                 Err(e) => Response::err(e.to_string()),
             },
+            Request::TaskSetDue { id, due_at } => {
+                match self.store.task_set_due(id, due_at) {
+                    Ok(()) => {
+                        self.audit.write(
+                            "task_set_due",
+                            identity,
+                            serde_json::json!({"task_id": id, "due_at": due_at}),
+                        );
+                        let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
+                        Response::ok_msg(format!("due date updated for task #{id}"))
+                    }
+                    Err(e) => Response::err(e.to_string()),
+                }
+            }
             Request::Status => self.status_response(),
             Request::AgentAdd { config } => self.add_agent_live(identity, config),
             Request::FilesClaim { paths } => match self.store.files_claim(identity, &paths) {

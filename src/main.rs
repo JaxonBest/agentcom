@@ -86,6 +86,7 @@ async fn main() -> Result<()> {
         }
         Command::Agent(cmd) => cli::run_agent_cmd(cmd).await,
         Command::Doctor => run_doctor().await,
+        Command::Check => run_check(),
         Command::Logs { agent, lines, follow } => run_logs(agent, lines, follow),
         Command::Completions { shell } => {
             use clap::CommandFactory;
@@ -323,6 +324,103 @@ fn stage_runtime_binaries(exe: &std::path::Path, stable_dir: &std::path::Path) -
                 .with_context(|| format!("copying adapter {}", src.display()))?;
         }
     }
+    Ok(())
+}
+
+/// Load, validate, and print a summary of agentcom.toml.
+/// Exits with code 0 if valid, 1 if invalid.
+fn run_check() -> Result<()> {
+    const BOLD: &str = "\x1b[1m";
+    const RESET: &str = "\x1b[0m";
+
+    let cwd = std::env::current_dir()?;
+    let project_root = match paths::find_project_root(&cwd) {
+        Some(r) => r,
+        None => {
+            eprintln!("{BOLD}agentcom check{RESET} — FAIL");
+            eprintln!("  no agentcom.toml found — run `agentcom init` first");
+            std::process::exit(1);
+        }
+    };
+
+    let cfg = match config::HubConfig::load(&project_root) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{BOLD}agentcom check{RESET} — FAIL");
+            eprintln!("  config error: {e:#}");
+            std::process::exit(1);
+        }
+    };
+
+    println!("{BOLD}agentcom check{RESET} — OK");
+    println!("  project:     {}", cfg.project_name);
+    println!("  agents:      {} configured", cfg.agents.len());
+    println!("  max_agents:  {}", cfg.max_agents);
+    println!("  auto_commit: {}", if cfg.auto_commit { "enabled" } else { "disabled" });
+    if let Some(max) = cfg.max_total_budget_usd {
+        println!("  max budget:  ${max:.2}");
+    } else {
+        println!("  max budget:  (unlimited)");
+    }
+    println!();
+
+    // Per-agent summary
+    for a in &cfg.agents {
+        let provider = cfg
+            .agent_provider(a)
+            .to_string();
+        let model = a.model.as_deref().unwrap_or("(default)");
+        let budget = a
+            .max_budget_usd
+            .map(|b| format!("${b:.2}"))
+            .unwrap_or_else(|| "(unlimited)".to_string());
+        let tools = a
+            .allowed_tools
+            .as_ref()
+            .map(|t| t.join(","))
+            .unwrap_or_else(|| "(all)".to_string());
+        println!("  agent  {:<15} provider={:<8} model={:<20} budget={:<12} tools={}", a.name, provider, model, budget, tools);
+    }
+    println!();
+
+    // Warnings
+    let mut warnings: Vec<String> = Vec::new();
+    for a in &cfg.agents {
+        if a.allowed_tools.is_none() {
+            warnings.push(format!(
+                "agent {:?} has no allowed_tools set — all tools available",
+                a.name
+            ));
+        }
+        if a.max_budget_usd.is_none() {
+            warnings.push(format!(
+                "agent {:?} has no max_budget_usd — no per-agent spend cap",
+                a.name
+            ));
+        }
+        if a.max_rpm.is_none() {
+            warnings.push(format!(
+                "agent {:?} has no max_rpm — no per-agent rate limit",
+                a.name
+            ));
+        }
+    }
+    if cfg.agents.len() > cfg.max_agents / 2 {
+        warnings.push(format!(
+            "fleet at {}/{} capacity — consider increasing max_agents",
+            cfg.agents.len(),
+            cfg.max_agents
+        ));
+    }
+
+    if warnings.is_empty() {
+        println!("  {BOLD}no warnings{RESET}");
+    } else {
+        for w in &warnings {
+            println!("  ⚠  {w}");
+        }
+    }
+
     Ok(())
 }
 

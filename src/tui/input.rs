@@ -295,6 +295,7 @@ fn handle_modal_key(app: &mut App, key: KeyEvent) {
                         description: String::new(),
                         priority: 2,
                         depends_on: vec![],
+                        timeout_mins: None,
                     });
                     app.flash = Some("task added".into());
                 }

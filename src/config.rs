@@ -67,6 +67,14 @@ pub struct HubConfig {
     /// Remote name to push to when `auto_push = true`. Defaults to "origin".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_push_remote: Option<String>,
+    /// Cumulative startup stagger across all agents (milliseconds). Agent N
+    /// waits N * stagger_agents_ms before spawning. Spreads initial API load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stagger_agents_ms: Option<u64>,
+    /// Shell command to run before each auto-commit. If it exits non-zero,
+    /// the commit is skipped and a warning is logged. Example: "cargo test".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_commit_test_cmd: Option<String>,
     #[serde(default, rename = "agent")]
     pub agents: Vec<AgentConfig>,
 }
@@ -125,6 +133,10 @@ pub struct AgentConfig {
     /// composer. Example: initial_prompt = "Fix the login bug in auth.rs."
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub initial_prompt: Option<String>,
+    /// Milliseconds to delay before spawning this agent. Applied on top of
+    /// any global `stagger_agents_ms`. Useful to spread API calls at startup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spawn_delay_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
@@ -164,9 +176,11 @@ impl Default for AgentConfig {
             max_rpm: None,
             env: BTreeMap::new(),
             initial_prompt: None,
+            spawn_delay_ms: None,
         }
     }
 }
+
 
 pub const COMPOSER_NAME: &str = "composer";
 
