@@ -460,9 +460,9 @@ pub fn scan_project(root: &Path) -> String {
     let mut readme_lines: Vec<String> = Vec::new();
 
     // Recursive walk helper (fn, not closure — no capture needed).
+    #[allow(clippy::too_many_arguments)]
     fn walk(
         dir: &Path,
-        root: &Path,
         depth: usize,
         max_depth: usize,
         skip_dirs: &[&str],
@@ -495,7 +495,6 @@ pub fn scan_project(root: &Path) -> String {
                 }
                 walk(
                     &path,
-                    root,
                     depth + 1,
                     max_depth,
                     skip_dirs,
@@ -621,7 +620,7 @@ pub fn scan_project(root: &Path) -> String {
 
     // Sort extensions by count descending, take top 7
     let mut ext_vec: Vec<(String, usize)> = ext_counts.into_iter().collect();
-    ext_vec.sort_by(|a, b| b.1.cmp(&a.1));
+    ext_vec.sort_by_key(|b| std::cmp::Reverse(b.1));
     ext_vec.truncate(7);
 
     let ext_summary: String = ext_vec
