@@ -1223,11 +1223,9 @@ impl Hub {
         } else {
             format!("{file_count} files changed")
         };
-        let task_prefix = self
-            .store
-            .claimed_task(agent)
-            .ok()
-            .flatten()
+        let task_info = self.store.claimed_task(agent).ok().flatten();
+        let task_prefix = task_info
+            .as_ref()
             .map(|t| {
                 let title: String = t.title.chars().take(60).collect();
                 format!("task #{} {} — ", t.id, title)
@@ -1235,9 +1233,22 @@ impl Hub {
             .unwrap_or_default();
         let summary = format!("{agent}: {task_prefix}{files_str}");
 
+        // Body: list every changed path, and optionally the first line of the task description.
+        let mut body_lines: Vec<String> = unique.iter().map(|p| format!("  {p}")).collect();
+        if let Some(t) = &task_info {
+            if !t.description.is_empty() {
+                body_lines.push(String::new());
+                body_lines.push(format!(
+                    "Task: {}",
+                    t.description.lines().next().unwrap_or("")
+                ));
+            }
+        }
+        let body = body_lines.join("\n");
+
         let mut commit_cmd = Command::new("git");
         commit_cmd
-            .args(["commit", "--author", &author, "-m", &summary])
+            .args(["commit", "--author", &author, "-m", &summary, "-m", &body])
             .current_dir(&self.project_root);
         if self.cfg.auto_commit_skip_hooks {
             commit_cmd.arg("--no-verify");
