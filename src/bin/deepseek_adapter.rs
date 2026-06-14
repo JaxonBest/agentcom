@@ -805,11 +805,21 @@ fn segment_matches(pattern: &str, segment: &str) -> bool {
 // ── Shell execution ───────────────────────────────────────────────────────────
 
 async fn run_shell_command(args: &Args, command: &str) -> Result<String> {
-    let mut cmd = if cfg!(windows) {
-        let mut c = Command::new("cmd.exe");
-        c.arg("/C").arg(command);
-        c
-    } else {
+    // cmd.exe does its own command-line parsing and does NOT follow the C
+    // runtime quoting convention. Passing `command` through the normal `.arg()`
+    // path makes std wrap it in quotes and rewrite the model's embedded `"` as
+    // `\"`, which cmd.exe then mis-parses — corrupting any command with spaces
+    // or quotes, e.g. `agentcom send human "hello world"`. `raw_arg` appends the
+    // command line verbatim so cmd.exe parses it exactly as written.
+    #[cfg(windows)]
+    let mut cmd = {
+        use std::os::windows::process::CommandExt;
+        let mut c = std::process::Command::new("cmd.exe");
+        c.arg("/C").raw_arg(command);
+        Command::from(c)
+    };
+    #[cfg(not(windows))]
+    let mut cmd = {
         let mut c = Command::new("sh");
         c.arg("-c").arg(command);
         c
@@ -1210,6 +1220,29 @@ mod tests {
         let rel = path.file_name().unwrap().to_str().unwrap();
         tool_edit(rel, "foo", "baz", true, dir.path()).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "baz\nbaz\nbar\n");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn run_shell_command_preserves_quoted_spaces() {
+        // Regression: the model sends e.g. `agentcom send human "hello world"`.
+        // The previous `.arg(command)` path let std wrap+escape the line so
+        // cmd.exe mangled it, which is why DeepSeek fell back to space-free
+        // hacks (hello+world, hello_world, %20...). `echo "a b"` exposes the
+        // difference: correct handling prints `"a b"`, the broken path printed
+        // `\"a b\"`.
+        let dir = tempfile::tempdir().unwrap();
+        let args = Args {
+            cwd: dir.path().to_path_buf(),
+            session_id: "test".into(),
+            system_prompt_file: dir.path().join("p.txt"),
+            model: "deepseek-chat".into(),
+            resume: None,
+            allowed_tools: "Bash".into(),
+            max_turns: 50,
+        };
+        let out = run_shell_command(&args, "echo \"a b\"").await.unwrap();
+        assert_eq!(out.trim(), "\"a b\"");
     }
 
     #[test]
