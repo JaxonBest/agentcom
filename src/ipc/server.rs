@@ -131,6 +131,17 @@ impl IpcServer {
     }
 }
 
+/// Compare two strings in constant time to prevent timing side channels on the
+/// IPC token. Processes all bytes even after a mismatch — no early exit.
+fn ct_eq(a: &str, b: &str) -> bool {
+    let a = a.as_bytes();
+    let b = b.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
 /// Read exactly one line from `lines`, enforcing the MAX_LINE_BYTES cap.
 /// Returns None on EOF, Err on I/O error, Ok(Some(line)) on success.
 async fn read_line_bounded(
@@ -161,7 +172,7 @@ async fn handle_conn(
     // First frame must be a valid Hello.
     let identity = match read_line_bounded(&mut lines).await? {
         Some(line) => match serde_json::from_str::<Request>(&line) {
-            Ok(Request::Hello { token: t, identity }) if t == token => identity,
+            Ok(Request::Hello { token: t, identity }) if ct_eq(&t, &token) => identity,
             Ok(Request::Hello { .. }) => {
                 write_frame(&mut write_half, &Response::err("invalid token")).await?;
                 return Ok(());
@@ -271,4 +282,25 @@ async fn write_frame(w: &mut (impl AsyncWriteExt + Unpin), resp: &Response) -> s
     let mut line = serde_json::to_string(resp).expect("response serializes");
     line.push('\n');
     w.write_all(line.as_bytes()).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ct_eq;
+
+    #[test]
+    fn ct_eq_matches_equal_strings() {
+        assert!(ct_eq("abc", "abc"));
+        assert!(ct_eq("", ""));
+        let tok = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+        assert!(ct_eq(tok, tok));
+    }
+
+    #[test]
+    fn ct_eq_rejects_different_strings() {
+        assert!(!ct_eq("abc", "abd"));
+        assert!(!ct_eq("abc", "ab"));
+        assert!(!ct_eq("", "x"));
+        assert!(!ct_eq("token", "Token")); // case-sensitive
+    }
 }
