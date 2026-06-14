@@ -403,6 +403,12 @@ impl HubConfig {
                 );
             }
         }
+        if self.webhook_url.is_some() && self.webhook_secret.is_none() {
+            tracing::warn!(
+                "webhook_url is set but webhook_secret is missing \
+                 — hook deliveries will be unsigned and unverifiable by the receiver"
+            );
+        }
         let mut seen = std::collections::HashSet::new();
         for a in &self.agents {
             validate_agent_name(&a.name)?;
@@ -1406,5 +1412,19 @@ role = "builder"
 "#;
         let cfg: HubConfig = toml::from_str(text).unwrap();
         cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn webhook_url_without_secret_still_passes_validation() {
+        // Missing secret is a warn, not an error — delivery is unsigned but valid config.
+        let text = r#"
+project_name = "test"
+webhook_url = "https://example.com/hook"
+[[agent]]
+name = "builder"
+role = "builder"
+"#;
+        let cfg: HubConfig = toml::from_str(text).unwrap();
+        cfg.validate().unwrap(); // must not bail
     }
 }
