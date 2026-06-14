@@ -20,9 +20,25 @@ impl AuditLog {
         }
     }
 
+    /// Rotate the log when it exceeds 10 MiB. Renames `audit.log` →
+    /// `audit.log.1`, overwriting any previous backup. Silently ignores
+    /// rotation errors so audit failures never crash the hub.
+    fn rotate_if_needed(&self) {
+        const MAX_LOG_BYTES: u64 = 10 * 1024 * 1024; // 10 MiB
+        let Ok(meta) = std::fs::metadata(&self.path) else {
+            return; // log doesn't exist yet
+        };
+        if meta.len() < MAX_LOG_BYTES {
+            return;
+        }
+        let backup = self.path.with_extension("log.1");
+        let _ = std::fs::rename(&self.path, &backup);
+    }
+
     /// Append one JSON event line. Silently ignores I/O errors — audit
     /// failures must never crash the hub.
     pub fn write(&self, event: &str, agent: &str, extra: serde_json::Value) {
+        self.rotate_if_needed();
         let mut opts = std::fs::OpenOptions::new();
         opts.append(true).create(true);
         // Restrict new files to owner-only so audit events stay private.
@@ -85,6 +101,34 @@ mod tests {
         let log = AuditLog::new(Path::new("/nonexistent/path"));
         // Must not panic — audit errors are silently swallowed.
         log.write("agent_spawn", "builder", serde_json::json!({}));
+    }
+
+    #[test]
+    fn audit_log_rotates_at_10mb() {
+        let dir = TempDir::new().unwrap();
+        let log_path = dir.path().join("audit.log");
+        // Pre-create a file just over 10 MiB to trigger rotation.
+        let big = vec![b'x'; 10 * 1024 * 1024 + 1];
+        fs::write(&log_path, &big).unwrap();
+
+        let log = AuditLog::new(dir.path());
+        log.write("task_claim", "builder", serde_json::json!({"task_id": 99}));
+
+        // Old oversized log should now be the backup.
+        let backup = dir.path().join("audit.log.1");
+        assert!(backup.exists(), "backup audit.log.1 must exist after rotation");
+        assert_eq!(
+            fs::metadata(&backup).unwrap().len(),
+            big.len() as u64,
+            "backup should contain the original oversized content"
+        );
+
+        // Fresh log should be small (just the one new event).
+        let new_len = fs::metadata(&log_path).unwrap().len();
+        assert!(
+            new_len < 1024,
+            "rotated audit.log should be small, got {new_len} bytes"
+        );
     }
 
     #[cfg(unix)]
