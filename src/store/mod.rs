@@ -162,6 +162,47 @@ pub struct TaskSnapshot {
     pub requires: Vec<String>,
 }
 
+impl Default for Task {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            title: String::new(),
+            description: String::new(),
+            status: TaskStatus::Open,
+            priority: 2,
+            claimed_by: None,
+            blocked_reason: None,
+            note: None,
+            tags: vec![],
+            pinned: false,
+            due_at: None,
+            timeout_mins: None,
+            requires: vec![],
+            created_by: String::new(),
+            created_at: 0,
+            updated_at: 0,
+            depends_on: vec![],
+        }
+    }
+}
+
+impl Default for TaskSnapshot {
+    fn default() -> Self {
+        Self {
+            title: String::new(),
+            description: String::new(),
+            priority: 2,
+            status: "open".to_string(),
+            tags: vec![],
+            depends_on: vec![],
+            source_id: None,
+            due_at: None,
+            timeout_mins: None,
+            requires: vec![],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskComment {
     pub id: i64,

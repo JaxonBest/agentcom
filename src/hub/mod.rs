@@ -708,6 +708,7 @@ impl Hub {
         self.free_mode_tick();
         self.check_stalls();
         self.check_config_reload();
+        self.check_deadlock();
     }
 
     /// Free mode: enforce time/usage stop conditions; when the whole fleet
@@ -1269,6 +1270,21 @@ impl Hub {
         self.stop_deadlines
             .insert(name.to_string(), Instant::now() + STOP_GRACE);
         self.emit_state(name);
+        // Release claimed tasks and file claims so other agents can pick them up.
+        let released = self.store.release_claims(name).unwrap_or(0);
+        if released > 0 {
+            self.log(format!(
+                "{name}: auto-handoff — {released} claimed task(s) reopened for other agents"
+            ));
+            let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
+        }
+        let freed = self.store.files_release(name, &[], true).unwrap_or(0);
+        if freed > 0 {
+            self.log(format!("{name}: released {freed} file claim(s) on stop"));
+        }
+        if released > 0 || freed > 0 {
+            self.wake_idle();
+        }
         Response::ok_msg(format!("stopping {name}"))
     }
 
@@ -1335,6 +1351,64 @@ impl Hub {
             if self.agents[&name].state == AgentState::Idle && self.agents[&name].is_running() {
                 self.stop_agent(&name);
             }
+        }
+    }
+
+    /// Warn when all active agents appear stuck waiting for file claims held by
+    /// each other (a file-claim deadlock). Fires when every non-Stopped/Crashed
+    /// agent has been Working for >10 minutes and every one holds at least one
+    /// file claim — suggesting no one can make progress.
+    fn check_deadlock(&mut self) {
+        const DEADLOCK_SECS: u64 = 10 * 60;
+        let active: Vec<&crate::agent::AgentRuntime> = self
+            .agents
+            .values()
+            .filter(|rt| {
+                matches!(rt.state, AgentState::Working | AgentState::Idle)
+                    && !matches!(
+                        rt.state,
+                        AgentState::Stopped | AgentState::Crashed | AgentState::Paused
+                    )
+            })
+            .collect();
+        if active.is_empty() {
+            return;
+        }
+        // All active agents must be Working AND stalled for >DEADLOCK_SECS.
+        let all_stalled = active.iter().all(|rt| {
+            rt.state == AgentState::Working
+                && rt
+                    .working_since
+                    .map(|t| t.elapsed().as_secs() >= DEADLOCK_SECS)
+                    .unwrap_or(false)
+        });
+        if !all_stalled {
+            return;
+        }
+        // All stalled agents must hold at least one file claim.
+        let claims = match self.store.files_list() {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+        let agents_with_claims: std::collections::HashSet<&str> =
+            claims.iter().map(|c| c.agent.as_str()).collect();
+        let all_hold_claims = active
+            .iter()
+            .all(|rt| agents_with_claims.contains(rt.cfg.name.as_str()));
+        if all_hold_claims {
+            self.log(
+                "DEADLOCK WARNING: all active agents are stalled Working with outstanding file \
+                claims — possible circular file-claim dependency. Check 'agentcom files list'."
+                    .to_string(),
+            );
+            let _ = self.store.msg_send(
+                "hub",
+                &[crate::config::COMPOSER_NAME.to_string()],
+                "DEADLOCK DETECTED: all agents have been Working >10 minutes and each holds \
+                file claims. Likely circular dependency. Run 'agentcom files list' to diagnose. \
+                Consider interrupting the blocked agents to break the cycle.",
+                true,
+            );
         }
     }
 

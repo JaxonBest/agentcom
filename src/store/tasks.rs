@@ -709,6 +709,7 @@ impl Store {
                 due_at: t.due_at,
                 timeout_mins: t.timeout_mins,
                 requires: t.requires,
+                ..Default::default()
             })
             .collect();
         Ok(snapshots)
@@ -1136,30 +1137,8 @@ mod tests {
         let dst = Store::open_in_memory().unwrap();
         use crate::store::TaskSnapshot;
         let snaps = vec![
-            TaskSnapshot {
-                title: "t1".into(),
-                description: "".into(),
-                priority: 2,
-                status: "open".into(),
-                tags: vec![],
-                depends_on: vec![],
-                source_id: None,
-                due_at: None,
-                timeout_mins: None,
-                requires: vec![],
-            },
-            TaskSnapshot {
-                title: "t2".into(),
-                description: "".into(),
-                priority: 2,
-                status: "open".into(),
-                tags: vec![],
-                depends_on: vec![],
-                source_id: None,
-                due_at: None,
-                timeout_mins: None,
-                requires: vec![],
-            },
+            TaskSnapshot { title: "t1".into(), ..Default::default() },
+            TaskSnapshot { title: "t2".into(), ..Default::default() },
         ];
         let ids = dst.bulk_import_tasks(&snaps, "bot").unwrap();
         assert_eq!(ids.len(), 2);
