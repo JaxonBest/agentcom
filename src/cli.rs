@@ -1070,8 +1070,16 @@ pub fn print_tasks(tasks: &[crate::store::Task]) {
                 .unwrap_or_default(),
             _ => String::new(),
         };
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64;
+        let due_marker = match t.due_at {
+            Some(ts) if ts < now_secs && !matches!(t.status, crate::store::TaskStatus::Done) => " OVERDUE",
+            _ => "",
+        };
         println!(
-            "#{:<4} p{} {:<8}{who}{deps} {}{extra}",
+            "#{:<4} p{} {:<8}{who}{deps} {}{extra}{due_marker}",
             t.id,
             t.priority,
             t.status.as_str(),
