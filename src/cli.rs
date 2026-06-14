@@ -34,6 +34,9 @@ pub enum Command {
         /// Fleet archetype: solo, team (default), or mixed
         #[arg(long, default_value = "team")]
         template: crate::config::ConfigTemplate,
+        /// Analyse the current project and suggest a tailored fleet before writing the config
+        #[arg(long)]
+        analyze: bool,
     },
     /// Start the hub and the agent fleet (TUI by default)
     ///

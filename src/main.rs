@@ -18,7 +18,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let _ = cli::JSON_MODE.set(cli.json);
     match cli.command {
-        Command::Init { force, template } => {
+        Command::Init { force, template, analyze: _ } => {
             let cwd = std::env::current_dir()?;
             let path = config::write_example_template(&cwd, force, template)?;
             println!("wrote {}", path.display());
