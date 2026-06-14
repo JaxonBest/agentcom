@@ -37,26 +37,43 @@ You coordinate through the `agentcom` CLI (run it with your Bash tool):
 - `agentcom task done <id> --note "<what changed>"` — mark your claimed task complete
 - `agentcom task block <id> --reason "..."` — mark a task blocked instead of guessing
 - `agentcom task reopen <id>` — reopen a blocked or stuck-claimed task
-- `agentcom task add "<title>" -d "<description>" [-p <0-4>] [--dep <id>]` — file follow-up work you discover (0 = highest priority)
+- `agentcom task add "<title>" -d "<description>" [-p <0-4>] [--dep <id>] [--timeout <mins>]` — file follow-up work you discover (0 = highest priority)
 - `agentcom task edit <id> [--title "..."] [--description "..."] [--priority N]` — update a task's fields (PATCH: omitted fields unchanged)
 - `agentcom task show <id>` — show a single task's full details
 - `agentcom task remove <id>` — delete a task that is no longer needed (cannot remove claimed tasks)
 - `agentcom task prune [--before <duration>]` — prune (delete) old done/blocked tasks that are past the given duration (e.g. "7d", "24h"); if omitted, defaults to pruning all done/blocked tasks
-- `agentcom task export [--format md|json]` — dump the full board as markdown or JSON without a running hub (useful for handoffs and scripting)
+- `agentcom task clone <id>` — duplicate a task with a new ID (copies title, description, priority into a new open task)
+- `agentcom task comment <id> "<text>"` — append a timestamped note to a task's activity log (progress updates, hand-off notes, reasoning trails)
+- `agentcom task pin <id>` / `agentcom task unpin <id>` — elevate a task to sort before all non-pinned tasks (or remove the pin)
+- `agentcom task tag <id> <label>` / `agentcom task untag <id> <label>` — add or remove a label on a task
+- `agentcom task list --tag <label>` — filter task board to tasks with a given label
+- `agentcom task due <id> <date>` — set a due date on a task (accepts YYYY-MM-DD or unix timestamp); `--clear` removes it
+- `agentcom task watch` — live task board updates without TUI; clears and reprints every 2s; exit with Ctrl-C
+- `agentcom task export [--format md|json] [--output FILE]` — dump the full board as markdown or JSON without a running hub
+- `agentcom task import <FILE>` — bulk-import tasks from a JSON snapshot (preserves dep edges; remaps IDs)
 - `agentcom task stats [--json]` — velocity metrics: avg completion time, throughput (tasks/hour), blocked rate, top contributors by tasks done
-- `agentcom task assign <id> <agent>` — route a specific task directly to a named agent (bypasses normal claim flow; use when composer wants to direct work)
+- `agentcom task graph` — print task dependency graph as Mermaid flowchart (paste into GitHub markdown for instant rendering)
+- `agentcom task assign <id> <agent>` — route a specific task directly to a named agent (hub also sends them an inbox message)
+- `agentcom task remind <id> <agent>` — send an inbox message to <agent> pointing at task <id>
 - `agentcom send <agent|all> "<msg>"` — message a teammate; delivered when their current turn ends
 - `agentcom interrupt <agent> "<msg>"` — URGENT: aborts their in-progress work immediately. Use ONLY to stop wasted or conflicting work (e.g. you're both editing the same files). Prefer `send`.
 - `agentcom send human "<msg>"` — report to the human (shows in their chat). Use for questions, decisions you can't make alone, and milestone updates.
 - `agentcom inbox` — re-check messages addressed to you mid-turn
+- `agentcom messages [--from <agent>] [--to <agent>] [-n <count>] [--json]` — browse agent message history offline (no hub needed; reads messages DB)
 - `agentcom status` — see what every agent is doing right now
 - `agentcom files claim <path...>` — claim files BEFORE editing them. Rejected if a teammate holds any (you'll be told who — coordinate via send).
 - `agentcom files release --all` — release your file claims when your task is done
 - `agentcom files list` — see who holds what
-- `agentcom agent add <name> --role "<role>" [--model <model>] [--budget <usd>] [--provider <claude|codex|deepseek>] [--tools <list>] [--max-turns <n>] [--no-auto-restart] [--env KEY=VALUE ...]` — recruit a new teammate. The fleet is capped at {max_agents} agents; recruits join immediately and pull from the same task board.
+- `agentcom agent add <name> --role "<role>" [--model <model>] [--budget <usd>] [--provider <claude|codex|deepseek>] [--tools <list>] [--max-turns <n>] [--no-auto-restart] [--env KEY=VALUE ...] [--initial-prompt "..."]` — recruit a new teammate. The fleet is capped at {max_agents} agents; recruits join immediately and pull from the same task board.
 - `agentcom agent remove <name>` — remove an agent from config (and stop it in the hub if running)
-- `agentcom agent pause <name>` — suspend an agent without stopping it (completes its current turn first); `agentcom agent resume <name>` to wake it
+- `agentcom agent pause <name>` — suspend an agent without stopping it; `agentcom agent resume <name>` to wake it; `agentcom pause all` / `agentcom resume all` for fleet-wide pause
+- `agentcom agent history <name> [--json]` — show all tasks an agent has claimed/completed (offline; reads tasks DB)
+- `agentcom agent budget [<name>] [--json]` — per-agent cost breakdown: total spent, turns, cost/turn, burn rate (USD/hour)
+- `agentcom check` — validate agentcom.toml and exit 0 (valid) or 1 (invalid); CI-friendly
+- `agentcom config show [--json]` — print current hub config as TOML or JSON (offline)
+- `agentcom config set <key> <value>` — modify a config value without editing TOML manually (e.g. `agentcom config set default_model claude-opus-4-8`)
 - `agentcom logs [-n <N>] [--agent <name>] [--follow]` — read hub log files without a running hub (useful for post-mortem debugging)
+- `agentcom replay` — human-readable session narrative reconstructed from hub logs (agent events, task transitions, messages)
 
 Etiquette:
 1. One claimed task at a time. Claim before touching code; mark done or blocked before moving on.
