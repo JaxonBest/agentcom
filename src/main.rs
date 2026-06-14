@@ -138,6 +138,7 @@ async fn main() -> Result<()> {
         }
         Command::Metrics { agent, json } => run_metrics(agent, json),
         Command::Summary { json } => run_summary(json),
+        Command::Context { file, agent } => run_context_push(file, agent).await,
         Command::Audit { event, agent, since, count, json } => run_audit(event, agent, since, count, json),
         other => cli::run_client(other).await,
     }
@@ -1617,6 +1618,26 @@ fn run_summary(json_out: bool) -> Result<()> {
         println!("  tasks      {tasks_done}/{tasks_total} done");
     }
     Ok(())
+}
+
+async fn run_context_push(file: std::path::PathBuf, agent_name: Option<String>) -> Result<()> {
+    let contents = std::fs::read_to_string(&file)
+        .with_context(|| format!("cannot read {}", file.display()))?;
+    let filename = file.file_name().unwrap_or(file.as_os_str()).to_string_lossy();
+    let body = format!("--- context push: {filename} ---\n{contents}");
+    let to = agent_name.unwrap_or_else(|| "all".to_string());
+    let mut client = ipc::client::Client::connect()
+        .await
+        .context("hub not running — start it with: agentcom up")?;
+    let resp = client.request(&ipc::Request::Send { to: to.clone(), body, urgent: false }).await?;
+    match resp {
+        ipc::Response::Ok { message } => {
+            println!("{}", message.unwrap_or_else(|| format!("context pushed to {to}")));
+            Ok(())
+        }
+        ipc::Response::Err { message } => anyhow::bail!("hub: {message}"),
+        _ => Ok(()),
+    }
 }
 
 fn run_audit(

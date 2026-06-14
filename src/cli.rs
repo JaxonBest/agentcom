@@ -244,6 +244,18 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Read a file and broadcast its contents to all agents (or a specific one)
+    ///
+    /// Examples:
+    ///   agentcom context push spec.md
+    ///   agentcom context push api.md --agent builder
+    Context {
+        /// Path to the file to push
+        file: std::path::PathBuf,
+        /// Send to this agent only (default: all)
+        #[arg(long)]
+        agent: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -825,6 +837,7 @@ pub async fn run_client(command: Command) -> Result<()> {
         | Command::Audit { .. }
         | Command::Metrics { .. }
         | Command::Summary { .. }
+        | Command::Context { .. }
         | Command::Version
         | Command::Config(_) => {
             unreachable!("handled in main")
