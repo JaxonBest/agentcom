@@ -258,10 +258,23 @@ pub enum TaskCmd {
     /// Examples:
     ///   agentcom task export
     ///   agentcom task export --format json | jq '.[] | select(.status=="open") | .title'
+    ///   agentcom task export --output board.json
     Export {
         /// Output format: md (default) or json
         #[arg(long, default_value = "md")]
         format: String,
+        /// Write output to file instead of stdout
+        #[arg(long)]
+        output: Option<String>,
+    },
+    /// Import tasks from a JSON snapshot file
+    ///
+    /// Examples:
+    ///   agentcom task import board.json
+    ///   agentcom task import exported-tasks.json
+    Import {
+        /// Path to the JSON snapshot file to import
+        file: String,
     },
     /// Velocity metrics: completion times, throughput, top contributors
     ///
@@ -483,7 +496,7 @@ pub async fn run_client(command: Command) -> Result<()> {
                     let resp = client.request(&Request::Send { to: agent, body, urgent: false }).await?;
                     return print_simple(resp);
                 }
-                TaskCmd::Export { .. } | TaskCmd::Stats { .. } | TaskCmd::Watch { .. } => unreachable!("handled in main"),
+                TaskCmd::Export { .. } | TaskCmd::Import { .. } | TaskCmd::Stats { .. } | TaskCmd::Watch { .. } => unreachable!("handled in main"),
             };
             let resp = client.request(&req).await?;
             match resp {

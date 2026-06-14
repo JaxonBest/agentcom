@@ -116,7 +116,8 @@ async fn main() -> Result<()> {
             println!("rustc:       {}", option_env!("RUSTC_VERSION").unwrap_or("unknown"));
             Ok(())
         }
-        Command::Task(cli::TaskCmd::Export { format }) => run_task_export(&format),
+        Command::Task(cli::TaskCmd::Export { format, output }) => run_task_export(&format, output.as_deref()),
+        Command::Task(cli::TaskCmd::Import { file }) => run_task_import(&file),
         Command::Task(cli::TaskCmd::Stats { json }) => run_task_stats(json),
         Command::Task(cli::TaskCmd::Watch { no_color }) => run_task_watch(no_color),
         other => cli::run_client(other).await,
@@ -715,7 +716,7 @@ fn run_budget() -> Result<()> {
     Ok(())
 }
 
-fn run_task_export(format: &str) -> Result<()> {
+fn run_task_export(format: &str, output: Option<&str>) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let project_root = paths::find_project_root(&cwd)
         .context("no agentcom.toml found — run `agentcom init` first")?;
@@ -724,41 +725,81 @@ fn run_task_export(format: &str) -> Result<()> {
         anyhow::bail!("no hub data found — run `agentcom up` first");
     }
     let store = store::Store::open(&db)?;
-    let tasks = store.task_list(None, None)?;
 
-    if format == "json" {
-        println!("{}", serde_json::to_string_pretty(&tasks)?);
-        return Ok(());
-    }
+    let formatted = if format == "json" {
+        let snapshots = store.task_export_all()?;
+        serde_json::to_string_pretty(&snapshots)?
+    } else {
+        let tasks = store.task_list(None, None)?;
+        if tasks.is_empty() {
+            "no tasks".to_string()
+        } else {
+            let open: Vec<_> = tasks.iter().filter(|t| t.status == store::TaskStatus::Open).collect();
+            let claimed: Vec<_> = tasks.iter().filter(|t| t.status == store::TaskStatus::Claimed).collect();
+            let done: Vec<_> = tasks.iter().filter(|t| t.status == store::TaskStatus::Done).collect();
+            let blocked: Vec<_> = tasks.iter().filter(|t| t.status == store::TaskStatus::Blocked).collect();
 
-    if tasks.is_empty() {
-        println!("no tasks");
-        return Ok(());
-    }
-    let open: Vec<_> = tasks.iter().filter(|t| t.status == store::TaskStatus::Open).collect();
-    let claimed: Vec<_> = tasks.iter().filter(|t| t.status == store::TaskStatus::Claimed).collect();
-    let done: Vec<_> = tasks.iter().filter(|t| t.status == store::TaskStatus::Done).collect();
-    let blocked: Vec<_> = tasks.iter().filter(|t| t.status == store::TaskStatus::Blocked).collect();
+            let mut buf = String::new();
+            let print_section = |buf: &mut String, header: &str, prefix: &str, items: &[&store::Task]| {
+                if items.is_empty() {
+                    return;
+                }
+                buf.push_str(&format!("## {header}\n"));
+                for t in items {
+                    let suffix = t.blocked_reason.as_deref()
+                        .or(t.note.as_deref())
+                        .map(|s| format!(" — {}", s.chars().take(60).collect::<String>()))
+                        .unwrap_or_default();
+                    buf.push_str(&format!("{prefix} #{} {}{suffix}\n", t.id, t.title));
+                }
+                buf.push('\n');
+            };
 
-    let print_section = |header: &str, prefix: &str, items: &[&store::Task]| {
-        if items.is_empty() {
-            return;
+            print_section(&mut buf, "Open", "- [ ]", &open);
+            print_section(&mut buf, "In Progress", "- [~]", &claimed);
+            print_section(&mut buf, "Blocked", "- [~]", &blocked);
+            print_section(&mut buf, "Done", "- [x]", &done);
+            buf
         }
-        println!("## {header}");
-        for t in items {
-            let suffix = t.blocked_reason.as_deref()
-                .or(t.note.as_deref())
-                .map(|s| format!(" — {}", s.chars().take(60).collect::<String>()))
-                .unwrap_or_default();
-            println!("{prefix} #{} {}{suffix}", t.id, t.title);
-        }
-        println!();
     };
 
-    print_section("Open", "- [ ]", &open);
-    print_section("In Progress", "- [~]", &claimed);
-    print_section("Blocked", "- [~]", &blocked);
-    print_section("Done", "- [x]", &done);
+    if let Some(path) = output {
+        std::fs::write(path, &formatted)
+            .with_context(|| format!("failed to write to {path:?}"))?;
+        println!("wrote task board to {path}");
+    } else {
+        print!("{formatted}");
+    }
+
+    Ok(())
+}
+
+fn run_task_import(file: &str) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let project_root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+    let db = paths::db_path(&project_root)?;
+    if !db.exists() {
+        anyhow::bail!("no hub data found — run `agentcom up` first");
+    }
+
+    let content = std::fs::read_to_string(file)
+        .with_context(|| format!("failed to read {file:?}"))?;
+    let snapshots: Vec<store::TaskSnapshot> = serde_json::from_str(&content)
+        .with_context(|| format!("failed to parse {file:?} as JSON task snapshot"))?;
+
+    let store = store::Store::open(&db)?;
+    let new_ids = store.bulk_import_tasks(&snapshots, "human")?;
+
+    println!(
+        "imported {} task(s) from {file:?}: {}",
+        new_ids.len(),
+        new_ids
+            .iter()
+            .map(|id| format!("#{id}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     Ok(())
 }
 
