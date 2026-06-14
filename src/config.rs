@@ -169,6 +169,12 @@ pub struct AgentConfig {
     /// Tasks may require all of a set of capabilities before an agent can claim them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub capabilities: Vec<String>,
+    /// Standing goal sent as a user turn whenever the agent becomes idle with
+    /// no pending tasks or messages. Fires every time the agent goes idle —
+    /// unlike `initial_prompt` which fires only once at spawn.
+    /// Example: idle_goal = "Scan the task board and claim the highest-priority open task."
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idle_goal: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
@@ -224,6 +230,7 @@ impl Default for AgentConfig {
             initial_prompt: None,
             spawn_delay_ms: None,
             capabilities: vec![],
+            idle_goal: None,
         }
     }
 }

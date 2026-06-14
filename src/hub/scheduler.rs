@@ -83,8 +83,19 @@ impl Hub {
             None
         };
 
-        let Some(prompt) = crate::prompt::turn_prompt(&inbox, claimed.as_ref(), suggested.as_ref())
-        else {
+        let turn_prompt_result =
+            crate::prompt::turn_prompt(&inbox, claimed.as_ref(), suggested.as_ref());
+
+        // When there's no regular work, fire idle_goal if the agent has one.
+        let prompt = if let Some(p) = turn_prompt_result {
+            p
+        } else if let Some(goal) = self
+            .agents
+            .get(name)
+            .and_then(|r| r.cfg.idle_goal.clone())
+        {
+            goal
+        } else {
             let rt = self.agents.get_mut(name).expect("agent exists");
             rt.state_detail = Some("waiting for work".into());
             self.emit_state(name);
