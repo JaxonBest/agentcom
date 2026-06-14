@@ -91,6 +91,23 @@ pub enum Request {
     TaskClone {
         id: i64,
     },
+    /// Append a timestamped comment to a task's activity log.
+    TaskComment {
+        id: i64,
+        body: String,
+    },
+    /// Retrieve all comments on a task (newest last).
+    TaskComments {
+        id: i64,
+    },
+    /// Pin a task so it sorts before all non-pinned tasks.
+    TaskPin {
+        id: i64,
+    },
+    /// Unpin a task.
+    TaskUnpin {
+        id: i64,
+    },
     Status,
     /// Hot-add an agent to the running hub (already persisted to
     /// agentcom.toml by the client).
@@ -161,6 +178,10 @@ pub enum Response {
     /// Result of a TaskClone operation.
     Cloned {
         new_id: i64,
+    },
+    /// Comments on a task (from TaskComments request).
+    Comments {
+        comments: Vec<crate::store::TaskComment>,
     },
 }
 
