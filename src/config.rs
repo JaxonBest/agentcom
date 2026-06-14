@@ -346,6 +346,31 @@ pub fn validate_agent_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate a capability or requires label: `[a-z0-9_-]{1,32}`.
+/// Called for both `capabilities` in AgentConfig and `requires` in TaskAdd.
+pub fn validate_capability_label(label: &str) -> Result<()> {
+    if label.is_empty() {
+        bail!("capability label must not be empty");
+    }
+    if label.len() > 32 {
+        bail!(
+            "capability label {:?} is too long ({} chars) — maximum 32",
+            label,
+            label.len()
+        );
+    }
+    if !label
+        .chars()
+        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+    {
+        bail!(
+            "capability label {:?} is invalid (use lowercase letters, digits, '-', '_')",
+            label
+        );
+    }
+    Ok(())
+}
+
 fn default_true() -> bool {
     true
 }
@@ -419,6 +444,11 @@ impl HubConfig {
             validate_agent_name(&a.name)?;
             if !seen.insert(&a.name) {
                 bail!("duplicate agent name {:?}", a.name);
+            }
+            for cap in &a.capabilities {
+                validate_capability_label(cap).with_context(|| {
+                    format!("agent {:?} has invalid capability label", a.name)
+                })?;
             }
         }
         Ok(())
@@ -1454,5 +1484,39 @@ role = "builder"
 "#;
         let cfg: HubConfig = toml::from_str(text).unwrap();
         cfg.validate().unwrap(); // must not bail
+    }
+
+    #[test]
+    fn capability_label_valid() {
+        assert!(validate_capability_label("rust").is_ok());
+        assert!(validate_capability_label("rust-security").is_ok());
+        assert!(validate_capability_label("go_backend").is_ok());
+        assert!(validate_capability_label("a1").is_ok());
+    }
+
+    #[test]
+    fn capability_label_invalid() {
+        assert!(validate_capability_label("").is_err(), "empty");
+        assert!(validate_capability_label("Rust").is_err(), "uppercase");
+        assert!(validate_capability_label("has space").is_err(), "space");
+        assert!(validate_capability_label("has.dot").is_err(), "dot");
+        assert!(validate_capability_label(&"x".repeat(33)).is_err(), "too long");
+    }
+
+    #[test]
+    fn capability_label_in_agent_config_validated() {
+        let text = r#"
+project_name = "test"
+[[agent]]
+name = "builder"
+role = "builder"
+capabilities = ["rust", "Invalid!"]
+"#;
+        let cfg: HubConfig = toml::from_str(text).unwrap();
+        let err = cfg.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("capability label"),
+            "expected capability error, got: {err}"
+        );
     }
 }
