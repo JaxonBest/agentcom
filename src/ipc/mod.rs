@@ -76,6 +76,12 @@ pub enum Request {
     TaskDelete {
         id: i64,
     },
+    /// Manually route a task to a specific agent (bypasses dep check; works
+    /// on open/blocked tasks; hub also sends the agent an inbox message).
+    TaskAssign {
+        id: i64,
+        agent: String,
+    },
     /// Prune old done/blocked tasks.
     TaskPrune {
         /// Delete tasks whose updated_at is more than this many seconds ago.

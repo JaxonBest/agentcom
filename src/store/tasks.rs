@@ -284,6 +284,44 @@ impl Store {
         Ok(self.task_get(id)?.expect("just claimed"))
     }
 
+    /// Manually route a task to a specific agent, bypassing the normal claim
+    /// flow (no dep check, works on open/blocked tasks). Errors if the task
+    /// is already claimed by a *different* agent or if it is already done.
+    pub fn task_assign(&self, id: i64, agent: &str) -> Result<Task> {
+        let conn = self.conn.lock().unwrap();
+        // Check current status first so we can give a clear error.
+        let (status, claimed_by): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, claimed_by FROM tasks WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|_| anyhow::anyhow!("task #{id} does not exist"))?;
+
+        match status.as_str() {
+            "done" => bail!("task #{id} is already done"),
+            "claimed" => {
+                if claimed_by.as_deref() != Some(agent) {
+                    bail!(
+                        "task #{id} is already claimed by {}",
+                        claimed_by.unwrap_or_default()
+                    );
+                }
+                // Already assigned to the same agent — treat as success.
+                drop(conn);
+                return Ok(self.task_get(id)?.expect("exists"));
+            }
+            _ => {}
+        }
+
+        conn.execute(
+            "UPDATE tasks SET status = 'claimed', claimed_by = ?1, updated_at = ?2 WHERE id = ?3",
+            params![agent, now_ts(), id],
+        )?;
+        drop(conn);
+        Ok(self.task_get(id)?.expect("just assigned"))
+    }
+
     pub fn task_done(&self, id: i64, agent: &str, note: Option<&str>) -> Result<Task> {
         let conn = self.conn.lock().unwrap();
         let updated = conn.execute(
