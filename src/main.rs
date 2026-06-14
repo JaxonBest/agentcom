@@ -84,6 +84,7 @@ async fn main() -> Result<()> {
             };
             run_up(agents, tasks, headless, free_mode, budget, restart).await
         }
+        Command::Agent(cli::AgentCmd::Budget { agent, json }) => run_agent_budget(agent, json),
         Command::Agent(cmd) => cli::run_agent_cmd(cmd).await,
         Command::Doctor => run_doctor().await,
         Command::Check => run_check(),
@@ -715,6 +716,93 @@ fn run_budget() -> Result<()> {
     }
     println!("{}", "-".repeat(36));
     println!("{:<14} ${:>9.4}  {:>8}", "TOTAL", total_cost, total_turns);
+    Ok(())
+}
+
+fn run_agent_budget(agent: Option<String>, json_out: bool) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let project_root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+    let db = paths::db_path(&project_root)?;
+    if !db.exists() {
+        anyhow::bail!("no hub data found — run `agentcom up` first to generate spend data");
+    }
+    let conn = rusqlite::Connection::open_with_flags(
+        &db,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )?;
+
+    let mut rows: Vec<(String, f64, i64, i64)> = Vec::new();
+    if let Some(ref name) = agent {
+        let mut stmt = conn.prepare(
+            "SELECT agent, SUM(cost_usd), SUM(turns),
+                    SUM(COALESCE(ended_at, strftime('%s','now')) - started_at)
+             FROM runs WHERE agent = ?1 GROUP BY agent",
+        )?;
+        for row in stmt.query_map(rusqlite::params![name], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })? {
+            rows.push(row?);
+        }
+    } else {
+        let mut stmt = conn.prepare(
+            "SELECT agent, SUM(cost_usd), SUM(turns),
+                    SUM(COALESCE(ended_at, strftime('%s','now')) - started_at)
+             FROM runs GROUP BY agent ORDER BY SUM(cost_usd) DESC",
+        )?;
+        for row in stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))? {
+            rows.push(row?);
+        }
+    }
+
+    if rows.is_empty() {
+        if json_out {
+            println!("[]");
+        } else {
+            println!("no spend data yet");
+        }
+        return Ok(());
+    }
+
+    #[derive(serde::Serialize)]
+    struct Row {
+        agent: String,
+        total_usd: f64,
+        turns: i64,
+        cost_per_turn: f64,
+        active_secs: i64,
+        burn_rate_usd_per_hour: f64,
+    }
+    let data: Vec<Row> = rows
+        .into_iter()
+        .map(|(agent, cost, turns, active_secs)| {
+            let cost_per_turn = if turns > 0 { cost / turns as f64 } else { 0.0 };
+            let burn_rate = if active_secs > 0 {
+                cost / (active_secs as f64 / 3600.0)
+            } else {
+                0.0
+            };
+            Row { agent, total_usd: cost, turns, cost_per_turn, active_secs, burn_rate_usd_per_hour: burn_rate }
+        })
+        .collect();
+
+    if json_out {
+        println!("{}", serde_json::to_string_pretty(&data)?);
+        return Ok(());
+    }
+
+    println!(
+        "{:<14} {:>10}  {:>8}  {:>12}  {:>14}",
+        "AGENT", "COST (USD)", "TURNS", "COST/TURN", "BURN $/hr"
+    );
+    println!("{}", "-".repeat(66));
+    for r in &data {
+        let active_h = r.active_secs as f64 / 3600.0;
+        println!(
+            "{:<14} ${:>9.4}  {:>8}  ${:>11.4}  ${:>13.4}  ({:.1}h active)",
+            r.agent, r.total_usd, r.turns, r.cost_per_turn, r.burn_rate_usd_per_hour, active_h
+        );
+    }
     Ok(())
 }
 

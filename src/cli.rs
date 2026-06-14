@@ -450,6 +450,14 @@ pub enum AgentCmd {
         name: String,
         model: String,
     },
+    /// Per-agent cost breakdown: total spent, turns, cost/turn, burn rate
+    Budget {
+        /// Show only this agent (default: all agents)
+        agent: Option<String>,
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Args, Clone)]
@@ -517,6 +525,7 @@ pub async fn run_client(command: Command) -> Result<()> {
                     priority,
                     depends_on,
                     timeout_mins: None,
+                    requires: vec![],
                 },
                 TaskCmd::List { status, search, tag } => Request::TaskList { status, search, tag },
                 TaskCmd::Claim { id } => Request::TaskClaim { id },
@@ -769,6 +778,9 @@ pub async fn run_agent_cmd(cmd: AgentCmd) -> Result<()> {
             let mut client = Client::connect().await?;
             let resp = client.request(&Request::AgentSwapModel { agent: name, model }).await?;
             print_simple(resp)
+        }
+        AgentCmd::Budget { .. } => {
+            unreachable!("handled in main before run_agent_cmd")
         }
         AgentCmd::Remove { name, no_stop } => {
             crate::config::remove_agent(&project_root, &name)?;

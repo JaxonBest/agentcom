@@ -306,6 +306,7 @@ fn handle_modal_key(app: &mut App, key: KeyEvent) {
                         priority: 2,
                         depends_on: vec![],
                         timeout_mins: None,
+                        requires: vec![],
                     });
                     app.flash = Some("task added".into());
                 }
