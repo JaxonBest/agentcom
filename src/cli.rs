@@ -1324,12 +1324,11 @@ pub fn print_tasks(tasks: &[crate::store::Task]) {
                 .as_deref()
                 .map(|r| format!(" — blocked: {r}"))
                 .unwrap_or_default(),
-            crate::store::TaskStatus::Done => t
+            _ => t
                 .note
                 .as_deref()
                 .map(|n| format!(" — {n}"))
                 .unwrap_or_default(),
-            _ => String::new(),
         };
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
