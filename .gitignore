@@ -5,3 +5,4 @@ sandbox-runs
 .agentcom
 .agentcom.toml~
 /data
+runs/
