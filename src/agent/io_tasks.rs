@@ -101,7 +101,7 @@ pub fn attach(
             let mut lines = BufReader::new(stderr).lines();
             while let Ok(Some(line)) = lines.next_line().await {
                 let display = format!("[stderr] {line}");
-                buf.write().unwrap().push_line(display.clone());
+                buf.write().unwrap_or_else(|e| e.into_inner()).push_line(display.clone());
                 let _ = ui_tx.send(UiEvent::AgentLine {
                     agent: agent.clone(),
                     line: display,
@@ -152,7 +152,7 @@ async fn handle_stdout_line(
                 .await;
         }
         ParsedLine::Raw(raw) => {
-            buf.write().unwrap().push_line(format!("[raw] {raw}"));
+            buf.write().unwrap_or_else(|e| e.into_inner()).push_line(format!("[raw] {raw}"));
             let _ = bus_tx
                 .send(HubEvent::CliRaw {
                     agent: agent.to_string(),
@@ -171,7 +171,7 @@ fn render_event(
     ui_tx: &broadcast::Sender<UiEvent>,
 ) {
     let push = |line: String| {
-        buf.write().unwrap().push_line(line.clone());
+        buf.write().unwrap_or_else(|e| e.into_inner()).push_line(line.clone());
         let _ = ui_tx.send(UiEvent::AgentLine {
             agent: agent.to_string(),
             line,
@@ -197,8 +197,8 @@ fn render_event(
                     // Providers that never stream (DeepSeek, Codex) leave
                     // `saw_delta` false, so their full text always renders.
                     ContentBlock::Text { text } => {
-                        if buf.write().unwrap().take_saw_delta() {
-                            buf.write().unwrap().close_line();
+                        if buf.write().unwrap_or_else(|e| e.into_inner()).take_saw_delta() {
+                            buf.write().unwrap_or_else(|e| e.into_inner()).close_line();
                         } else {
                             for l in text.lines() {
                                 push(l.to_string());
@@ -229,10 +229,10 @@ fn render_event(
         }
         CliEvent::StreamEvent { event } => {
             if let Some(text) = stream_text_delta(event) {
-                buf.write().unwrap().push_delta(text);
+                buf.write().unwrap_or_else(|e| e.into_inner()).push_delta(text);
                 let _ = ui_tx.send(UiEvent::AgentDelta);
             } else if stream_block_end(event) {
-                buf.write().unwrap().close_line();
+                buf.write().unwrap_or_else(|e| e.into_inner()).close_line();
             }
         }
         CliEvent::ControlResponse { .. }
