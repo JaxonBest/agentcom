@@ -1304,7 +1304,7 @@ pub fn print_tasks(tasks: &[crate::store::Task]) {
         );
         if !t.description.is_empty() {
             let first: String = t.description.lines().next().unwrap_or("").chars().take(80).collect();
-            let has_more = first.len() < t.description.trim_end().len();
+            let has_more = first.chars().count() < t.description.trim_end().chars().count();
             if has_more {
                 println!("      {first}…");
             } else {
