@@ -156,40 +156,17 @@ impl Store {
         costs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let cost_median_usd = percentile_f64(&costs, 50);
 
-        // Wall-time percentiles from task_activity claim→done windows.
-        let done_ids: Vec<i64> = {
+        // Wall-time percentiles using the claimed_at column stamped on task_claim/task_assign.
+        let mut wall_secs: Vec<i64> = {
             let mut stmt = conn.prepare(
-                "SELECT id FROM tasks WHERE status = 'done' AND is_archived = 0",
+                "SELECT updated_at - claimed_at FROM tasks \
+                 WHERE status = 'done' AND claimed_at IS NOT NULL \
+                 AND is_archived = 0 AND updated_at > claimed_at",
             )?;
             let collected: Vec<i64> = stmt.query_map([], |r| r.get(0))?
                 .collect::<rusqlite::Result<_>>()?;
             collected
         };
-        let mut wall_secs: Vec<i64> = Vec::new();
-        for task_id in &done_ids {
-            let claim_at: Option<i64> = conn.query_row(
-                "SELECT created_at FROM task_activity \
-                 WHERE task_id = ?1 AND body LIKE 'claimed%' \
-                 ORDER BY created_at DESC LIMIT 1",
-                [task_id],
-                |r| r.get(0),
-            ).ok();
-            if let Some(claim_ts) = claim_at {
-                let done_at: Option<i64> = conn.query_row(
-                    "SELECT created_at FROM task_activity \
-                     WHERE task_id = ?1 AND body LIKE 'done%' AND created_at > ?2 \
-                     ORDER BY created_at ASC LIMIT 1",
-                    rusqlite::params![task_id, claim_ts],
-                    |r| r.get(0),
-                ).ok();
-                if let Some(done_ts) = done_at {
-                    let secs = done_ts - claim_ts;
-                    if secs >= 0 {
-                        wall_secs.push(secs);
-                    }
-                }
-            }
-        }
         wall_secs.sort_unstable();
         let wall_p50_secs = percentile_i64(&wall_secs, 50);
         let wall_p95_secs = percentile_i64(&wall_secs, 95);
@@ -547,29 +524,18 @@ mod stats_tests {
         assert!(stats.last10.chars().all(|c| c == '✓'));
     }
 
-    /// Helper: insert a task_activity row with an explicit timestamp.
-    fn insert_activity(s: &Store, task_id: i64, body: &str, ts: i64) {
-        let conn = s.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO task_activity (task_id, agent, body, created_at) VALUES (?1, 'builder', ?2, ?3)",
-            rusqlite::params![task_id, body, ts],
-        ).unwrap();
-    }
-
     #[test]
     fn stats_compute_wall_time_single_task() {
         let s = Store::open_in_memory().unwrap();
         let id = s.task_add("work", "", 1, &[], "human").unwrap();
         {
             let conn = s.conn.lock().unwrap();
+            // claimed at T=1000, done at T=1300 → 300 secs wall time
             conn.execute(
-                "UPDATE tasks SET status = 'done' WHERE id = ?1",
+                "UPDATE tasks SET status = 'done', claimed_at = 1000, updated_at = 1300 WHERE id = ?1",
                 [id],
             ).unwrap();
         }
-        // claimed at T=1000, done at T=1300 → 300 secs wall time
-        insert_activity(&s, id, "claimed by builder", 1000);
-        insert_activity(&s, id, "done", 1300);
 
         let stats = s.stats_compute().unwrap();
         assert_eq!(stats.wall_p50_secs, 300);
@@ -586,17 +552,12 @@ mod stats_tests {
         let base_ts: i64 = 10_000;
         for (i, &wall) in wall_times.iter().enumerate() {
             let id = s.task_add(&format!("task-{i}"), "", 1, &[], "human").unwrap();
-            {
-                let conn = s.conn.lock().unwrap();
-                conn.execute(
-                    "UPDATE tasks SET status = 'done' WHERE id = ?1",
-                    [id],
-                ).unwrap();
-            }
-            // Stagger claim timestamps so they don't collide.
             let claim_ts = base_ts + (i as i64) * 10_000;
-            insert_activity(&s, id, "claimed by builder", claim_ts);
-            insert_activity(&s, id, "done", claim_ts + wall);
+            let conn = s.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE tasks SET status = 'done', claimed_at = ?1, updated_at = ?2 WHERE id = ?3",
+                rusqlite::params![claim_ts, claim_ts + wall, id],
+            ).unwrap();
         }
 
         let stats = s.stats_compute().unwrap();
@@ -614,21 +575,15 @@ mod stats_tests {
         // Use explicit updated_at stamps (1001, 1002, 1003) so last10 order is deterministic.
         let costs: &[f64] = &[0.10, 0.20, 0.30];
         let walls: &[i64] = &[60, 120, 180];
-        let mut done_ids = Vec::new();
         for (i, (&cost, &wall)) in costs.iter().zip(walls).enumerate() {
             let id = s.task_add(&format!("done-{i}"), "", 1, &[], "human").unwrap();
-            {
-                let conn = s.conn.lock().unwrap();
-                let updated_at = 1001 + i as i64;
-                conn.execute(
-                    "UPDATE tasks SET status = 'done', total_cost_usd = ?1, updated_at = ?3 WHERE id = ?2",
-                    rusqlite::params![cost, id, updated_at],
-                ).unwrap();
-            }
-            let claim_ts = 1_000_000 + (i as i64) * 10_000;
-            insert_activity(&s, id, "claimed by builder", claim_ts);
-            insert_activity(&s, id, "done", claim_ts + wall);
-            done_ids.push(id);
+            let conn = s.conn.lock().unwrap();
+            let updated_at = 1001 + i as i64;
+            let claim_at = updated_at - wall;
+            conn.execute(
+                "UPDATE tasks SET status = 'done', total_cost_usd = ?1, claimed_at = ?2, updated_at = ?3 WHERE id = ?4",
+                rusqlite::params![cost, claim_at, updated_at, id],
+            ).unwrap();
         }
 
         // 1 blocked task with updated_at=1004 (most recent closed task).

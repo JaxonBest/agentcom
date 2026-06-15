@@ -441,7 +441,7 @@ impl Store {
 
         let conn = self.conn.lock().unwrap();
         let updated = conn.execute(
-            "UPDATE tasks SET status = 'claimed', claimed_by = ?1, updated_at = ?2
+            "UPDATE tasks SET status = 'claimed', claimed_by = ?1, updated_at = ?2, claimed_at = ?2
              WHERE id = ?3 AND status = 'open'",
             params![agent, now_ts(), id],
         )?;
@@ -490,7 +490,7 @@ impl Store {
         }
 
         conn.execute(
-            "UPDATE tasks SET status = 'claimed', claimed_by = ?1, updated_at = ?2 WHERE id = ?3",
+            "UPDATE tasks SET status = 'claimed', claimed_by = ?1, updated_at = ?2, claimed_at = ?2 WHERE id = ?3",
             params![agent, now_ts(), id],
         )?;
         drop(conn);
@@ -534,18 +534,18 @@ impl Store {
             bail!("task #{id} not found, or claimed by another agent");
         }
         // Persist cost accumulated by the closing agent over its claim window.
-        // Skipped for "human" (no run rows) and when no claim event is found.
+        // Skipped for "human" (no run rows) and when claimed_at is unset (open→done shortcut).
         if agent != "human" {
-            if let Ok(Some(claim_at)) = conn.query_row(
-                "SELECT created_at FROM task_activity WHERE task_id = ?1 AND agent = ?2 \
-                 AND body LIKE 'claimed%' ORDER BY created_at DESC LIMIT 1",
-                params![id, agent],
-                |r| r.get::<_, Option<i64>>(0),
-            ) {
+            let claim_at: Option<i64> = conn.query_row(
+                "SELECT claimed_at FROM tasks WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            ).unwrap_or(None);
+            if let Some(ct) = claim_at {
                 let cost: f64 = conn.query_row(
                     "SELECT COALESCE(SUM(cost_usd), 0.0) FROM runs \
                      WHERE agent = ?1 AND started_at >= ?2 AND started_at <= ?3",
-                    params![agent, claim_at, now],
+                    params![agent, ct, now],
                     |r| r.get(0),
                 ).unwrap_or(0.0);
                 if cost > 0.0 {
