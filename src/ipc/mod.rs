@@ -156,7 +156,7 @@ pub enum Request {
     /// Hot-add an agent to the running hub (already persisted to
     /// agentcom.toml by the client).
     AgentAdd {
-        config: crate::config::AgentConfig,
+        config: Box<crate::config::AgentConfig>,
     },
     FilesClaim {
         paths: Vec<String>,

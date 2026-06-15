@@ -30,6 +30,7 @@ impl Store {
             use std::os::unix::fs::OpenOptionsExt;
             std::fs::OpenOptions::new()
                 .create(true)
+                .truncate(false)
                 .write(true)
                 .mode(0o600)
                 .open(path)?;

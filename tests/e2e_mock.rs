@@ -1108,10 +1108,8 @@ fn task_deps_command() {
     // Agent adds a dependent task (#3 depends on #1 seed), then claims and finishes seed.
     std::fs::write(
         scripts.join("w.ndjson"),
-        concat!(
-            r#"{"run": ["agentcom task add \"child task\" --dep 1", "agentcom task claim 1", "agentcom task done 1 --note deps-done"], "text": "done"}
-"#
-        ),
+        r#"{"run": ["agentcom task add \"child task\" --dep 1", "agentcom task claim 1", "agentcom task done 1 --note deps-done"], "text": "done"}
+"#,
     )
     .unwrap();
 

@@ -1458,12 +1458,12 @@ impl Hub {
                 }
                 Err(e) => Response::err(e.to_string()),
             },
-            Request::TaskListArchived { .. } => match self.store.task_list_archived() {
+            Request::TaskListArchived => match self.store.task_list_archived() {
                 Ok(tasks) => Response::Tasks { tasks },
                 Err(e) => Response::err(e.to_string()),
             },
             Request::Status => self.status_response(),
-            Request::AgentAdd { config, .. } => self.add_agent_live(identity, config),
+            Request::AgentAdd { config, .. } => self.add_agent_live(identity, *config),
             Request::FilesClaim { paths, .. } => {
                 if let Err(e) = crate::store::Store::validate_claim_paths(&paths) {
                     return Response::err(e.to_string());
@@ -1475,7 +1475,7 @@ impl Hub {
                             .filter(|p| {
                                 let s = p.as_str();
                                 !lane_set.is_match(s)
-                                    || rt.lane_exclude_set.as_ref().map_or(false, |ex| ex.is_match(s))
+                                    || rt.lane_exclude_set.as_ref().is_some_and(|ex| ex.is_match(s))
                             })
                             .map(|p| p.as_str())
                             .collect();
@@ -1596,7 +1596,7 @@ impl Hub {
                         "Your model has been swapped from '{old_model}' to '{model}'. \
                         The new model takes effect on your next restart."
                     );
-                    let _ = self.store.msg_send("hub", &[agent.clone()], &msg, false);
+                    let _ = self.store.msg_send("hub", std::slice::from_ref(&agent), &msg, false);
                     self.log(format!("{agent}: model swapped {old_model} → {model}"));
                     Response::ok_msg(format!("{agent}: model will be '{model}' on next restart"))
                 } else {
@@ -1611,7 +1611,7 @@ impl Hub {
                 if let Some(rt) = self.agents.get_mut(&agent) {
                     rt.log_level = Some(level.clone());
                     let note = format!("Log verbosity set to '{level}'. This takes effect on your next turn.");
-                    let _ = self.store.msg_send("hub", &[agent.clone()], &note, false);
+                    let _ = self.store.msg_send("hub", std::slice::from_ref(&agent), &note, false);
                     self.log(format!("{agent}: log level set to {level}"));
                     self.audit.write("agent_set_log_level", identity, serde_json::json!({"agent": agent, "level": level}));
                     Response::ok_msg(format!("{agent}: log level is now '{level}'"))

@@ -364,11 +364,10 @@ impl Store {
         drop(stmt);
         for mut t in candidates {
             // Skip tasks whose requirements exceed the agent's capabilities.
-            if !capabilities.is_empty() && !t.requires.is_empty() {
-                if !t.requires.iter().all(|r| capabilities.contains(r)) {
+            if !capabilities.is_empty() && !t.requires.is_empty()
+                && !t.requires.iter().all(|r| capabilities.contains(r)) {
                     continue;
                 }
-            }
             load_deps(&conn, &mut t)?;
             return Ok(Some(t));
         }
@@ -589,7 +588,7 @@ impl Store {
     /// Approve or reject a task in `awaiting_review` state.
     /// - `approve = true`:  transitions to `done`, clears `claimed_by`.
     /// - `approve = false`: transitions back to `open`, prepends reviewer note.
-    /// Errors if `reviewer` is the same agent that originally closed the task.
+    ///   Errors if `reviewer` is the same agent that originally closed the task.
     pub fn task_review(&self, id: i64, reviewer: &str, approve: bool, note: &str) -> Result<Task> {
         let conn = self.conn.lock().unwrap();
         let (status, claimed_by): (String, Option<String>) = conn
@@ -923,7 +922,6 @@ impl Store {
                 due_at: t.due_at,
                 timeout_mins: t.timeout_mins,
                 requires: t.requires,
-                ..Default::default()
             })
             .collect();
         Ok(snapshots)

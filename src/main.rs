@@ -965,7 +965,7 @@ fn run_agent_capabilities(name: String) -> Result<()> {
         println!("no open tasks have requires constraints");
         return Ok(());
     }
-    println!("\n{:<6} {:<40} {:<16} {}", "ID", "TITLE", "REQUIRES", "QUALIFIES");
+    println!("\n{:<6} {:<40} {:<16} QUALIFIES", "ID", "TITLE", "REQUIRES");
     println!("{}", "-".repeat(80));
     for t in &open_with_req {
         let qualifies = t.requires.iter().all(|r| caps.contains(r));
@@ -1784,7 +1784,7 @@ fn init_logging(project_root: &std::path::Path, headless: bool) -> Result<()> {
 fn fmt_unix_ts(ts: i64) -> String {
     // Days since epoch → calendar date via the Gregorian algorithm.
     let secs_of_day = ts.rem_euclid(86400) as u32;
-    let days = (ts / 86400) as i64;
+    let days = ts / 86400 ;
     // Shift epoch from 1970-01-01 to 0001-03-01 (civil calendar base).
     let z = days + 719468;
     let era = z.div_euclid(146097);
@@ -2231,7 +2231,7 @@ fn run_audit(
             println!("{}", serde_json::to_string_pretty(&vals)?);
         } else {
             println!("(audit.log empty — showing task activity from DB)");
-            println!("{:<24} {:<16} {:<6} {}", "TIME", "EVENT", "ID", "TITLE");
+            println!("{:<24} {:<16} {:<6} TITLE", "TIME", "EVENT", "ID");
             println!("{}", "-".repeat(70));
             for (id, title, status, agent, _, ts) in &rows {
                 let who = agent.as_deref().unwrap_or("-");
@@ -2460,7 +2460,7 @@ fn parse_date_to_ts(s: &str) -> Result<i64> {
     let y: i64 = parts[0].parse().context("invalid year")?;
     let m: u32 = parts[1].parse().context("invalid month")?;
     let d: u32 = parts[2].parse().context("invalid day")?;
-    if m < 1 || m > 12 || d < 1 || d > 31 {
+    if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
         anyhow::bail!("invalid date {s:?}");
     }
     // Days from civil epoch (0001-03-01) using Gregorian algorithm.

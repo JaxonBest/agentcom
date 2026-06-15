@@ -699,6 +699,7 @@ pub enum FilesCmd {
 }
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum AgentCmd {
     /// Add an agent: writes it to agentcom.toml and, if the hub is running,
     /// spawns it live immediately
@@ -1155,7 +1156,7 @@ pub async fn run_agent_cmd(cmd: AgentCmd) -> Result<()> {
 
             if !no_spawn {
                 if let Ok(mut client) = Client::connect().await {
-                    match client.request(&Request::AgentAdd { config }).await? {
+                    match client.request(&Request::AgentAdd { config: Box::new(config) }).await? {
                         Response::Ok { message } => {
                             std::fs::write(&path, text)?;
                             println!("added {name:?} to {}", path.display());

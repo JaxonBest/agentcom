@@ -226,7 +226,7 @@ impl Hub {
                 // Queue an urgent message so the agent knows why it was interrupted.
                 let _ = self.store.msg_send(
                     "hub",
-                    &[name.clone()],
+                    std::slice::from_ref(&name),
                     &format!("STALL DETECTED: you have been Working for {mins} minutes without completing a turn. Please finish your current turn now."),
                     true,
                 );

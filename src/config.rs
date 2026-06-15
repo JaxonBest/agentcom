@@ -911,7 +911,7 @@ pub fn write_config_file(path: &Path, content: &str) -> Result<()> {
             .mode(0o600)
             .open(path)?;
         f.write_all(content.as_bytes())?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(unix))]
     {
@@ -1202,8 +1202,8 @@ fn set_nested_table(table: &mut toml_edit::Table, parts: &[&str], value: &toml_e
             Ok(())
         }
         [key, rest @ ..] => {
-            if !table.contains_key(*key) {
-                table.insert(*key, toml_edit::table());
+            if !table.contains_key(key) {
+                table.insert(key, toml_edit::table());
             }
             let sub = table[*key]
                 .as_table_mut()
@@ -1599,16 +1599,14 @@ ANTHROPIC_API_KEY = "sk-ant-secret123"
 
     #[test]
     fn webhook_secret_too_short_fails_validation() {
-        let text = format!(
-            r#"
+        let text = r#"
 project_name = "test"
 webhook_url = "https://example.com/hook"
 webhook_secret = "tooshort"
 [[agent]]
 name = "builder"
 role = "builder"
-"#
-        );
+"#.to_string();
         let cfg: HubConfig = toml::from_str(&text).unwrap();
         let err = cfg.validate().unwrap_err();
         assert!(
@@ -1619,16 +1617,14 @@ role = "builder"
 
     #[test]
     fn webhook_secret_16_chars_passes_validation() {
-        let text = format!(
-            r#"
+        let text = r#"
 project_name = "test"
 webhook_url = "https://example.com/hook"
 webhook_secret = "a_16_char_secret"
 [[agent]]
 name = "builder"
 role = "builder"
-"#
-        );
+"#.to_string();
         let cfg: HubConfig = toml::from_str(&text).unwrap();
         cfg.validate().unwrap();
     }
