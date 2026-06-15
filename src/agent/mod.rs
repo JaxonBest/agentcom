@@ -82,42 +82,52 @@ pub struct AgentRuntime {
     /// Set in handle_result to signal a deliberate session reset (not a crash).
     /// handle_exit checks this flag to respawn fresh instead of treating it as a crash.
     pub planned_restart: bool,
-    /// Compiled lane glob set from AgentConfig.lanes. None when lanes is empty
-    /// (no enforcement). Used by hub to reject FilesClaim outside declared lanes.
+    /// Include glob set compiled from non-negated AgentConfig.lanes patterns.
+    /// None when lanes has no include patterns (no enforcement).
     pub lane_set: Option<globset::GlobSet>,
+    /// Exclude glob set compiled from `!`-prefixed AgentConfig.lanes patterns.
+    /// A path matching lane_set but also matching lane_exclude_set is rejected.
+    pub lane_exclude_set: Option<globset::GlobSet>,
+}
+
+fn build_glob_set<'a>(agent_name: &str, patterns: impl Iterator<Item = &'a str>) -> Option<globset::GlobSet> {
+    let mut builder = globset::GlobSetBuilder::new();
+    let mut added = 0usize;
+    for pat in patterns {
+        match globset::Glob::new(pat) {
+            Ok(g) => { builder.add(g); added += 1; }
+            Err(e) => {
+                tracing::warn!(
+                    agent = %agent_name,
+                    pattern = %pat,
+                    "invalid lane glob pattern: {e}; skipping"
+                );
+            }
+        }
+    }
+    if added == 0 {
+        return None;
+    }
+    match builder.build() {
+        Ok(gs) => Some(gs),
+        Err(e) => {
+            tracing::warn!(agent = %agent_name, "failed to build lane glob set: {e}; ignoring");
+            None
+        }
+    }
 }
 
 impl AgentRuntime {
     pub fn new(cfg: AgentConfig, out_buf: SharedRingBuf) -> Self {
-        // Compile lane globs if any are declared.
-        let lane_set = if cfg.lanes.is_empty() {
-            None
-        } else {
-            let mut builder = globset::GlobSetBuilder::new();
-            for pat in &cfg.lanes {
-                // gitignore-style: each pattern is relative to project root.
-                match globset::Glob::new(pat) {
-                    Ok(g) => { builder.add(g); }
-                    Err(e) => {
-                        tracing::warn!(
-                            agent = %cfg.name,
-                            pattern = %pat,
-                            "invalid lane glob pattern: {e}; skipping"
-                        );
-                    }
-                }
-            }
-            match builder.build() {
-                Ok(gs) => Some(gs),
-                Err(e) => {
-                    tracing::warn!(
-                        agent = %cfg.name,
-                        "failed to build lane glob set: {e}; lane enforcement disabled"
-                    );
-                    None
-                }
-            }
-        };
+        // Split lanes into include (plain) and exclude (`!`-prefixed) sets.
+        let lane_set = build_glob_set(
+            &cfg.name,
+            cfg.lanes.iter().filter(|p| !p.starts_with('!')).map(String::as_str),
+        );
+        let lane_exclude_set = build_glob_set(
+            &cfg.name,
+            cfg.lanes.iter().filter(|p| p.starts_with('!')).map(|p| &p[1..]),
+        );
         Self {
             cfg,
             state: AgentState::Stopped,
@@ -142,6 +152,7 @@ impl AgentRuntime {
             log_level: None,
             planned_restart: false,
             lane_set,
+            lane_exclude_set,
         }
     }
 

@@ -1472,7 +1472,11 @@ impl Hub {
                     if let Some(ref lane_set) = rt.lane_set {
                         let violations: Vec<&str> = paths
                             .iter()
-                            .filter(|p| !lane_set.is_match(p.as_str()))
+                            .filter(|p| {
+                                let s = p.as_str();
+                                !lane_set.is_match(s)
+                                    || rt.lane_exclude_set.as_ref().map_or(false, |ex| ex.is_match(s))
+                            })
                             .map(|p| p.as_str())
                             .collect();
                         if !violations.is_empty() {
