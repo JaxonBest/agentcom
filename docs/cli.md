@@ -21,6 +21,8 @@ These commands read local files directly and work without a running hub.
 
 | Command | Description |
 |---|---|
+| `agentcom check` | Validate `agentcom.toml` — prints agent summary, global settings, and lane/preset warnings. Faster than `doctor` (no external CLI checks). Safe to chain: `agentcom check && agentcom up` |
+| `agentcom dashboard [--json]` | Fleet scorecard: resolved rate, median $/resolved, wall p50/p95, last-10 outcome strip, active preset. Reads local DB; no hub needed. `--json` emits machine-readable output |
 | `agentcom logs [-n 100] [--agent <name>] [--follow]` | Read hub log files; reads across rotated daily logs; `-n` controls line count |
 | `agentcom budget` | Per-agent spend and turn report from the run history database |
 | `agentcom completions <bash\|zsh\|fish\|elvish>` | Print shell completion script to stdout |
@@ -55,6 +57,7 @@ These commands read local files directly and work without a running hub.
 | `agentcom task done <id> --note "<note>"` | Mark a task complete |
 | `agentcom task block <id> --reason "<reason>"` | Mark a task blocked |
 | `agentcom task reopen <id>` | Reopen a blocked or stuck-claimed task |
+| `agentcom task review <id> --approve\|--reject [--note "<text>"]` | Approve or reject a task in `AwaitingReview` state. `--approve` transitions to Done; `--reject` transitions back to Open with the reviewer note prepended. Self-review (same agent that closed the task) is rejected by the hub |
 | `agentcom task edit <id> [-t title] [-d desc] [-p priority]` | Update task fields (PATCH — omitted fields unchanged) |
 | `agentcom task remove <id>` | Permanently delete a task (not allowed if claimed) |
 | `agentcom task prune [--before 7d]` | Delete all done/blocked tasks older than the given duration |
