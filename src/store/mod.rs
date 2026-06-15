@@ -272,6 +272,61 @@ pub struct Message {
     pub delivered_at: Option<i64>,
 }
 
+#[cfg(test)]
+mod clean_tests {
+    use super::*;
+
+    #[test]
+    fn clean_wipes_tasks_messages_file_claims() {
+        let s = Store::open_in_memory().unwrap();
+        s.task_add("t", "", 2, &[], "human").unwrap();
+        s.msg_send("alice", &["bob".into()], "hi", false).unwrap();
+        s.files_claim("alice", &["src/a.rs".into()]).unwrap();
+
+        let stats = s.clean_session(false).unwrap();
+        assert!(stats.tasks >= 1, "expected at least 1 task deleted");
+        assert!(stats.messages >= 1, "expected at least 1 message deleted");
+
+        let remaining_tasks = s.task_list(None, None).unwrap();
+        assert!(remaining_tasks.is_empty(), "task list should be empty after clean");
+
+        let remaining_msgs = s.msg_list(None, None, 1000).unwrap();
+        assert!(remaining_msgs.is_empty(), "messages should be empty after clean");
+
+        let remaining_claims = s.files_list().unwrap();
+        assert!(remaining_claims.is_empty(), "file claims should be empty after clean");
+    }
+
+    #[test]
+    fn clean_keep_runs_preserves_runs() {
+        let s = Store::open_in_memory().unwrap();
+        s.task_add("t", "", 2, &[], "human").unwrap();
+        s.msg_send("alice", &["bob".into()], "hi", false).unwrap();
+        s.record_run_start("builder", "sess1", 1_000_000).unwrap();
+
+        let stats = s.clean_session(true).unwrap();
+        assert!(stats.tasks >= 1, "expected at least 1 task deleted");
+        assert!(stats.messages >= 1, "expected at least 1 message deleted");
+        assert_eq!(stats.runs, 0, "keep_runs=true should not delete runs");
+
+        let conn = s.conn.lock().unwrap();
+        let run_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM runs", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(run_count, 1, "run row should be preserved when keep_runs=true");
+    }
+
+    #[test]
+    fn clean_returns_zero_stats_when_empty() {
+        let s = Store::open_in_memory().unwrap();
+        let stats = s.clean_session(false).unwrap();
+        assert_eq!(stats.tasks, 0);
+        assert_eq!(stats.messages, 0);
+        assert_eq!(stats.file_claims, 0);
+        assert_eq!(stats.runs, 0);
+    }
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
