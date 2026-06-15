@@ -262,13 +262,12 @@ fn hook_loop_prevention() {
         ),
     );
 
-    // Agent needs three script entries for three rounds of claim+complete.
-    // Between each round the test re-opens the blocked task via CLI.
+    // Single ndjson entry reused on every agent invocation.
+    // mock-claude resets to entry 1 on each new invocation, so all three rounds
+    // must use the same script — loop prevention is verified by state, not note text.
     std::fs::write(
         scripts.join("worker.ndjson"),
-        r#"{"run": ["agentcom task claim 1", "agentcom task done 1 --note round-1"], "text": "done", "cost": 0.01}
-{"run": ["agentcom task claim 1", "agentcom task done 1 --note round-2"], "text": "done", "cost": 0.01}
-{"run": ["agentcom task claim 1", "agentcom task done 1 --note round-3"], "text": "done", "cost": 0.01}
+        r#"{"run": ["agentcom task claim 1", "agentcom task done 1 --note done"], "text": "done", "cost": 0.01}
 "#,
     )
     .unwrap();
@@ -310,22 +309,27 @@ fn hook_loop_prevention() {
     // ── Round 3 ──
     // Agent completes the task. hook_attempts is now 2, so maybe_spawn_hook skips.
     // The task should stay Done (not re-blocked).
-    let done_out = wait_for(
+    wait_for(
         &project,
         &["task", "list", "--status", "done"],
         Duration::from_secs(20),
         |out| out.contains("loop prevention task"),
     );
+
+    // Give the hook a moment to fire (or not) — we're verifying it does NOT fire.
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Verify the task stays done and is NOT re-blocked.
+    let (_, blocked_out) = cli(&project, &["task", "list", "--status", "blocked"]);
     assert!(
-        done_out.contains("round-3"),
-        "task done note from round 3: {done_out}"
+        !blocked_out.contains("loop prevention task"),
+        "task should not be re-blocked after hook_attempts >= 2: {blocked_out}"
     );
 
-    // Verify the task is NOT in blocked state anymore.
-    let (_, list_out) = cli(&project, &["task", "list", "--status", "blocked"]);
+    let (_, done_out) = cli(&project, &["task", "list", "--status", "done"]);
     assert!(
-        !list_out.contains("loop prevention task"),
-        "task should not be blocked after third round: {list_out}"
+        done_out.contains("loop prevention task"),
+        "task stays done after hook skip: {done_out}"
     );
 
     // Check hook_attempts via task show — should be 2.
