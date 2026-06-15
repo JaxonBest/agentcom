@@ -159,6 +159,7 @@ async fn main() -> Result<()> {
         Command::Workflow(cli::WorkflowCmd::Run { name, title, vars }) => {
             run_workflow_run(name, title, vars).await
         }
+        Command::Clean { yes, keep_runs } => run_clean(yes, keep_runs),
         other => cli::run_client(other).await,
     }
 }
@@ -2727,7 +2728,7 @@ fn run_hub_health(json_out: bool) -> Result<()> {
         .write_all(format!("GET /health HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n").as_bytes())
         .context("failed to send request")?;
 
-    let mut reader = BufReader::new(stream);
+    let reader = BufReader::new(stream);
     // Read all lines; status is first, blank line separates headers from body.
     let all_lines: Vec<String> = reader.lines().collect::<std::io::Result<_>>()?;
     let status_line = all_lines.first().map(|s| s.as_str()).unwrap_or("");
@@ -2765,6 +2766,52 @@ fn run_hub_health(json_out: bool) -> Result<()> {
         println!("rest api:    {url}");
     } else {
         println!("{body}");
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Clean: wipe session state from the DB
+// ---------------------------------------------------------------------------
+
+fn run_clean(yes: bool, keep_runs: bool) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let project_root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+
+    let hub_json = paths::hub_json_path(&project_root)?;
+    if hub_json.exists() {
+        eprintln!("hub appears to be running (hub.json exists) — stop it first with: agentcom stop");
+        return Ok(());
+    }
+
+    if !yes {
+        eprint!("This will delete all tasks, messages, and file claims. Continue? [y/N] ");
+        use std::io::BufRead;
+        let line = std::io::stdin()
+            .lock()
+            .lines()
+            .next()
+            .unwrap_or(Ok(String::new()))?;
+        if !matches!(line.trim().to_lowercase().as_str(), "y" | "yes") {
+            println!("Aborted.");
+            return Ok(());
+        }
+    }
+
+    let db = paths::db_path(&project_root)?;
+    let store = store::Store::open(&db)?;
+    let stats = store.clean_session(keep_runs)?;
+    if keep_runs {
+        println!(
+            "Cleared {} tasks, {} messages, {} file claims.",
+            stats.tasks, stats.messages, stats.file_claims
+        );
+    } else {
+        println!(
+            "Cleared {} tasks, {} messages, {} file claims, {} runs.",
+            stats.tasks, stats.messages, stats.file_claims, stats.runs
+        );
     }
     Ok(())
 }

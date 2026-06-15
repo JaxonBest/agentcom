@@ -322,6 +322,22 @@ pub enum Command {
     ///   agentcom workflow run sprint --title "Sprint 14" --var priority=1
     #[command(subcommand)]
     Workflow(WorkflowCmd),
+    /// Reset session state: wipe tasks, messages, and file claims from the DB
+    ///
+    /// The hub must NOT be running when this command is used.
+    ///
+    /// Examples:
+    ///   agentcom clean
+    ///   agentcom clean --yes
+    ///   agentcom clean --yes --keep-runs
+    Clean {
+        /// Skip the confirmation prompt
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Preserve run history (cost/turn data) — only wipe tasks, messages, and file claims
+        #[arg(long)]
+        keep_runs: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1021,7 +1037,8 @@ pub async fn run_client(command: Command) -> Result<()> {
         | Command::Health { .. }
         | Command::Version
         | Command::Config(_)
-        | Command::Workflow(_) => {
+        | Command::Workflow(_)
+        | Command::Clean { .. } => {
             unreachable!("handled in main")
         }
     }

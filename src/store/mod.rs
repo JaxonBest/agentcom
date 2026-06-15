@@ -79,6 +79,29 @@ impl Store {
         )?;
         Ok(())
     }
+
+    pub fn clean_session(&self, keep_runs: bool) -> Result<CleanStats> {
+        let conn = self.conn.lock().unwrap();
+        // Delete child tables before tasks to avoid FK constraint violations.
+        conn.execute("DELETE FROM task_activity", [])?;
+        conn.execute("DELETE FROM task_deps", [])?;
+        let tasks = conn.execute("DELETE FROM tasks", [])?;
+        let messages = conn.execute("DELETE FROM messages", [])?;
+        let file_claims = conn.execute("DELETE FROM file_claims", [])?;
+        let runs = if !keep_runs {
+            conn.execute("DELETE FROM runs", [])?
+        } else {
+            0
+        };
+        Ok(CleanStats { tasks, messages, file_claims, runs })
+    }
+}
+
+pub struct CleanStats {
+    pub tasks: usize,
+    pub messages: usize,
+    pub file_claims: usize,
+    pub runs: usize,
 }
 
 pub fn now_ts() -> i64 {
