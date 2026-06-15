@@ -73,6 +73,12 @@ pub struct Hub {
     /// Resets to 0 on any successful hook run. Hub pauses auto-dispatch
     /// when this reaches 5 and logs a warning requiring human intervention.
     consecutive_hook_failures: u32,
+    /// Set to true when consecutive_hook_failures hits 5. Blocks try_feed from
+    /// dispatching new work to any agent until cleared by `agentcom resume all`.
+    hook_dispatch_paused: bool,
+    /// Task IDs that have already had their "awaiting_review stale" webhook fired.
+    /// Prevents repeated notifications for the same stale task.
+    stale_review_notified: std::collections::HashSet<i64>,
 }
 
 impl Hub {
@@ -187,6 +193,8 @@ impl Hub {
             audit,
             config_mtime: None,
             consecutive_hook_failures: 0,
+            hook_dispatch_paused: false,
+            stale_review_notified: std::collections::HashSet::new(),
         })
     }
 
@@ -462,7 +470,8 @@ impl Hub {
 
         // Fleet-wide circuit breaker: pause auto-dispatch after 5 consecutive
         // hook failures so a broken hook doesn't spam the board with blocked tasks.
-        if self.consecutive_hook_failures >= 5 {
+        if self.consecutive_hook_failures >= 5 && !self.hook_dispatch_paused {
+            self.hook_dispatch_paused = true;
             let msg = format!(
                 "WARN: {} consecutive post-close hook failures — auto-dispatch paused. \
                  Fix the hook and run `agentcom resume` to continue.",
@@ -477,6 +486,9 @@ impl Hub {
     /// the closing agent and task pass the filters. Does nothing if no hook is
     /// configured or the task has already exhausted its hook attempts.
     fn maybe_spawn_hook(&mut self, task: &crate::store::Task, closing_agent: &str) {
+        if self.hook_dispatch_paused {
+            return;
+        }
         let hooks = match self.cfg.hooks.as_ref() {
             Some(h) => h,
             None => return,
@@ -957,6 +969,7 @@ impl Hub {
         self.check_config_reload();
         self.check_deadlock();
         self.check_priority_escalation();
+        self.check_stale_reviews();
     }
 
     /// Free mode: enforce time/usage stop conditions; when the whole fleet
@@ -1142,40 +1155,131 @@ impl Hub {
                 }
             }
             Request::TaskDone { id, note, .. } => {
-                match self.store.task_done(id, identity, note.as_deref()) {
-                    Ok(t) => {
-                        self.log(format!("{identity} completed task #{} — {}", t.id, t.title));
-                        self.audit.write("task_done", identity, serde_json::json!({"task_id": t.id, "title": t.title}));
-                        self.fire_webhook(
-                            webhook::Payload::new(webhook::Event::TaskDone)
-                                .with_agent(identity)
-                                .with_task(t.id, &t.title),
-                        );
-                        let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
-                        // Close the loop: whoever filed the task hears that
-                        // it's finished (the composer relies on this to
-                        // report completions to the human).
-                        if t.created_by != identity && self.agents.contains_key(&t.created_by) {
-                            let body = format!(
-                                "task #{} \"{}\" completed by {}{}",
-                                t.id,
-                                t.title,
+                // Check if the closing agent requires review before marking Done.
+                let review_required = self
+                    .cfg
+                    .agents
+                    .iter()
+                    .find(|a| a.name == identity)
+                    .map(|a| a.default_review_required)
+                    .unwrap_or(false);
+
+                if review_required {
+                    match self.store.task_await_review(id, identity, note.as_deref()) {
+                        Ok(t) => {
+                            self.log(format!(
+                                "{identity} submitted task #{} for review — {}",
+                                t.id, t.title
+                            ));
+                            self.audit.write(
+                                "task_await_review",
                                 identity,
-                                t.note
-                                    .as_deref()
-                                    .map(|n| format!(" — {n}"))
-                                    .unwrap_or_default()
+                                serde_json::json!({"task_id": t.id, "title": t.title}),
                             );
-                            let creator = t.created_by.clone();
-                            self.do_send("hub", &creator, &body, false);
+                            self.fire_webhook(
+                                webhook::Payload::new(webhook::Event::TaskAwaitingReview)
+                                    .with_agent(identity)
+                                    .with_task(t.id, &t.title),
+                            );
+                            let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
+
+                            // Auto-file a review task and assign it to the first
+                            // agent with "review" in their capabilities.
+                            let reviewer_name: Option<String> = self
+                                .cfg
+                                .agents
+                                .iter()
+                                .find(|a| a.capabilities.contains(&"review".to_string()))
+                                .map(|a| a.name.clone());
+
+                            let review_title = format!("Review: {}", t.title);
+                            let review_desc = format!(
+                                "Automated review task for #{} (closed by {identity}).\n\
+                                 Approve with: agentcom task review {} --approve\n\
+                                 Reject with:  agentcom task review {} --reject --note \"reason\"",
+                                t.id, t.id, t.id
+                            );
+                            match self.store.task_add(
+                                &review_title,
+                                &review_desc,
+                                0, // priority 0 = highest
+                                &[],
+                                "hub",
+                            ) {
+                                Ok(review_id) => {
+                                    if let Some(ref reviewer) = reviewer_name {
+                                        if let Err(e) =
+                                            self.store.task_assign(review_id, reviewer)
+                                        {
+                                            tracing::warn!(
+                                                "review task #{review_id}: assign failed: {e}"
+                                            );
+                                        } else {
+                                            let msg = format!(
+                                                "Hub auto-filed review task #{review_id} for \
+                                                 task #{} \"{}\" (closed by {identity}). \
+                                                 Approve or reject with `agentcom task review {} \
+                                                 --approve/--reject`.",
+                                                t.id, t.title, t.id
+                                            );
+                                            self.do_send("hub", reviewer, &msg, false);
+                                        }
+                                    }
+                                    let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
+                                    self.wake_idle();
+                                }
+                                Err(e) => {
+                                    tracing::warn!("failed to create review task: {e}");
+                                }
+                            }
+
+                            Response::ok_msg(format!(
+                                "task #{} awaiting review — {}",
+                                t.id, t.title
+                            ))
                         }
-                        // Spawn a post-close hook if configured and applicable.
-                        self.maybe_spawn_hook(&t, identity);
-                        // A completed dependency may unblock queued work.
-                        self.wake_idle();
-                        Response::ok_msg(format!("task #{} done — {}", t.id, t.title))
+                        Err(e) => Response::err(e.to_string()),
                     }
-                    Err(e) => Response::err(e.to_string()),
+                } else {
+                    match self.store.task_done(id, identity, note.as_deref()) {
+                        Ok(t) => {
+                            self.log(format!(
+                                "{identity} completed task #{} — {}",
+                                t.id, t.title
+                            ));
+                            self.audit.write(
+                                "task_done",
+                                identity,
+                                serde_json::json!({"task_id": t.id, "title": t.title}),
+                            );
+                            self.fire_webhook(
+                                webhook::Payload::new(webhook::Event::TaskDone)
+                                    .with_agent(identity)
+                                    .with_task(t.id, &t.title),
+                            );
+                            let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
+                            if t.created_by != identity
+                                && self.agents.contains_key(&t.created_by)
+                            {
+                                let body = format!(
+                                    "task #{} \"{}\" completed by {}{}",
+                                    t.id,
+                                    t.title,
+                                    identity,
+                                    t.note
+                                        .as_deref()
+                                        .map(|n| format!(" — {n}"))
+                                        .unwrap_or_default()
+                                );
+                                let creator = t.created_by.clone();
+                                self.do_send("hub", &creator, &body, false);
+                            }
+                            self.maybe_spawn_hook(&t, identity);
+                            self.wake_idle();
+                            Response::ok_msg(format!("task #{} done — {}", t.id, t.title))
+                        }
+                        Err(e) => Response::err(e.to_string()),
+                    }
                 }
             }
             Request::TaskBlock { id, reason, .. } => {
@@ -1443,6 +1547,7 @@ impl Hub {
             }
             Request::Resume { agent, .. } => {
                 if agent == "all" {
+                    self.hook_dispatch_paused = false;
                     let names: Vec<String> = self.agents.keys().cloned().collect();
                     for name in &names {
                         self.resume_agent(name);
@@ -1485,6 +1590,65 @@ impl Hub {
                 }
             }
             Request::Tail { .. } => Response::err("tail is handled by the ipc server"),
+            Request::TaskReview { id, approve, note, .. } => {
+                let note: String = note.chars().take(2000).collect();
+                match self.store.task_review(id, identity, approve, &note) {
+                    Ok(t) => {
+                        if approve {
+                            self.log(format!(
+                                "{identity} approved task #{} — {}",
+                                t.id, t.title
+                            ));
+                            self.audit.write(
+                                "task_review_approved",
+                                identity,
+                                serde_json::json!({"task_id": t.id}),
+                            );
+                            self.fire_webhook(
+                                webhook::Payload::new(webhook::Event::TaskReviewApproved)
+                                    .with_agent(identity)
+                                    .with_task(t.id, &t.title),
+                            );
+                            // Notify creator and run post-close hook now that task is Done.
+                            if t.created_by != identity
+                                && self.agents.contains_key(&t.created_by)
+                            {
+                                let body = format!(
+                                    "task #{} \"{}\" approved by reviewer {identity} — now Done",
+                                    t.id, t.title
+                                );
+                                let creator = t.created_by.clone();
+                                self.do_send("hub", &creator, &body, false);
+                            }
+                            // Run the post-close hook now that the task is final.
+                            // The original closing agent is preserved in `claimed_by`
+                            // up until approval, but task_review() clears it. We use
+                            // "hub" as the hook trigger identity here.
+                            self.maybe_spawn_hook(&t, identity);
+                        } else {
+                            self.log(format!(
+                                "{identity} rejected task #{} — {}",
+                                t.id, t.title
+                            ));
+                            self.audit.write(
+                                "task_review_rejected",
+                                identity,
+                                serde_json::json!({"task_id": t.id, "note": note}),
+                            );
+                            self.fire_webhook(
+                                webhook::Payload::new(webhook::Event::TaskReviewRejected)
+                                    .with_agent(identity)
+                                    .with_task(t.id, &t.title),
+                            );
+                        }
+                        let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
+                        self.wake_idle();
+                        let verb = if approve { "approved" } else { "rejected" };
+                        Response::ok_msg(format!("task #{id} {verb}"))
+                    }
+                    Err(e) => Response::err(e.to_string()),
+                }
+            }
         }
     }
 
@@ -1773,6 +1937,56 @@ impl Hub {
             }
             Ok(_) => {}
             Err(e) => tracing::warn!("priority escalation failed: {e}"),
+        }
+    }
+
+    /// Fire TaskReviewStale webhook + message human for any task that has been
+    /// in awaiting_review longer than hub.review_stale_secs. Fires once per task.
+    fn check_stale_reviews(&mut self) {
+        let stale_secs = self.cfg.review_stale_secs as i64;
+        let cutoff = crate::store::now_ts() - stale_secs;
+        let stale_ids: Vec<i64> = {
+            let conn = self.store.conn.lock().unwrap();
+            let mut stmt = match conn.prepare(
+                "SELECT id FROM tasks WHERE status = 'awaiting_review' AND updated_at < ?1",
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("check_stale_reviews query failed: {e}");
+                    return;
+                }
+            };
+            stmt.query_map([cutoff], |r| r.get(0))
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                .unwrap_or_default()
+        };
+        for id in stale_ids {
+            if self.stale_review_notified.contains(&id) {
+                continue;
+            }
+            self.stale_review_notified.insert(id);
+            let title = self
+                .store
+                .task_get(id)
+                .ok()
+                .flatten()
+                .map(|t| t.title)
+                .unwrap_or_default();
+            self.log(format!(
+                "review stale: task #{id} \"{}\" has been awaiting_review for >{stale_secs}s",
+                title
+            ));
+            self.fire_webhook(
+                webhook::Payload::new(webhook::Event::TaskReviewStale)
+                    .with_task(id, &title),
+            );
+            let msg = format!(
+                "Task #{id} \"{}\" has been awaiting review for more than {}m and has not been acted on. \
+                 Please review or escalate.",
+                title,
+                stale_secs / 60,
+            );
+            let _ = self.store.msg_send("hub", &["human".to_string()], &msg, false);
         }
     }
 

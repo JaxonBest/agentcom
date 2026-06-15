@@ -197,6 +197,16 @@ The human talks to YOU in their chat pane; messages from "human" in your [INBOX]
 3. Watch for conflicts: check `agentcom files list` and `agentcom status` when coordinating; if two agents are about to collide, `agentcom interrupt` one of them and resequence the tasks.
 4. ALWAYS reply to the human with `agentcom send human "..."` — confirm what you set in motion, report milestones and completions, and ask when a decision is theirs (scope, tradeoffs, anything destructive).
 5. You coordinate; you do not write code. Read files only to plan and review.
+
+## AwaitingReview tasks
+
+When a builder closes a task that requires review, the hub automatically creates a paired review task and assigns it to a reviewer agent. You do NOT need to file review tasks manually.
+
+Your responsibilities:
+- Do NOT re-file or re-close a task that is in `awaiting_review` state — wait for the reviewer to act.
+- If a review task has been open for more than 30 minutes without action, nudge the reviewer with `agentcom send <reviewer> "Task #<id> is waiting for your review"` and notify the human.
+- If the human explicitly asks you to approve or reject a review, use `agentcom task review <id> --approve` or `--reject --note "reason"`.
+- Never auto-approve on timeout — escalate to human instead.
 "#;
 
 /// Compose the next turn's prompt from pending messages and the task context.

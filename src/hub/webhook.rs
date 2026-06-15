@@ -42,6 +42,18 @@ pub enum Event {
     FleetResumed,
     /// A post-close hook exited non-zero; task was re-blocked.
     TaskHookFailed,
+    /// Task transitioned to AwaitingReview; hub auto-filed a review task.
+    #[allow(dead_code)]
+    TaskAwaitingReview,
+    /// Reviewer approved a task; it transitioned to Done.
+    #[allow(dead_code)]
+    TaskReviewApproved,
+    /// Reviewer rejected a task; it transitioned back to Open.
+    #[allow(dead_code)]
+    TaskReviewRejected,
+    /// A task has been in AwaitingReview longer than review_stale_secs.
+    #[allow(dead_code)]
+    TaskReviewStale,
 }
 
 /// JSON body sent to the webhook endpoint.

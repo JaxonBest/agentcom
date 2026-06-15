@@ -440,6 +440,23 @@ pub enum TaskCmd {
     },
     /// Reopen a blocked (or stuck-claimed) task
     Reopen { id: i64 },
+    /// Approve or reject a task in AwaitingReview state
+    ///
+    /// Examples:
+    ///   agentcom task review 42 --approve
+    ///   agentcom task review 42 --reject --note "tests still failing"
+    Review {
+        id: i64,
+        /// Approve the task (transitions to Done)
+        #[arg(long, conflicts_with = "reject")]
+        approve: bool,
+        /// Reject the task (transitions back to Open)
+        #[arg(long, conflicts_with = "approve")]
+        reject: bool,
+        /// Optional reviewer note
+        #[arg(long)]
+        note: Option<String>,
+    },
     /// Edit a task's title, description, and/or priority
     Edit {
         id: i64,
@@ -868,6 +885,12 @@ pub async fn run_client(command: Command) -> Result<()> {
                 TaskCmd::Done { id, note } => Request::TaskDone { id, note },
                 TaskCmd::Block { id, reason } => Request::TaskBlock { id, reason },
                 TaskCmd::Reopen { id } => Request::TaskReopen { id },
+                TaskCmd::Review { id, approve, reject, note } => {
+                    if !approve && !reject {
+                        bail!("must pass --approve or --reject");
+                    }
+                    Request::TaskReview { id, approve, note: note.unwrap_or_default() }
+                }
                 TaskCmd::Edit {
                     id,
                     title,

@@ -118,6 +118,9 @@ pub enum TaskStatus {
     Claimed,
     Done,
     Blocked,
+    /// Waiting for a reviewer agent to approve before transitioning to Done.
+    /// Hub auto-files a paired review task when this state is entered.
+    AwaitingReview,
 }
 
 impl TaskStatus {
@@ -127,6 +130,7 @@ impl TaskStatus {
             TaskStatus::Claimed => "claimed",
             TaskStatus::Done => "done",
             TaskStatus::Blocked => "blocked",
+            TaskStatus::AwaitingReview => "awaiting_review",
         }
     }
 
@@ -136,6 +140,7 @@ impl TaskStatus {
             "claimed" => Some(TaskStatus::Claimed),
             "done" => Some(TaskStatus::Done),
             "blocked" => Some(TaskStatus::Blocked),
+            "awaiting_review" => Some(TaskStatus::AwaitingReview),
             _ => None,
         }
     }

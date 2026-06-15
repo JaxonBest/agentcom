@@ -575,6 +575,7 @@ fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
                 TaskStatus::Open => Style::default(),
                 TaskStatus::Blocked => Style::default().fg(Color::Yellow),
                 TaskStatus::Done => Style::default().fg(Color::DarkGray),
+                TaskStatus::AwaitingReview => Style::default().fg(Color::Cyan),
             };
             let extra = match t.status {
                 TaskStatus::Blocked => t.blocked_reason.as_deref().unwrap_or(""),

@@ -245,7 +245,7 @@ impl Store {
                         "SELECT * FROM tasks WHERE id IN (SELECT id FROM tasks WHERE {clause}) \
                          ORDER BY \
                            CASE status WHEN 'claimed' THEN 0 WHEN 'open' THEN 1 \
-                                       WHEN 'blocked' THEN 2 ELSE 3 END, \
+                                       WHEN 'awaiting_review' THEN 2 WHEN 'blocked' THEN 3 ELSE 4 END, \
                            pinned DESC, {overdue_sort}, priority, id"
                     );
                     let mut stmt = conn.prepare_cached(&sql)?;
@@ -255,7 +255,7 @@ impl Store {
                     let sql = format!(
                         "SELECT * FROM tasks ORDER BY \
                            CASE status WHEN 'claimed' THEN 0 WHEN 'open' THEN 1 \
-                                       WHEN 'blocked' THEN 2 ELSE 3 END, \
+                                       WHEN 'awaiting_review' THEN 2 WHEN 'blocked' THEN 3 ELSE 4 END, \
                            pinned DESC, {overdue_sort}, priority, id"
                     );
                     let mut stmt = conn.prepare_cached(&sql)?;
@@ -473,6 +473,7 @@ impl Store {
 
         match status.as_str() {
             "done" => bail!("task #{id} is already done"),
+            "awaiting_review" => bail!("task #{id} is awaiting review and cannot be re-assigned"),
             "claimed" => {
                 if claimed_by.as_deref() != Some(agent) {
                     bail!(
@@ -524,7 +525,7 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let updated = conn.execute(
             "UPDATE tasks SET status = 'done', note = COALESCE(?1, note), updated_at = ?2
-             WHERE id = ?3 AND (claimed_by = ?4 OR ?4 = 'human' OR status = 'open')",
+             WHERE id = ?3 AND status IN ('claimed', 'open') AND (claimed_by = ?4 OR ?4 = 'human')",
             params![note, now_ts(), id, agent],
         )?;
         if updated == 0 {
@@ -534,17 +535,82 @@ impl Store {
         Ok(self.task_get(id)?.expect("just completed"))
     }
 
+    /// Transition a claimed task to `awaiting_review` (hub calls this instead
+    /// of `task_done` when the closing agent has `default_review_required = true`).
+    /// Stores the optional completion note; `claimed_by` is preserved so the
+    /// hub knows who the original closer was and can reject self-review.
+    pub fn task_await_review(&self, id: i64, agent: &str, note: Option<&str>) -> Result<Task> {
+        let conn = self.conn.lock().unwrap();
+        let updated = conn.execute(
+            "UPDATE tasks SET status = 'awaiting_review', note = COALESCE(?1, note), updated_at = ?2
+             WHERE id = ?3 AND claimed_by = ?4",
+            params![note, now_ts(), id, agent],
+        )?;
+        if updated == 0 {
+            bail!("task #{id} not found, or not claimed by {agent}");
+        }
+        drop(conn);
+        Ok(self.task_get(id)?.expect("just set to awaiting_review"))
+    }
+
+    /// Approve or reject a task in `awaiting_review` state.
+    /// - `approve = true`:  transitions to `done`, clears `claimed_by`.
+    /// - `approve = false`: transitions back to `open`, prepends reviewer note.
+    /// Errors if `reviewer` is the same agent that originally closed the task.
+    pub fn task_review(&self, id: i64, reviewer: &str, approve: bool, note: &str) -> Result<Task> {
+        let conn = self.conn.lock().unwrap();
+        let (status, claimed_by): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, claimed_by FROM tasks WHERE id = ?1",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|_| anyhow::anyhow!("task #{id} does not exist"))?;
+
+        if status != "awaiting_review" {
+            bail!("task #{id} is not awaiting review (status: {status})");
+        }
+        if claimed_by.as_deref() == Some(reviewer) {
+            bail!("task #{id}: reviewer cannot be the same agent that closed the task");
+        }
+
+        if approve {
+            conn.execute(
+                "UPDATE tasks SET status = 'done', claimed_by = NULL, updated_at = ?1 WHERE id = ?2",
+                params![now_ts(), id],
+            )?;
+        } else {
+            let prepended = if note.is_empty() {
+                format!("[rejected by {reviewer}]")
+            } else {
+                format!("[rejected by {reviewer}]: {note}")
+            };
+            conn.execute(
+                "UPDATE tasks SET status = 'open', claimed_by = NULL, blocked_reason = NULL,
+                                  note = ?1, updated_at = ?2
+                 WHERE id = ?3",
+                params![prepended, now_ts(), id],
+            )?;
+        }
+        drop(conn);
+        Ok(self.task_get(id)?.expect("just reviewed"))
+    }
+
     pub fn task_block(&self, id: i64, agent: &str, reason: &str) -> Result<Task> {
         let conn = self.conn.lock().unwrap();
         let updated = conn.execute(
             "UPDATE tasks SET status = 'blocked', blocked_reason = ?1, claimed_by = NULL,
                               updated_at = ?2
-             WHERE id = ?3 AND status IN ('open', 'claimed')
-               AND (claimed_by IS NULL OR claimed_by = ?4 OR ?4 = 'human')",
+             WHERE id = ?3
+               AND (
+                 status IN ('open', 'claimed')
+                 OR (status = 'done' AND ?4 = 'hub')
+               )
+               AND (claimed_by IS NULL OR claimed_by = ?4 OR ?4 IN ('human', 'hub'))",
             params![reason, now_ts(), id, agent],
         )?;
         if updated == 0 {
-            bail!("task #{id} not found, already done, or claimed by another agent");
+            bail!("task #{id} not found or claimed by another agent");
         }
         drop(conn);
         Ok(self.task_get(id)?.expect("just blocked"))
@@ -1551,6 +1617,67 @@ mod tests {
         // next_run_at should be roughly now + 7 days.
         let expected_min = super::now_ts() + 7 * 86400 - 5;
         assert!(new_task.next_run_at.unwrap() >= expected_min);
+    }
+
+    #[test]
+    fn await_review_blocks_task_done_bypass() {
+        // Security regression: after task_await_review, the original agent must
+        // NOT be able to call task_done and bypass the review gate via claimed_by match.
+        let s = Store::open_in_memory().unwrap();
+        let id = s.task_add("t", "", 1, &[], "human").unwrap();
+        s.task_claim(id, "builder").unwrap();
+        s.task_await_review(id, "builder", None).unwrap();
+
+        // Same agent tries to mark done — must be rejected.
+        assert!(s.task_done(id, "builder", None).is_err());
+        // Human override also blocked while in awaiting_review.
+        assert!(s.task_done(id, "human", None).is_err());
+
+        let t = s.task_get(id).unwrap().unwrap();
+        assert_eq!(t.status, TaskStatus::AwaitingReview, "status must remain awaiting_review");
+    }
+
+    #[test]
+    fn task_assign_rejects_awaiting_review() {
+        // Prevent pull from awaiting_review → claimed via task_assign.
+        let s = Store::open_in_memory().unwrap();
+        let id = s.task_add("t", "", 1, &[], "human").unwrap();
+        s.task_claim(id, "builder").unwrap();
+        s.task_await_review(id, "builder", None).unwrap();
+
+        assert!(s.task_assign(id, "reviewer").is_err());
+        let t = s.task_get(id).unwrap().unwrap();
+        assert_eq!(t.status, TaskStatus::AwaitingReview);
+    }
+
+    #[test]
+    fn task_review_self_review_rejected() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.task_add("t", "", 1, &[], "human").unwrap();
+        s.task_claim(id, "builder").unwrap();
+        s.task_await_review(id, "builder", None).unwrap();
+
+        // Reviewer cannot be the same agent that closed the task.
+        assert!(s.task_review(id, "builder", true, "").is_err());
+
+        // A different agent can approve.
+        s.task_review(id, "reviewer", true, "").unwrap();
+        let t = s.task_get(id).unwrap().unwrap();
+        assert_eq!(t.status, TaskStatus::Done);
+    }
+
+    #[test]
+    fn task_review_reject_reopens_with_note() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.task_add("t", "", 1, &[], "human").unwrap();
+        s.task_claim(id, "builder").unwrap();
+        s.task_await_review(id, "builder", None).unwrap();
+
+        s.task_review(id, "reviewer", false, "needs tests").unwrap();
+        let t = s.task_get(id).unwrap().unwrap();
+        assert_eq!(t.status, TaskStatus::Open);
+        assert!(t.note.as_deref().unwrap_or("").contains("rejected by reviewer"));
+        assert!(t.claimed_by.is_none());
     }
 
     #[test]

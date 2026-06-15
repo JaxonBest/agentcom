@@ -75,6 +75,13 @@ pub enum Request {
     TaskReopen {
         id: i64,
     },
+    /// Approve or reject a task sitting in AwaitingReview state.
+    /// Hub rejects review attempts by the agent that originally closed the task.
+    TaskReview {
+        id: i64,
+        approve: bool,
+        note: String,
+    },
     TaskEdit {
         id: i64,
         title: Option<String>,

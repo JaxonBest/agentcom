@@ -104,6 +104,10 @@ pub struct HubConfig {
     /// Post-close hooks fired by the hub after a task transitions to Done.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub hooks: Option<HooksConfig>,
+    /// Seconds a task may sit in `awaiting_review` before the hub emits a
+    /// `TaskReviewStale` webhook and notifies the composer. Default: 1800 (30 min).
+    #[serde(default = "default_review_stale_secs")]
+    pub review_stale_secs: u64,
     #[serde(default, rename = "agent")]
     pub agents: Vec<AgentConfig>,
 }
@@ -194,6 +198,10 @@ pub struct AgentConfig {
     /// Defaults to None (unlimited). Set to 1 to enforce single-task focus.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_claimed_tasks: Option<u64>,
+    /// When true, tasks closed by this agent transition to `awaiting_review`
+    /// instead of `done`. The hub auto-files a paired review task. Default: false.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub default_review_required: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
@@ -251,6 +259,7 @@ impl Default for AgentConfig {
             capabilities: vec![],
             idle_goal: None,
             max_claimed_tasks: None,
+            default_review_required: false,
         }
     }
 }
@@ -397,6 +406,9 @@ fn default_circuit_breaker_window_secs() -> u64 {
 }
 fn default_hook_timeout_secs() -> u64 {
     120
+}
+fn default_review_stale_secs() -> u64 {
+    1800
 }
 
 /// Hub-level post-close hooks fired after a task transitions to Done.
