@@ -24,7 +24,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     let body = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(32), Constraint::Min(20)])
+        .constraints([Constraint::Length(36), Constraint::Min(20)])
         .split(chunks[1]);
     draw_sidebar(f, app, body[0]);
     draw_main(f, app, body[1]);
@@ -291,7 +291,7 @@ fn draw_main(f: &mut Frame, app: &App, area: Rect) {
 fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(8)])
+        .constraints([Constraint::Min(3), Constraint::Max(8)])
         .split(area);
     draw_conversation(f, app, chunks[0]);
     draw_activity(f, app, chunks[1]);
@@ -417,7 +417,7 @@ fn draw_activity(f: &mut Frame, app: &App, area: Rect) {
                 .pop()
                 .unwrap_or_default()
         };
-        let last_action: String = last_action.chars().take(120).collect();
+        let last_action: String = last_action.chars().take(60).collect();
         let style = if row.state == "interrupting" {
             Style::default().fg(Color::Red)
         } else {
@@ -799,7 +799,7 @@ fn draw_help_overlay(f: &mut Frame, area: Rect) {
 }
 
 fn draw_task_detail(f: &mut Frame, task: &crate::store::Task, area: Rect) {
-    let popup = centered_rect(80, 22, area);
+    let popup = centered_rect(80, 22u16.min(area.height.saturating_sub(4)), area);
     f.render_widget(ratatui::widgets::Clear, popup);
 
     let mut lines: Vec<Line> = Vec::new();
@@ -935,13 +935,13 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         Line::from(vec![
             Span::styled(format!(" {flash} "), Style::default().fg(Color::Green)),
             Span::styled(
-                " [m]sg [u]rgent [M]broadcast [a]dd-task [p]ause [s]top [Up/Down]agent [PgUp/PgDn]scroll [Tab]pane [?]help [q]uit",
+                " [m]msg [u]int [M]bcast [a]add [p]pause [?]help [q]quit",
                 Style::default().fg(Color::DarkGray),
             ),
         ])
     } else {
         Line::from(Span::styled(
-            " [m]sg [u]rgent [M]broadcast [a]dd-task [p]ause [s]top [Up/Down]agent [PgUp/PgDn]scroll [Tab]pane [?]help [q]uit",
+            " [m]msg [u]int [M]bcast [a]add [p]pause [?]help [q]quit",
             Style::default().fg(Color::DarkGray),
         ))
     };
