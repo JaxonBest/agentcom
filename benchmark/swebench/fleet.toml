@@ -1,8 +1,13 @@
-# Headless benchmark fleet. Two-agent setup: builder writes the patch,
-# reviewer reads the diff and files follow-up tasks for regressions.
-# The composer is auto-injected by agentcom and turns the free-mode goal
-# into board tasks.
+# Benchmark fleet config. Uses the "builder+reviewer+tester" preset which bakes
+# in: review_required on builder, lanes on each agent, and the pytest hook.
+#
+# Lane overrides: the preset builder lane is "src/**" but SWE-bench repos are
+# Python projects with root-level package dirs (flask/, django/, etc.), not a
+# src/ layout. Builder gets Python-file globs minus tests/benchmark/config.
+# Tester gets tests/ plus read access to Python sources for context.
+# Reviewer is unrestricted (no lanes = no enforcement).
 
+preset = "builder+reviewer+tester"
 project_name = "swebench-bench"
 default_provider = "claude"
 default_model = "sonnet"
@@ -10,41 +15,8 @@ auto_commit = true
 
 [[agent]]
 name = "builder"
-provider = "claude"
-role = """
-Implements the fix described in the free-mode goal. The repo is Python.
-Workflow:
-  1. Read the problem statement carefully.
-  2. Locate the file(s) responsible. Use grep/glob — do not guess paths.
-  3. Make the smallest correct change. Do NOT refactor unrelated code.
-  4. If the repo has tests for the affected area, run them with `pytest -x`
-     and stop at the first failure. Do not run the full suite.
-  5. Mark the task done only when the targeted tests pass and the diff
-     is minimal.
-Never touch files outside the repo. Never edit benchmark/ or agentcom.toml.
-"""
-allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
-max_turns_per_prompt = 40
+lanes = ["**/*.py", "*.py", "!tests/**", "!benchmark/**", "!agentcom.*"]
 
 [[agent]]
-name = "reviewer"
-provider = "claude"
-role = """
-Read-only watchdog. After every task close:
-  1. Run `git diff` and read the full patch.
-  2. For every symbol the patch touches (function, attribute, validation
-     rule, error type), grep the codebase for OTHER call sites or related
-     code paths that enforce the same rule or accept the same input. If the
-     patch fixes one site but leaves a sibling site unchanged, file
-     'review-fail:incomplete-coverage' with the specific other site as
-     evidence. This is the most common defect: the issue text describes ONE
-     symptom but the fix needs to apply at every code path that produces it.
-  3. Check the patch is minimal — no unrelated formatting, no dead code,
-     no broad refactors.
-  4. Check no test files were deleted or weakened.
-  5. If the patch is wrong or incomplete, file a follow-up task tagged
-     'review-fail:<short reason>' and leave a one-line message for the builder.
-Approve silently. Never edit code. Never claim implementation tasks.
-"""
-allowed_tools = ["Bash", "Read", "Glob", "Grep"]
-max_turns_per_prompt = 20
+name = "tester"
+lanes = ["tests/**", "**/*.py", "*.py"]

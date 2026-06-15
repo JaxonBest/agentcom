@@ -303,7 +303,12 @@ def _wait_for_fleet_quiesce(repo_dir: Path, proc: subprocess.Popen,
                 ["agentcom", "task", "list", "--json", "--status", "claimed"],
                 cwd=str(repo_dir), capture_output=True, text=True, timeout=15,
             )
-            active_count = _count_tasks(r2.stdout) + _count_tasks(r3.stdout)
+            r4 = subprocess.run(
+                ["agentcom", "task", "list", "--json", "--status", "awaiting_review"],
+                cwd=str(repo_dir), capture_output=True, text=True, timeout=15,
+            )
+            active_count = (_count_tasks(r2.stdout) + _count_tasks(r3.stdout)
+                            + _count_tasks(r4.stdout))
         except Exception:
             total, active_count = -1, -1
 
