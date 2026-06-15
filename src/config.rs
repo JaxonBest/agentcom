@@ -202,10 +202,12 @@ pub struct AgentConfig {
     /// instead of `done`. The hub auto-files a paired review task. Default: false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub default_review_required: bool,
-    /// Gitignore-style glob patterns that limit which files this agent may claim.
+    /// Glob patterns that limit which files this agent may claim.
     /// A `FilesClaim` is hard-rejected at the hub if any claimed path falls outside
     /// these globs. Empty list means no enforcement (default).
-    /// Example: lanes = ["src/builder/**", "!src/builder/vendored/**"]
+    /// Example: lanes = ["src/builder/**"]
+    /// Note: negation patterns (starting with `!`) are not supported — use
+    /// separate narrow globs instead of exclusions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lanes: Vec<String>,
 }
