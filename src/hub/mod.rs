@@ -69,6 +69,10 @@ pub struct Hub {
     audit: audit::AuditLog,
     /// Last observed mtime of agentcom.toml; used for hot-reload detection.
     config_mtime: Option<std::time::SystemTime>,
+    /// Count of consecutive post-close hook failures across the fleet.
+    /// Resets to 0 on any successful hook run. Hub pauses auto-dispatch
+    /// when this reaches 5 and logs a warning requiring human intervention.
+    consecutive_hook_failures: u32,
 }
 
 impl Hub {
@@ -182,6 +186,7 @@ impl Hub {
             rpm_window: HashMap::new(),
             audit,
             config_mtime: None,
+            consecutive_hook_failures: 0,
         })
     }
 
@@ -415,7 +420,159 @@ impl Hub {
                 tracing::debug!(agent = %agent, line, "agent stderr");
             }
             HubEvent::Exited { agent, code } => self.handle_exit(&agent, code),
+            HubEvent::HookResult { task_id, task_title, agent, success, output } => {
+                self.handle_hook_result(task_id, &task_title, &agent, success, &output);
+            }
         }
+    }
+
+    fn handle_hook_result(
+        &mut self,
+        task_id: i64,
+        task_title: &str,
+        agent: &str,
+        success: bool,
+        output: &str,
+    ) {
+        if success {
+            self.consecutive_hook_failures = 0;
+            tracing::debug!("post-close hook passed for task #{task_id}");
+            return;
+        }
+
+        self.consecutive_hook_failures += 1;
+        let reason = {
+            let tail = output.lines().rev().take(5).collect::<Vec<_>>();
+            let tail = tail.iter().rev().cloned().collect::<Vec<_>>().join("\n");
+            format!("post_close hook failed: {}", tail.trim())
+        };
+        self.log(format!(
+            "post-close hook failed for task #{task_id} \"{task_title}\" (by {agent}): blocking"
+        ));
+        if let Err(e) = self.store.task_block(task_id, "hub", &reason) {
+            tracing::warn!("failed to block task #{task_id} after hook failure: {e}");
+        }
+        let _ = self.ui_tx.send(UiEvent::TaskBoardChanged);
+        self.fire_webhook(
+            webhook::Payload::new(webhook::Event::TaskHookFailed)
+                .with_agent(agent)
+                .with_task(task_id, task_title)
+                .with_hook_output(output),
+        );
+
+        // Fleet-wide circuit breaker: pause auto-dispatch after 5 consecutive
+        // hook failures so a broken hook doesn't spam the board with blocked tasks.
+        if self.consecutive_hook_failures >= 5 {
+            let msg = format!(
+                "WARN: {} consecutive post-close hook failures — auto-dispatch paused. \
+                 Fix the hook and run `agentcom resume` to continue.",
+                self.consecutive_hook_failures
+            );
+            self.log(msg.clone());
+            self.do_send("hub", "human", &msg, true);
+        }
+    }
+
+    /// Spawn a post-close hook in the background if one is configured and
+    /// the closing agent and task pass the filters. Does nothing if no hook is
+    /// configured or the task has already exhausted its hook attempts.
+    fn maybe_spawn_hook(&mut self, task: &crate::store::Task, closing_agent: &str) {
+        let hooks = match self.cfg.hooks.as_ref() {
+            Some(h) => h,
+            None => return,
+        };
+        let cmd = match hooks.post_close.as_deref() {
+            Some(c) if !c.is_empty() => c.to_string(),
+            _ => return,
+        };
+
+        // Skip if the closing agent doesn't have a required tag.
+        if !hooks.post_close_only_for_tags.is_empty() {
+            let agent_caps: Vec<String> = self
+                .cfg
+                .agents
+                .iter()
+                .find(|a| a.name == closing_agent)
+                .map(|a| a.capabilities.clone())
+                .unwrap_or_default();
+            let has_tag = hooks
+                .post_close_only_for_tags
+                .iter()
+                .any(|t| agent_caps.contains(t));
+            if !has_tag {
+                return;
+            }
+        }
+
+        // Circuit breaker: if this task has already been re-blocked by the hook
+        // twice, skip the hook and leave the task as Done.
+        if task.hook_attempts >= 2 {
+            tracing::debug!(
+                "task #{}: hook_attempts={} >= 2, skipping hook",
+                task.id, task.hook_attempts
+            );
+            return;
+        }
+
+        // Increment the counter before spawning so a crash can't bypass it.
+        if let Err(e) = self.store.task_increment_hook_attempts(task.id) {
+            tracing::warn!("task #{}: failed to increment hook_attempts: {e}", task.id);
+            return;
+        }
+
+        let task_id = task.id;
+        let task_title = task.title.clone();
+        let agent_name = closing_agent.to_string();
+        let project_root = self.project_root.clone();
+        let timeout_secs = hooks.post_close_timeout_secs;
+        let bus_tx = self.bus_tx.clone();
+
+        self.log(format!(
+            "post-close hook: running `{cmd}` for task #{task_id} (agent: {agent_name})"
+        ));
+
+        tokio::spawn(async move {
+            use tokio::process::Command;
+
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(timeout_secs),
+                Command::new("sh")
+                    .arg("-c")
+                    .arg(&cmd)
+                    .current_dir(&project_root)
+                    .env("AGENTCOM_TASK_ID", task_id.to_string())
+                    .env("AGENTCOM_TASK_TITLE", &task_title)
+                    .env("AGENTCOM_AGENT", &agent_name)
+                    .output(),
+            )
+            .await;
+
+            let (success, output) = match result {
+                Ok(Ok(out)) => {
+                    let mut combined = String::new();
+                    combined.push_str(&String::from_utf8_lossy(&out.stdout));
+                    combined.push_str(&String::from_utf8_lossy(&out.stderr));
+                    // Truncate to 4KB.
+                    if combined.len() > 4096 {
+                        combined.truncate(4096);
+                        combined.push_str("\n[truncated]");
+                    }
+                    (out.status.success(), combined)
+                }
+                Ok(Err(e)) => (false, format!("hook failed to spawn: {e}")),
+                Err(_) => (false, format!("hook timed out after {timeout_secs}s")),
+            };
+
+            let _ = bus_tx
+                .send(events::HubEvent::HookResult {
+                    task_id,
+                    task_title,
+                    agent: agent_name,
+                    success,
+                    output,
+                })
+                .await;
+        });
     }
 
     fn handle_cli_event(&mut self, agent: &str, event: CliEvent) {
@@ -1012,6 +1169,8 @@ impl Hub {
                             let creator = t.created_by.clone();
                             self.do_send("hub", &creator, &body, false);
                         }
+                        // Spawn a post-close hook if configured and applicable.
+                        self.maybe_spawn_hook(&t, identity);
                         // A completed dependency may unblock queued work.
                         self.wake_idle();
                         Response::ok_msg(format!("task #{} done — {}", t.id, t.title))

@@ -53,6 +53,7 @@ fn task_from_row(row: &Row) -> rusqlite::Result<Task> {
         is_archived: is_archived != 0,
         recur: row.get("recur").unwrap_or(None),
         next_run_at: row.get("next_run_at").unwrap_or(None),
+        hook_attempts: row.get::<_, i64>("hook_attempts").unwrap_or(0) as u32,
         created_by: row.get("created_by")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
@@ -502,6 +503,21 @@ impl Store {
             .ok_or_else(|| anyhow::anyhow!("task #{id} does not exist"))?;
         let new_id = self.task_add(&src.title, &src.description, src.priority, &[], created_by)?;
         Ok(self.task_get(new_id)?.expect("just created"))
+    }
+
+    /// Increment `hook_attempts` for a task and return the new count.
+    pub fn task_increment_hook_attempts(&self, id: i64) -> Result<u32> {
+        let conn = self.conn.lock().unwrap();
+        conn.execute(
+            "UPDATE tasks SET hook_attempts = hook_attempts + 1, updated_at = ?1 WHERE id = ?2",
+            params![now_ts(), id],
+        )?;
+        let count: i64 = conn.query_row(
+            "SELECT hook_attempts FROM tasks WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )?;
+        Ok(count as u32)
     }
 
     pub fn task_done(&self, id: i64, agent: &str, note: Option<&str>) -> Result<Task> {

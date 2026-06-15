@@ -40,6 +40,8 @@ pub enum Event {
     FleetPaused,
     /// Fleet-wide resume activated.
     FleetResumed,
+    /// A post-close hook exited non-zero; task was re-blocked.
+    TaskHookFailed,
 }
 
 /// JSON body sent to the webhook endpoint.
@@ -65,6 +67,9 @@ pub struct Payload {
     /// For FileClaim/FileRelease: paths involved.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub paths: Option<Vec<String>>,
+    /// For TaskHookFailed: captured stdout+stderr (truncated to 4KB).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hook_output: Option<String>,
 }
 
 impl Payload {
@@ -82,7 +87,13 @@ impl Payload {
             max_usd: None,
             budget_pct: None,
             paths: None,
+            hook_output: None,
         }
+    }
+
+    pub fn with_hook_output(mut self, output: impl Into<String>) -> Self {
+        self.hook_output = Some(output.into());
+        self
     }
 
     pub fn with_budget(mut self, spent: f64, max: f64, pct: f64) -> Self {

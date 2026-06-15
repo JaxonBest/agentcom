@@ -174,10 +174,17 @@ pub struct Task {
     /// Unix timestamp when the next recurrence should become visible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next_run_at: Option<i64>,
+    /// Times the post-close hook has run for this task. Stops at 2 to prevent looping.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub hook_attempts: u32,
     pub created_by: String,
     pub created_at: i64,
     pub updated_at: i64,
     pub depends_on: Vec<i64>,
+}
+
+fn is_zero_u32(v: &u32) -> bool {
+    *v == 0
 }
 
 
@@ -226,6 +233,7 @@ impl Default for Task {
             is_archived: false,
             recur: None,
             next_run_at: None,
+            hook_attempts: 0,
             created_by: String::new(),
             created_at: 0,
             updated_at: 0,

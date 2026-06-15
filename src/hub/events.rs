@@ -15,6 +15,15 @@ pub enum HubEvent {
     Stderr { agent: String, line: String },
     /// Child process exited.
     Exited { agent: String, code: Option<i32> },
+    /// Result of a post-close hook run.
+    HookResult {
+        task_id: i64,
+        task_title: String,
+        agent: String,
+        success: bool,
+        /// Captured stdout+stderr, truncated to 4KB.
+        output: String,
+    },
 }
 
 /// A request forwarded from an IPC connection (or the TUI) to the hub loop.

@@ -101,6 +101,9 @@ pub struct HubConfig {
     /// Default: None (disabled).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority_escalate_after_hours: Option<u64>,
+    /// Post-close hooks fired by the hub after a task transitions to Done.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hooks: Option<HooksConfig>,
     #[serde(default, rename = "agent")]
     pub agents: Vec<AgentConfig>,
 }
@@ -391,6 +394,26 @@ fn default_circuit_breaker_n() -> u32 {
 }
 fn default_circuit_breaker_window_secs() -> u64 {
     600
+}
+fn default_hook_timeout_secs() -> u64 {
+    120
+}
+
+/// Hub-level post-close hooks fired after a task transitions to Done.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HooksConfig {
+    /// Shell command to run in the project root after a task is closed.
+    /// Non-zero exit re-blocks the task with the hook's stderr as the reason.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub post_close: Option<String>,
+    /// Timeout in seconds for the post_close hook. Default: 120.
+    #[serde(default = "default_hook_timeout_secs")]
+    pub post_close_timeout_secs: u64,
+    /// Only run the hook when the closing agent has one of these capability tags.
+    /// Empty means run for all agents.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub post_close_only_for_tags: Vec<String>,
 }
 
 impl HubConfig {
