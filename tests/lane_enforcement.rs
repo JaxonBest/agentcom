@@ -253,3 +253,47 @@ fn agentcom_check_warns_on_typo_lane() {
         "expected warning about no matching files; got:\n{out}"
     );
 }
+
+#[test]
+fn lane_negation_pattern_excludes_subpath() {
+    let project = PathBuf::from(std::env!("CARGO_TARGET_TMPDIR"));
+    let project = project.join("lane_test_negation");
+    let _ = std::fs::remove_dir_all(&project);
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(project.join("src/vendored")).unwrap();
+    std::fs::write(project.join("src/main.rs"), "fn main() {}").unwrap();
+    std::fs::write(project.join("src/vendored/foo.rs"), "// vendored").unwrap();
+
+    write_config(
+        &project,
+        "\n\
+         [[agent]]\n\
+         name = \"builder\"\n\
+         role = \"builder\"\n\
+         provider = \"claude\"\n\
+         lanes = [\"src/**\", \"!src/vendored/**\"]\n",
+    );
+
+    let hub = start_hub(&project, &["negation test"]);
+    wait_for_hub(&project, Duration::from_secs(20));
+
+    // src/main.rs is inside src/** and NOT excluded — should succeed.
+    let (ok, out) = files_claim(&project, "builder", &["src/main.rs"]);
+    assert!(
+        ok,
+        "claim of src/main.rs should succeed with negation lane; got:\n{out}"
+    );
+
+    // src/vendored/foo.rs matches src/** but is excluded by !src/vendored/** — should be rejected.
+    let (ok, out) = files_claim(&project, "builder", &["src/vendored/foo.rs"]);
+    assert!(
+        !ok,
+        "claim of src/vendored/foo.rs should be rejected by negation pattern; got:\n{out}"
+    );
+    assert!(
+        out.contains("lane violation"),
+        "expected 'lane violation' for excluded path; got:\n{out}"
+    );
+
+    drop(hub);
+}
