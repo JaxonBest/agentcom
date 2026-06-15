@@ -141,15 +141,31 @@ fn hub_logs(guard: &mut HubGuard) -> String {
     out
 }
 
-/// Write a failing hook script that exits non-zero.
+/// Write a failing hook script that exits non-zero and emits stderr.
 fn write_failing_hook(project: &Path) -> PathBuf {
     let hook_path = project.join("failing-hook.sh");
     std::fs::write(
         &hook_path,
-        "#!/bin/sh\nexit 1\n",
+        "#!/bin/sh\necho 'hook invocation error: failing for test' >&2\nexit 1\n",
     )
     .unwrap();
     // Make executable.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    hook_path
+}
+
+/// Write a passing hook script that exits zero and emits a note to stdout.
+fn write_passing_hook(project: &Path) -> PathBuf {
+    let hook_path = project.join("passing-hook.sh");
+    std::fs::write(
+        &hook_path,
+        "#!/bin/sh\necho 'hook passed successfully'\n",
+    )
+    .unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -216,6 +232,10 @@ fn failing_hook_blocks_done_task() {
     assert!(
         show_out.contains("blocked: post_close"),
         "task show includes blocked reason with hook info: {show_out}"
+    );
+    assert!(
+        show_out.contains("hook invocation error: failing for test"),
+        "task show includes hook stderr in blocked reason: {show_out}"
     );
 
     // Graceful stop.
@@ -340,6 +360,91 @@ fn hook_loop_prevention() {
     assert!(
         show_out.contains("done") || show_out.contains("Done"),
         "task is done: {show_out}"
+    );
+
+    // Graceful stop.
+    let (ok, _) = cli(&project, &["stop"]);
+    assert!(ok, "stop succeeds");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(Some(exit)) = hub.child.try_wait() {
+            assert!(
+                exit.success(),
+                "hub exits cleanly; logs:\n{}",
+                hub_logs(&mut hub)
+            );
+            break;
+        }
+        if Instant::now() > deadline {
+            panic!("hub did not exit after stop; logs:\n{}", hub_logs(&mut hub));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Test 3: passing post-close hook leaves task Done
+// ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn passing_hook_keeps_task_done() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = tmp.path().join("proj");
+    let scripts = tmp.path().join("scripts");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&scripts).unwrap();
+
+    let hook_path = write_passing_hook(&project);
+
+    // Configure a single worker with a passing post-close hook.
+    write_config(
+        &project,
+        &[("worker", "does work")],
+        &format!(
+            "[hooks]\npost_close = \"{}\"\npost_close_timeout_secs = 10\n",
+            hook_path.to_string_lossy()
+        ),
+    );
+
+    // Agent script: claim and complete the task.
+    std::fs::write(
+        scripts.join("worker.ndjson"),
+        r#"{"run": ["agentcom task claim 1", "agentcom task done 1 --note happy-path"], "text": "done", "cost": 0.01}
+"#,
+    )
+    .unwrap();
+
+    let mut hub = start_hub(&project, &scripts, &["happy path task"], &[]);
+
+    // The agent completes the task, then the hook fires and passes.
+    // The task should stay Done (not Blocked).
+    let done_out = wait_for(
+        &project,
+        &["task", "list", "--status", "done"],
+        Duration::from_secs(20),
+        |out| out.contains("happy path task"),
+    );
+    assert!(
+        done_out.contains("happy path task"),
+        "task appears in done list: {done_out}"
+    );
+
+    // Verify the task is NOT blocked.
+    let (_, blocked_out) = cli(&project, &["task", "list", "--status", "blocked"]);
+    assert!(
+        !blocked_out.contains("happy path task"),
+        "task should not be blocked after passing hook: {blocked_out}"
+    );
+
+    // Give the hook a moment to fire and settle.
+    std::thread::sleep(Duration::from_millis(500));
+
+    // Check hook_attempts via task show — should be 1.
+    let (ok, show_out) = cli(&project, &["task", "show", "1"]);
+    assert!(ok, "task show succeeds: {show_out}");
+    assert!(
+        show_out.contains("HookAttempts: 1"),
+        "hook ran once: {show_out}"
     );
 
     // Graceful stop.
