@@ -31,6 +31,7 @@ from typing import Iterable, Optional
 HERE = Path(__file__).resolve().parent
 FLEET_TOML = HERE / "fleet.toml"
 DATASET = "princeton-nlp/SWE-bench_Lite"
+LOCKED_INSTANCES_FILE = HERE / "instances.json"
 
 # How long we let either mode work on a single instance, in seconds.
 DEFAULT_TIMEOUT_SECS = 30 * 60
@@ -83,6 +84,10 @@ def load_instances(ids: Optional[list[str]], n: Optional[int]) -> list[Instance]
             "(or: pip install -r benchmark/swebench/requirements.txt)"
         )
 
+    if LOCKED_INSTANCES_FILE.exists() and not ids:
+        with open(LOCKED_INSTANCES_FILE) as f:
+            ids = json.load(f)
+
     ds = load_dataset(DATASET, split="test")
     out: list[Instance] = []
     for row in ds:
@@ -103,6 +108,8 @@ def load_instances(ids: Optional[list[str]], n: Optional[int]) -> list[Instance]
         missing = wanted - {i.instance_id for i in out}
         if missing:
             sys.exit(f"unknown instance ids: {sorted(missing)}")
+        if n is not None:
+            out = out[:n]
         return out
 
     if n is not None:
@@ -210,6 +217,13 @@ def run_fleet(instance: Instance, repo_dir: Path, artifacts: Path,
     prompt = _build_prompt(instance)
     (artifacts / "prompt.txt").write_text(prompt)
     shutil.copy(FLEET_TOML, repo_dir / "agentcom.toml")
+    # Wipe any stale state inherited from a prior fleet run on this path —
+    # agentcom's data dir is keyed by canonical path hash, so a re-run of
+    # the same instance reads the previous run's tasks/cost without this.
+    subprocess.run(["agentcom", "stop"], cwd=str(repo_dir),
+                   capture_output=True, timeout=20)
+    subprocess.run(["agentcom", "clean", "--yes"], cwd=str(repo_dir),
+                   capture_output=True, timeout=20)
 
     duration = f"{max(1, timeout_secs // 60)}m"
     cmd = [
@@ -414,7 +428,11 @@ def cmd_run(args: argparse.Namespace) -> int:
             sys.exit(f"unknown mode: {m}")
 
     ids = [s.strip() for s in args.ids.split(",")] if args.ids else None
-    instances = load_instances(ids, args.instances)
+    # When no --ids and no instances.json, default to 2 so we don't pull all 300.
+    n = args.instances
+    if n is None and not ids and not LOCKED_INSTANCES_FILE.exists():
+        n = 2
+    instances = load_instances(ids, n)
     if not instances:
         sys.exit("no instances selected")
 
@@ -616,8 +634,8 @@ def main(argv: Iterable[str]) -> int:
     sub = p.add_subparsers(dest="cmd", required=True)
 
     run = sub.add_parser("run", help="run benchmark instances")
-    run.add_argument("--instances", type=int, default=2,
-                     help="number of instances from the head of the dataset (default: 2)")
+    run.add_argument("--instances", type=int, default=None,
+                     help="number of instances to run (default: all locked instances, or 2 from dataset head)")
     run.add_argument("--ids", default="",
                      help="comma-separated instance ids (overrides --instances)")
     run.add_argument("--modes", default="solo,fleet",
