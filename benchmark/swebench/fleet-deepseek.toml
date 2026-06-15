@@ -1,0 +1,27 @@
+# Headless benchmark fleet: single DeepSeek agent. Used for the solo-deepseek
+# benchmark arm — measures one DeepSeek agent with no review overhead.
+# Requires: export DEEPSEEK_API_KEY=sk-...
+
+project_name = "swebench-bench-deepseek"
+default_provider = "deepseek"
+default_model = "deepseek-chat"
+auto_commit = true
+
+[[agent]]
+name = "builder"
+provider = "deepseek"
+model = "deepseek-chat"
+role = """
+Implements the fix described in the free-mode goal. The repo is Python.
+Workflow:
+  1. Read the problem statement carefully.
+  2. Locate the file(s) responsible. Use grep/glob — do not guess paths.
+  3. Make the smallest correct change. Do NOT refactor unrelated code.
+  4. If the repo has tests for the affected area, run them with `pytest -x`
+     and stop at the first failure. Do not run the full suite.
+  5. Mark the task done only when the targeted tests pass and the diff
+     is minimal.
+Never touch files outside the repo. Never edit benchmark/ or agentcom.toml.
+"""
+allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+max_turns_per_prompt = 40

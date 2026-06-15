@@ -8,7 +8,8 @@ and ≤2× cost premium on resolved tasks.
 
 | Date | SHA | Instances | solo-claude resolved | solo-deepseek resolved | fleet resolved | fleet median $/resolved | fleet median wall (s) | notes |
 |---|---|---|---|---|---|---|---|---|
-| 2026-06-16 | 3983cab | 10 | 0 | 0 | 0 | — | — | baseline — no run yet |
+| 2026-06-16 | 3983cab | 10 | 0 | — | 0 | — | — | placeholder — instances locked, no run yet |
+| 2026-06-16 | 3d2d942 | 1 | 0/1 | — | 0/1 | — | 130 | first-real: pallets/flask-4045 only; solo $0.11 29s, fleet $0.42 130s; reviewer never ran; solo-deepseek not yet implemented |
 
 ## How to add a row
 
@@ -17,11 +18,10 @@ and ≤2× cost premium on resolved tasks.
    ```sh
    python benchmark/swebench/bench.py run \
        --instances 10 \
-       --modes solo,fleet \
+       --modes solo,solo-deepseek,fleet \
        --out runs/$(date +%F)
    ```
-   (solo uses `claude -p`; solo-deepseek mode is TBD in the harness — when added,
-   pass `--modes solo-claude,solo-deepseek,fleet`.)
+   (solo uses `claude -p`; solo-deepseek uses fleet-deepseek.toml and requires `DEEPSEEK_API_KEY`.)
 
 2. Score the results:
 

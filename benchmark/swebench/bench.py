@@ -7,10 +7,15 @@ SWE-bench Lite instance. Captures the model_patch, cost, and wall time.
 Scoring is delegated to the official `swebench` harness.
 
 Usage:
-  bench.py run --instances 5 --modes solo,fleet --out runs/2026-06-15
+  bench.py run --instances 5 --modes solo,fleet,solo-deepseek --out runs/2026-06-15
   bench.py run --ids django__django-11099,sympy__sympy-13031 --modes fleet
   bench.py score --run-dir runs/2026-06-15
   bench.py report --run-dir runs/2026-06-15
+
+Modes:
+  solo            — single `claude -p` session (Claude Sonnet)
+  fleet           — agentcom builder+reviewer fleet (fleet.toml)
+  solo-deepseek   — single DeepSeek agent fleet (fleet-deepseek.toml); requires DEEPSEEK_API_KEY
 """
 
 from __future__ import annotations
@@ -30,7 +35,9 @@ from typing import Iterable, Optional
 
 HERE = Path(__file__).resolve().parent
 FLEET_TOML = HERE / "fleet.toml"
+FLEET_DEEPSEEK_TOML = HERE / "fleet-deepseek.toml"
 DATASET = "princeton-nlp/SWE-bench_Lite"
+VALID_MODES = ("solo", "fleet", "solo-deepseek")
 LOCKED_INSTANCES_FILE = HERE / "instances.json"
 
 # How long we let either mode work on a single instance, in seconds.
@@ -204,19 +211,22 @@ def run_solo(instance: Instance, repo_dir: Path, artifacts: Path,
 
 
 def run_fleet(instance: Instance, repo_dir: Path, artifacts: Path,
-              timeout_secs: int, budget_usd: float, dry_run: bool) -> RunResult:
-    """Drop the bench fleet config in, run `agentcom up --headless --free`,
-    poll until quiesced or budget/time hits, then stop and capture cost."""
+              timeout_secs: int, budget_usd: float, dry_run: bool,
+              *, fleet_toml: Path = FLEET_TOML, mode: str = "fleet") -> RunResult:
+    """Drop fleet_toml in as agentcom.toml, run `agentcom up --headless --free`,
+    poll until quiesced or budget/time hits, then stop and capture cost.
+    Pass fleet_toml=FLEET_DEEPSEEK_TOML and mode='solo-deepseek' for the
+    single-agent DeepSeek benchmark arm."""
     log_path = artifacts / "run.log"
     if dry_run:
         return RunResult(
-            instance_id=instance.instance_id, mode="fleet", patch="",
+            instance_id=instance.instance_id, mode=mode, patch="",
             cost_usd=0.0, wall_secs=0.0, exit_reason="ok (dry-run)",
             log_path=str(log_path),
         )
     prompt = _build_prompt(instance)
     (artifacts / "prompt.txt").write_text(prompt)
-    shutil.copy(FLEET_TOML, repo_dir / "agentcom.toml")
+    shutil.copy(fleet_toml, repo_dir / "agentcom.toml")
     # Wipe any stale state inherited from a prior fleet run on this path —
     # agentcom's data dir is keyed by canonical path hash, so a re-run of
     # the same instance reads the previous run's tasks/cost without this.
@@ -255,7 +265,7 @@ def run_fleet(instance: Instance, repo_dir: Path, artifacts: Path,
     patch = capture_patch(repo_dir, instance.base_commit)
     (artifacts / "patch.diff").write_text(patch)
     return RunResult(
-        instance_id=instance.instance_id, mode="fleet", patch=patch,
+        instance_id=instance.instance_id, mode=mode, patch=patch,
         cost_usd=cost, wall_secs=wall, exit_reason=exit_reason,
         log_path=str(log_path),
     )
@@ -428,8 +438,8 @@ def _run(cmd: list[str]) -> None:
 def cmd_run(args: argparse.Namespace) -> int:
     modes = [m.strip() for m in args.modes.split(",") if m.strip()]
     for m in modes:
-        if m not in ("solo", "fleet"):
-            sys.exit(f"unknown mode: {m}")
+        if m not in VALID_MODES:
+            sys.exit(f"unknown mode: {m!r} (valid: {', '.join(VALID_MODES)})")
 
     ids = [s.strip() for s in args.ids.split(",")] if args.ids else None
     # When no --ids and no instances.json, default to 2 so we don't pull all 300.
@@ -468,6 +478,10 @@ def cmd_run(args: argparse.Namespace) -> int:
             if mode == "solo":
                 res = run_solo(inst, repo_dir, artifacts,
                                args.timeout, args.dry_run)
+            elif mode == "solo-deepseek":
+                res = run_fleet(inst, repo_dir, artifacts,
+                                args.timeout, args.budget, args.dry_run,
+                                fleet_toml=FLEET_DEEPSEEK_TOML, mode="solo-deepseek")
             else:
                 res = run_fleet(inst, repo_dir, artifacts,
                                 args.timeout, args.budget, args.dry_run)
@@ -581,7 +595,7 @@ def _load_swebench_resolutions(out_dir: Path) -> dict[tuple[str, str], bool]:
         # swebench result shape: {"resolved_ids": [...], "model_name_or_path": "..."}
         model = v.get("model_name_or_path") or ""
         mode = None
-        for m in ("solo", "fleet"):
+        for m in VALID_MODES:
             if m in model:
                 mode = m
                 break
@@ -643,7 +657,7 @@ def main(argv: Iterable[str]) -> int:
     run.add_argument("--ids", default="",
                      help="comma-separated instance ids (overrides --instances)")
     run.add_argument("--modes", default="solo,fleet",
-                     help="comma-separated modes: solo,fleet (default: both)")
+                     help="comma-separated modes: solo,fleet,solo-deepseek (default: solo,fleet)")
     run.add_argument("--out", default=f"runs/{int(time.time())}",
                      help="output directory (default: runs/<unix-ts>)")
     run.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECS,
