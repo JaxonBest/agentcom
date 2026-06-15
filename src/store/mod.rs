@@ -546,6 +546,126 @@ mod stats_tests {
         assert_eq!(stats.last10.chars().count(), 5);
         assert!(stats.last10.chars().all(|c| c == '✓'));
     }
+
+    /// Helper: insert a task_activity row with an explicit timestamp.
+    fn insert_activity(s: &Store, task_id: i64, body: &str, ts: i64) {
+        let conn = s.conn.lock().unwrap();
+        conn.execute(
+            "INSERT INTO task_activity (task_id, agent, body, created_at) VALUES (?1, 'builder', ?2, ?3)",
+            rusqlite::params![task_id, body, ts],
+        ).unwrap();
+    }
+
+    #[test]
+    fn stats_compute_wall_time_single_task() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.task_add("work", "", 1, &[], "human").unwrap();
+        {
+            let conn = s.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE tasks SET status = 'done' WHERE id = ?1",
+                [id],
+            ).unwrap();
+        }
+        // claimed at T=1000, done at T=1300 → 300 secs wall time
+        insert_activity(&s, id, "claimed by builder", 1000);
+        insert_activity(&s, id, "done", 1300);
+
+        let stats = s.stats_compute().unwrap();
+        assert_eq!(stats.wall_p50_secs, 300);
+        assert_eq!(stats.wall_p95_secs, 300);
+    }
+
+    #[test]
+    fn stats_compute_wall_time_percentiles() {
+        let s = Store::open_in_memory().unwrap();
+        // 4 tasks with wall times [100, 200, 300, 900] (seconds).
+        // percentile_i64 at p50 with 4 items: idx=(50*4-1)/100=1 → 200
+        // percentile_i64 at p95 with 4 items: idx=(95*4-1)/100=3 → 900
+        let wall_times: &[i64] = &[100, 200, 300, 900];
+        let base_ts: i64 = 10_000;
+        for (i, &wall) in wall_times.iter().enumerate() {
+            let id = s.task_add(&format!("task-{i}"), "", 1, &[], "human").unwrap();
+            {
+                let conn = s.conn.lock().unwrap();
+                conn.execute(
+                    "UPDATE tasks SET status = 'done' WHERE id = ?1",
+                    [id],
+                ).unwrap();
+            }
+            // Stagger claim timestamps so they don't collide.
+            let claim_ts = base_ts + (i as i64) * 10_000;
+            insert_activity(&s, id, "claimed by builder", claim_ts);
+            insert_activity(&s, id, "done", claim_ts + wall);
+        }
+
+        let stats = s.stats_compute().unwrap();
+        assert_eq!(stats.wall_p50_secs, 200, "p50 of [100,200,300,900] should be 200");
+        assert_eq!(stats.wall_p95_secs, 900, "p95 of [100,200,300,900] should be 900");
+    }
+
+    #[test]
+    fn stats_compute_full_fixture() {
+        // Complete fixture: 3 done tasks + 1 blocked + 1 open.
+        // Verifies resolved, total, cost_median_usd, wall_p50/p95, and last10 together.
+        let s = Store::open_in_memory().unwrap();
+
+        // 3 done tasks with costs [0.10, 0.20, 0.30] and wall times [60, 120, 180].
+        // Use explicit updated_at stamps (1001, 1002, 1003) so last10 order is deterministic.
+        let costs: &[f64] = &[0.10, 0.20, 0.30];
+        let walls: &[i64] = &[60, 120, 180];
+        let mut done_ids = Vec::new();
+        for (i, (&cost, &wall)) in costs.iter().zip(walls).enumerate() {
+            let id = s.task_add(&format!("done-{i}"), "", 1, &[], "human").unwrap();
+            {
+                let conn = s.conn.lock().unwrap();
+                let updated_at = 1001 + i as i64;
+                conn.execute(
+                    "UPDATE tasks SET status = 'done', total_cost_usd = ?1, updated_at = ?3 WHERE id = ?2",
+                    rusqlite::params![cost, id, updated_at],
+                ).unwrap();
+            }
+            let claim_ts = 1_000_000 + (i as i64) * 10_000;
+            insert_activity(&s, id, "claimed by builder", claim_ts);
+            insert_activity(&s, id, "done", claim_ts + wall);
+            done_ids.push(id);
+        }
+
+        // 1 blocked task with updated_at=1004 (most recent closed task).
+        let blocked_id = s.task_add("blocked-task", "", 1, &[], "human").unwrap();
+        s.task_claim(blocked_id, "builder").unwrap();
+        s.task_block(blocked_id, "builder", "stuck").unwrap();
+        {
+            let conn = s.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE tasks SET updated_at = 1004 WHERE id = ?1",
+                [blocked_id],
+            ).unwrap();
+        }
+
+        // 1 open task (counts toward total only).
+        let _open_id = s.task_add("open-task", "", 1, &[], "human").unwrap();
+
+        let stats = s.stats_compute().unwrap();
+
+        assert_eq!(stats.total, 5);
+        assert_eq!(stats.resolved, 3);
+
+        // Median of [0.10, 0.20, 0.30]: idx=(50*3-1)/100=1 → 0.20
+        assert!((stats.cost_median_usd - 0.20).abs() < 1e-9,
+            "cost_median_usd expected 0.20, got {}", stats.cost_median_usd);
+
+        // Wall times sorted [60, 120, 180]; p50 idx=(50*3-1)/100=1 → 120
+        assert_eq!(stats.wall_p50_secs, 120, "wall_p50 of [60,120,180] should be 120");
+        // p95 idx=(95*3-1)/100=2 → 180
+        assert_eq!(stats.wall_p95_secs, 180, "wall_p95 of [60,120,180] should be 180");
+
+        // last10: 4 closed tasks (3 done + 1 blocked), oldest→newest → ✓✓✓✗
+        assert_eq!(stats.last10.chars().count(), 4);
+        let chars: Vec<char> = stats.last10.chars().collect();
+        assert_eq!(chars[3], '✗', "last closed task is blocked → ✗");
+        assert!(chars[..3].iter().all(|&c| c == '✓'), "first 3 are done → ✓");
+    }
 }
 
 #[cfg(all(test, unix))]
