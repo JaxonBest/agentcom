@@ -79,6 +79,9 @@ pub struct AgentRuntime {
     pub first_crash_at: Option<Instant>,
     /// Runtime log verbosity override set via 'agentcom agent log-level'.
     pub log_level: Option<String>,
+    /// Set in handle_result to signal a deliberate session reset (not a crash).
+    /// handle_exit checks this flag to respawn fresh instead of treating it as a crash.
+    pub planned_restart: bool,
 }
 
 impl AgentRuntime {
@@ -105,6 +108,7 @@ impl AgentRuntime {
             crash_count: 0,
             first_crash_at: None,
             log_level: None,
+            planned_restart: false,
         }
     }
 

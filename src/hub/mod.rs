@@ -593,7 +593,26 @@ impl Hub {
         let rt = self.agents.get_mut(agent).expect("agent exists");
         rt.pending_urgent = false;
         rt.state = AgentState::Idle;
+
+        // Session reset for non-composer workers: close the process so the next
+        // task starts with a clean Claude context (no accumulated conversation history).
+        let should_reset_session = agent != crate::config::COMPOSER_NAME && rt.cfg.auto_restart;
+        if should_reset_session {
+            rt.planned_restart = true;
+            rt.session_id = None;
+            if let Some(tx) = &rt.stdin_tx {
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(WriterCmd::Close).await;
+                });
+            }
+        }
+        // rt borrow ends here under NLL (no further uses in the reset path)
         self.emit_state(agent);
+        if should_reset_session {
+            // declined_open_task handled post-respawn via wake_idle/try_feed
+            return;
+        }
         self.try_feed(agent);
         if declined_open_task {
             self.wake_idle();
@@ -611,6 +630,18 @@ impl Hub {
         };
         rt.stdin_tx = None;
         rt.child_pid = None;
+
+        // Planned session reset: respawn fresh (session_id already cleared in handle_result).
+        if rt.planned_restart {
+            rt.planned_restart = false;
+            let name = agent.to_string();
+            // rt last used above; NLL ends the borrow before self.log/spawn_agent
+            self.log(format!("{name}: session reset (fresh context for next task)"));
+            if let Err(e) = self.spawn_agent(&name, None) {
+                self.log(format!("{name}: session-reset respawn failed: {e}"));
+            }
+            return;
+        }
 
         if rt.state == AgentState::Stopped || self.shutting_down {
             rt.state = AgentState::Stopped;
