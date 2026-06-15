@@ -543,11 +543,19 @@ impl Store {
         let conn = self.conn.lock().unwrap();
         let updated = conn.execute(
             "UPDATE tasks SET status = 'awaiting_review', note = COALESCE(?1, note), updated_at = ?2
-             WHERE id = ?3 AND claimed_by = ?4",
+             WHERE id = ?3 AND claimed_by = ?4 AND status = 'claimed'",
             params![note, now_ts(), id, agent],
         )?;
         if updated == 0 {
-            bail!("task #{id} not found, or not claimed by {agent}");
+            let status: Option<String> = conn
+                .query_row("SELECT status FROM tasks WHERE id = ?1", [id], |r| r.get(0))
+                .ok();
+            match status.as_deref() {
+                Some("awaiting_review") => {
+                    bail!("task #{id} is already awaiting_review — cannot re-submit for review")
+                }
+                _ => bail!("task #{id} not found, or not claimed by {agent}"),
+            }
         }
         drop(conn);
         Ok(self.task_get(id)?.expect("just set to awaiting_review"))
