@@ -595,7 +595,7 @@ def _load_swebench_resolutions(out_dir: Path) -> dict[tuple[str, str], bool]:
         # swebench result shape: {"resolved_ids": [...], "model_name_or_path": "..."}
         model = v.get("model_name_or_path") or ""
         mode = None
-        for m in VALID_MODES:
+        for m in sorted(VALID_MODES, key=len, reverse=True):
             if m in model:
                 mode = m
                 break
