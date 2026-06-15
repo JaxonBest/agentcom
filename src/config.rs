@@ -714,6 +714,7 @@ pub enum ConfigTemplate {
 
 
 /// Generate an `agentcom.toml` for the given project name and fleet archetype.
+#[cfg(test)]
 pub fn render_example_config(project_name: &str, template: ConfigTemplate) -> String {
     let header = format!(
         "# ============================================================\n\
@@ -894,26 +895,6 @@ pub fn remove_agent(project_root: &Path, name: &str) -> Result<()> {
     cfg.validate()?;
     std::fs::write(&path, toml::to_string_pretty(&cfg)?)?;
     Ok(())
-}
-
-pub fn write_example_template(
-    project_root: &Path,
-    force: bool,
-    template: ConfigTemplate,
-) -> Result<PathBuf> {
-    let path = project_root.join(crate::paths::CONFIG_FILE);
-    if path.exists() && !force {
-        bail!(
-            "{} already exists (use --force to overwrite)",
-            path.display()
-        );
-    }
-    let project_name = project_root
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("my-project");
-    write_config_file(&path, &render_example_config(project_name, template))?;
-    Ok(path)
 }
 
 /// Write `content` to `path` with 0600 permissions on Unix (owner-only
