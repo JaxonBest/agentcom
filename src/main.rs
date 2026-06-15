@@ -3091,7 +3091,7 @@ fn run_dashboard(json_out: bool) -> Result<()> {
     let mode: Option<String> = std::fs::read_to_string(&config_path).ok().and_then(|raw| {
         let val: toml::Value = toml::from_str(&raw).ok()?;
         val.get("preset")?.as_str().map(str::to_string)
-    });
+    }).filter(|m| config::presets::VALID.contains(&m.as_str()));
 
     if json_out {
         #[derive(serde::Serialize)]
