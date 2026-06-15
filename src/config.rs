@@ -108,6 +108,12 @@ pub struct HubConfig {
     /// `TaskReviewStale` webhook and notifies the composer. Default: 1800 (30 min).
     #[serde(default = "default_review_stale_secs")]
     pub review_stale_secs: u64,
+    /// Named fleet preset to expand before validation. Valid values:
+    /// "solo+watchdog", "builder+reviewer+tester", "cheap-grunt+claude-lead".
+    /// The preset populates `agents` and `hooks`; inline `[[agent]]` blocks
+    /// override preset values by name. Consumed (cleared) on load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preset: Option<String>,
     #[serde(default, rename = "agent")]
     pub agents: Vec<AgentConfig>,
 }
@@ -206,8 +212,8 @@ pub struct AgentConfig {
     /// A `FilesClaim` is hard-rejected at the hub if any claimed path falls outside
     /// these globs. Empty list means no enforcement (default).
     /// Example: lanes = ["src/builder/**"]
-    /// Note: negation patterns (starting with `!`) are not supported — use
-    /// separate narrow globs instead of exclusions.
+    /// Negation patterns are supported: prefix a pattern with `!` to exclude
+    /// a subpath (e.g., lanes = ["src/**", "!src/vendored/**"]).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub lanes: Vec<String>,
 }
@@ -445,10 +451,31 @@ impl HubConfig {
         let path = project_root.join(crate::paths::CONFIG_FILE);
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("reading {}", path.display()))?;
-        let cfg: HubConfig =
+        let mut cfg: HubConfig =
             toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        if let Some(preset_name) = cfg.preset.take() {
+            cfg.expand_preset(&preset_name)?;
+        }
         cfg.validate()?;
         Ok(cfg)
+    }
+
+    fn expand_preset(&mut self, name: &str) -> Result<()> {
+        let (preset_agents, preset_hooks) = presets::get_preset(name)?;
+        // Inline [[agent]] blocks override preset agents by name
+        let mut merged = preset_agents;
+        for inline in &self.agents {
+            if let Some(pos) = merged.iter().position(|a| a.name == inline.name) {
+                merged[pos] = inline.clone();
+            } else {
+                merged.push(inline.clone());
+            }
+        }
+        self.agents = merged;
+        if self.hooks.is_none() {
+            self.hooks = preset_hooks;
+        }
+        Ok(())
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -520,6 +547,155 @@ impl HubConfig {
             None => project_root.to_path_buf(),
         }
     }
+}
+
+/// Preset fleet definitions expanded by `HubConfig::load()`.
+pub mod presets {
+    use super::{AgentConfig, AgentProvider, HooksConfig};
+    use anyhow::{bail, Result};
+
+    pub const VALID: &[&str] = &[
+        "solo+watchdog",
+        "builder+reviewer+tester",
+        "cheap-grunt+claude-lead",
+    ];
+
+    /// Return (agents, optional_hooks) for a named preset.
+    pub fn get_preset(name: &str) -> Result<(Vec<AgentConfig>, Option<HooksConfig>)> {
+        match name {
+            "solo+watchdog" => Ok((solo_watchdog(), Some(solo_watchdog_hooks()))),
+            "builder+reviewer+tester" => Ok((builder_reviewer_tester(), None)),
+            "cheap-grunt+claude-lead" => Ok((cheap_grunt_claude_lead(), None)),
+            _ => bail!(
+                "unknown preset {name:?} — valid presets: {}",
+                VALID.join(", ")
+            ),
+        }
+    }
+
+    fn solo_watchdog() -> Vec<AgentConfig> {
+        vec![AgentConfig {
+            name: "builder".to_string(),
+            role: "Implements features and fixes.".to_string(),
+            allowed_tools: Some(vec![
+                "Bash".to_string(),
+                "Read".to_string(),
+                "Edit".to_string(),
+                "Write".to_string(),
+                "Glob".to_string(),
+                "Grep".to_string(),
+            ]),
+            ..AgentConfig::default()
+        }]
+    }
+
+    fn solo_watchdog_hooks() -> HooksConfig {
+        HooksConfig {
+            post_close: Some("pytest -x".to_string()),
+            ..HooksConfig::default()
+        }
+    }
+
+    fn builder_reviewer_tester() -> Vec<AgentConfig> {
+        vec![
+            AgentConfig {
+                name: "builder".to_string(),
+                role: "Implements features and fixes. Owns src/. Coordinates with reviewer before large refactors.".to_string(),
+                lanes: vec!["src/**".to_string()],
+                default_review_required: true,
+                allowed_tools: Some(vec![
+                    "Bash".to_string(),
+                    "Read".to_string(),
+                    "Edit".to_string(),
+                    "Write".to_string(),
+                    "Glob".to_string(),
+                    "Grep".to_string(),
+                ]),
+                ..AgentConfig::default()
+            },
+            AgentConfig {
+                name: "reviewer".to_string(),
+                role: "Reviews changes made by other agents, runs tests, and files follow-up tasks for problems found.".to_string(),
+                allowed_tools: Some(vec![
+                    "Bash".to_string(),
+                    "Read".to_string(),
+                    "Glob".to_string(),
+                    "Grep".to_string(),
+                ]),
+                ..AgentConfig::default()
+            },
+            AgentConfig {
+                name: "tester".to_string(),
+                role: "Writes and runs tests. Owns tests/.".to_string(),
+                lanes: vec!["tests/**".to_string()],
+                allowed_tools: Some(vec![
+                    "Bash".to_string(),
+                    "Read".to_string(),
+                    "Edit".to_string(),
+                    "Write".to_string(),
+                    "Glob".to_string(),
+                    "Grep".to_string(),
+                ]),
+                ..AgentConfig::default()
+            },
+        ]
+    }
+
+    fn cheap_grunt_claude_lead() -> Vec<AgentConfig> {
+        vec![
+            AgentConfig {
+                name: "builder".to_string(),
+                role: "Implements features and fixes. Cost-efficient workhorse.".to_string(),
+                provider: Some(AgentProvider::Deepseek),
+                lanes: vec!["src/**".to_string()],
+                default_review_required: true,
+                allowed_tools: Some(vec![
+                    "Bash".to_string(),
+                    "Read".to_string(),
+                    "Edit".to_string(),
+                    "Write".to_string(),
+                    "Glob".to_string(),
+                    "Grep".to_string(),
+                ]),
+                ..AgentConfig::default()
+            },
+            AgentConfig {
+                name: "reviewer".to_string(),
+                role: "Reviews changes, runs tests, and files follow-up tasks.".to_string(),
+                allowed_tools: Some(vec![
+                    "Bash".to_string(),
+                    "Read".to_string(),
+                    "Glob".to_string(),
+                    "Grep".to_string(),
+                ]),
+                ..AgentConfig::default()
+            },
+        ]
+    }
+}
+
+/// Write a minimal two-line agentcom.toml using a named preset.
+pub fn write_preset_config(project_root: &Path, force: bool, preset: &str) -> Result<PathBuf> {
+    // Validate the preset name before writing anything.
+    presets::get_preset(preset)?;
+    let path = project_root.join(crate::paths::CONFIG_FILE);
+    if path.exists() && !force {
+        bail!(
+            "{} already exists (use --force to overwrite)",
+            path.display()
+        );
+    }
+    let project_name = project_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("my-project");
+    let content = format!(
+        "# agentcom.toml — {project_name}\n\
+         project_name = \"{project_name}\"\n\
+         preset = \"{preset}\"\n"
+    );
+    write_config_file(&path, &content)?;
+    Ok(path)
 }
 
 /// Fleet archetype for `agentcom init --template`.

@@ -31,9 +31,9 @@ pub enum Command {
         /// Overwrite an existing agentcom.toml
         #[arg(long)]
         force: bool,
-        /// Fleet archetype: solo, team (default), or mixed
-        #[arg(long, default_value = "team")]
-        template: crate::config::ConfigTemplate,
+        /// Fleet preset: solo+watchdog (default), builder+reviewer+tester, or cheap-grunt+claude-lead
+        #[arg(long, alias = "template", default_value = "solo+watchdog")]
+        preset: String,
         /// Analyse the current project and suggest a tailored fleet before writing the config
         #[arg(long)]
         analyze: bool,

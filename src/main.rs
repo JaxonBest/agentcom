@@ -18,7 +18,7 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let _ = cli::JSON_MODE.set(cli.json);
     match cli.command {
-        Command::Init { force, template, analyze } => {
+        Command::Init { force, preset, analyze } => {
             let cwd = std::env::current_dir()?;
             if analyze {
                 let summary = config::scan_project(&cwd);
@@ -43,12 +43,12 @@ async fn main() -> Result<()> {
                     config::write_config_file(&dest, &toml_str)?;
                     println!("wrote {} (AI-generated)", dest.display());
                 } else {
-                    eprintln!("warning: AI output was not valid TOML — falling back to template");
-                    let path = config::write_example_template(&cwd, force, template)?;
+                    eprintln!("warning: AI output was not valid TOML — falling back to preset");
+                    let path = config::write_preset_config(&cwd, force, &preset)?;
                     println!("wrote {}", path.display());
                 }
             } else {
-                let path = config::write_example_template(&cwd, force, template)?;
+                let path = config::write_preset_config(&cwd, force, &preset)?;
                 println!("wrote {}", path.display());
             }
             println!("edit your agent fleet, then run: agentcom up");
