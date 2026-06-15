@@ -2262,6 +2262,12 @@ fn run_task_trace(id: i64) -> Result<()> {
     if !task.depends_on.is_empty() {
         println!("Deps:      #{}", task.depends_on.iter().map(|d| d.to_string()).collect::<Vec<_>>().join(", #"));
     }
+    if let Some(ref reason) = task.blocked_reason {
+        println!("Blocked:   {reason}");
+    }
+    if task.hook_attempts > 0 {
+        println!("HookAttempts: {}", task.hook_attempts);
+    }
 
     println!();
     println!("Timeline:");
