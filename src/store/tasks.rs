@@ -1263,7 +1263,7 @@ mod tests {
     fn export_all_and_bulk_import_roundtrip() {
         let src = Store::open_in_memory().unwrap();
         let a = src.task_add("alpha", "first task", 1, &[], "human").unwrap();
-        let b = src.task_add("beta", "second task", 0, &[a], "human").unwrap();
+        let _b = src.task_add("beta", "second task", 0, &[a], "human").unwrap();
         src.task_tag(a, "bug").unwrap();
         src.task_claim(a, "alice").unwrap();
         src.task_done(a, "alice", Some("done")).unwrap();
