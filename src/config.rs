@@ -202,6 +202,12 @@ pub struct AgentConfig {
     /// instead of `done`. The hub auto-files a paired review task. Default: false.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub default_review_required: bool,
+    /// Gitignore-style glob patterns that limit which files this agent may claim.
+    /// A `FilesClaim` is hard-rejected at the hub if any claimed path falls outside
+    /// these globs. Empty list means no enforcement (default).
+    /// Example: lanes = ["src/builder/**", "!src/builder/vendored/**"]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lanes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
@@ -260,6 +266,7 @@ impl Default for AgentConfig {
             idle_goal: None,
             max_claimed_tasks: None,
             default_review_required: false,
+            lanes: vec![],
         }
     }
 }
@@ -417,6 +424,9 @@ fn default_review_stale_secs() -> u64 {
 pub struct HooksConfig {
     /// Shell command to run in the project root after a task is closed.
     /// Non-zero exit re-blocks the task with the hook's stderr as the reason.
+    /// Env vars passed: AGENTCOM_TASK_ID, AGENTCOM_TASK_TITLE (user-supplied task
+    /// title — always quote it in shell expressions to prevent injection),
+    /// and AGENTCOM_AGENT.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub post_close: Option<String>,
     /// Timeout in seconds for the post_close hook. Default: 120.
