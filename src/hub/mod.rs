@@ -360,6 +360,15 @@ impl Hub {
         self.audit.write("hub_start", "hub", serde_json::json!({"pid": std::process::id()}));
         self.fire_webhook(webhook::Payload::new(webhook::Event::HubStart));
 
+        for rt in self.agents.values() {
+            if rt.cfg.lanes.is_empty() {
+                eprintln!(
+                    "warning: agent {:?} has no lanes declared — consider adding `lanes` to restrict file claims",
+                    rt.cfg.name
+                );
+            }
+        }
+
         // agentcom.toml may contain webhook_secret; warn if others can read it.
         #[cfg(unix)]
         {
@@ -1458,6 +1467,22 @@ impl Hub {
             Request::FilesClaim { paths, .. } => {
                 if let Err(e) = crate::store::Store::validate_claim_paths(&paths) {
                     return Response::err(e.to_string());
+                }
+                if let Some(rt) = self.agents.get(identity) {
+                    if let Some(ref lane_set) = rt.lane_set {
+                        let violations: Vec<&str> = paths
+                            .iter()
+                            .filter(|p| !lane_set.is_match(p.as_str()))
+                            .map(|p| p.as_str())
+                            .collect();
+                        if !violations.is_empty() {
+                            return Response::err(format!(
+                                "lane violation: paths {:?} are outside agent's declared lanes {:?}. \
+                                 All-or-nothing rejection — no files claimed.",
+                                violations, rt.cfg.lanes
+                            ));
+                        }
+                    }
                 }
                 match self.store.files_claim(identity, &paths) {
                 Ok(()) => {

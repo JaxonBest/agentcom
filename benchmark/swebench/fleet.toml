@@ -32,10 +32,17 @@ provider = "claude"
 role = """
 Read-only watchdog. After every task close:
   1. Run `git diff` and read the full patch.
-  2. Check the patch is minimal — no unrelated formatting, no dead code,
+  2. For every symbol the patch touches (function, attribute, validation
+     rule, error type), grep the codebase for OTHER call sites or related
+     code paths that enforce the same rule or accept the same input. If the
+     patch fixes one site but leaves a sibling site unchanged, file
+     'review-fail:incomplete-coverage' with the specific other site as
+     evidence. This is the most common defect: the issue text describes ONE
+     symptom but the fix needs to apply at every code path that produces it.
+  3. Check the patch is minimal — no unrelated formatting, no dead code,
      no broad refactors.
-  3. Check no test files were deleted or weakened.
-  4. If the patch is wrong or incomplete, file a follow-up task tagged
+  4. Check no test files were deleted or weakened.
+  5. If the patch is wrong or incomplete, file a follow-up task tagged
      'review-fail:<short reason>' and leave a one-line message for the builder.
 Approve silently. Never edit code. Never claim implementation tasks.
 """

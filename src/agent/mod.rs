@@ -82,10 +82,42 @@ pub struct AgentRuntime {
     /// Set in handle_result to signal a deliberate session reset (not a crash).
     /// handle_exit checks this flag to respawn fresh instead of treating it as a crash.
     pub planned_restart: bool,
+    /// Compiled lane glob set from AgentConfig.lanes. None when lanes is empty
+    /// (no enforcement). Used by hub to reject FilesClaim outside declared lanes.
+    pub lane_set: Option<globset::GlobSet>,
 }
 
 impl AgentRuntime {
     pub fn new(cfg: AgentConfig, out_buf: SharedRingBuf) -> Self {
+        // Compile lane globs if any are declared.
+        let lane_set = if cfg.lanes.is_empty() {
+            None
+        } else {
+            let mut builder = globset::GlobSetBuilder::new();
+            for pat in &cfg.lanes {
+                // gitignore-style: each pattern is relative to project root.
+                match globset::Glob::new(pat) {
+                    Ok(g) => { builder.add(g); }
+                    Err(e) => {
+                        tracing::warn!(
+                            agent = %cfg.name,
+                            pattern = %pat,
+                            "invalid lane glob pattern: {e}; skipping"
+                        );
+                    }
+                }
+            }
+            match builder.build() {
+                Ok(gs) => Some(gs),
+                Err(e) => {
+                    tracing::warn!(
+                        agent = %cfg.name,
+                        "failed to build lane glob set: {e}; lane enforcement disabled"
+                    );
+                    None
+                }
+            }
+        };
         Self {
             cfg,
             state: AgentState::Stopped,
@@ -109,6 +141,7 @@ impl AgentRuntime {
             first_crash_at: None,
             log_level: None,
             planned_restart: false,
+            lane_set,
         }
     }
 

@@ -900,6 +900,16 @@ Each agent is defined by an `[[agent]]` table. You can have as many as `max_agen
 | `max_rpm` | integer | *(none)* | Max API requests per minute. Hub skips feeding a new prompt if the agent exceeds this rate in the last 60 seconds |
 | `env` | table | `{}` | Extra environment variables injected into this agent's process. Useful for per-agent API keys or tool flags. Example: `env = { ANTHROPIC_API_KEY = "sk-...", DEBUG = "1" }` |
 
+### `[hooks]` fields
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `post_close` | string | *(none)* | Shell command to run in the project root after a task transitions to Done. Non-zero exit re-blocks the task with the hook's stderr as the reason. Example: `post_close = "pytest -x --timeout=60"` |
+| `post_close_timeout_secs` | integer | `120` | Timeout in seconds for the post_close hook before it is killed |
+| `post_close_only_for_tags` | string[] | `[]` | Only run the hook when the closing agent has one of these capability tags. Empty means run for all agents |
+
+> **Security:** Never interpolate `$AGENTCOM_TASK_TITLE` or other task env vars unquoted into shell commands within hook scripts.
+
 ---
 
 ## Provider Setup
@@ -1230,6 +1240,20 @@ agentcom up
 **How coordination works:** Every agent has `AGENTCOM_PORT`, `AGENTCOM_TOKEN`, and `AGENTCOM_AGENT` injected into its environment. When an agent runs `agentcom task claim 5`, that `agentcom` invocation connects back to the hub over IPC, identifies itself with the token, and the hub enforces the claim atomically. File claims work the same way — the hub rejects a claim if another agent already holds any of the requested paths.
 
 **Data lives outside the project:** The SQLite database and WAL files are stored under `%LOCALAPPDATA%\agentcom\data\<project-id>\` on Windows (or `~/.local/share/agentcom/` on Linux/macOS). This keeps state away from git and cloud sync. Your project only needs `agentcom.toml`.
+
+### Security model
+
+agentcom assumes a **trusted local fleet** — all agent processes run under the same operator's control on a single machine (or a shared LAN with a trusted network). Authentication is token-based but not agent-specific:
+
+- Every agent is issued the same `AGENTCOM_TOKEN` at startup.
+- IPC requests include an `identity` field that the agent sets to its own name (e.g. `"builder"`, `"security"`).
+- The hub trusts whatever identity the agent declares — it does **not** verify that the caller *is* that agent.
+
+**Consequence:** any agent that knows `AGENTCOM_TOKEN` can impersonate any other agent by sending IPC requests with a forged `identity`. This means, for example, a compromised or misbehaving agent could claim files as `"builder"` or file tasks as `"security"`.
+
+**Acceptability:** this is by design for the target use case (single-operator laptop/server). The primary threat model is accidental misconfiguration, not a targeted adversary. Per-agent credentials and identity verification would add complexity (per-agent tokens, asymmetric signatures on IPC messages) without meaningful benefit for a local fleet.
+
+**If you need multi-tenant isolation** (e.g. untrusted agents, agents running on separate hosts, or a CI pipeline where agents come from different contexts), agentcom's authentication layer would need a redesign before it is safe to use in that environment.
 
 ---
 

@@ -19,6 +19,17 @@ impl Hub {
             return;
         }
 
+        // Circuit breaker: post-close hook failures have exceeded the threshold.
+        // Pause this agent until a human runs `agentcom resume` after fixing the hook.
+        if self.hook_dispatch_paused {
+            let rt = self.agents.get_mut(name).expect("agent exists");
+            rt.state = AgentState::Paused;
+            rt.paused_at = Some(Instant::now());
+            rt.state_detail = Some("hook circuit breaker — run `agentcom resume` after fixing the hook".into());
+            self.emit_state(name);
+            return;
+        }
+
         // Global budget ceiling: pause the entire fleet when the total spend
         // across all agents hits max_total_budget_usd.
         if let Some(ceiling) = self.cfg.max_total_budget_usd {

@@ -38,7 +38,8 @@ pub fn discover() -> Result<(u16, String, String)> {
     )?;
     let hub_path = crate::paths::hub_json_path(&root)?;
     let info = read_hub_json(&hub_path)?;
-    Ok((info.port, info.token, "human".to_string()))
+    let identity = std::env::var("AGENTCOM_AGENT").unwrap_or_else(|_| "human".to_string());
+    Ok((info.port, info.token, identity))
 }
 
 pub fn read_hub_json(path: &Path) -> Result<HubInfo> {

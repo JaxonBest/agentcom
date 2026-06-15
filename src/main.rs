@@ -462,6 +462,73 @@ fn run_check() -> Result<()> {
         }
     }
 
+    // Lane glob validation: for each agent with non-empty lanes, walk the repo
+    // and warn if no real file matches any lane glob (catches typos).
+    for a in &cfg.agents {
+        if a.lanes.is_empty() {
+            continue;
+        }
+        let Some(globset) = (|| -> Option<globset::GlobSet> {
+            let mut b = globset::GlobSetBuilder::new();
+            for pat in &a.lanes {
+                b.add(globset::Glob::new(pat).ok()?);
+            }
+            b.build().ok()
+        })() else {
+            continue;
+        };
+        let mut matched_any = false;
+        if let Ok(entries) = walk_project_root(&project_root) {
+            for entry in &entries {
+                if globset.is_match(entry) {
+                    matched_any = true;
+                    break;
+                }
+            }
+        }
+        if !matched_any {
+            eprintln!(
+                "  ⚠  agent {:?} lanes = {:?} — no files in project match any glob pattern (possible typo?)",
+                a.name, a.lanes
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Walk the project root (excluding `.git`/`target`/`.agentcom`) and return
+/// relative paths suitable for lane glob matching.
+fn walk_project_root(root: &std::path::Path) -> std::io::Result<Vec<String>> {
+    let mut paths = Vec::new();
+    let skip: std::collections::HashSet<&str> =
+        [".git", "target", ".agentcom", "node_modules"].into();
+    walk_dir(root, root, &skip, &mut paths)?;
+    Ok(paths)
+}
+
+fn walk_dir(
+    base: &std::path::Path,
+    dir: &std::path::Path,
+    skip: &std::collections::HashSet<&str>,
+    out: &mut Vec<String>,
+) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let ft = entry.file_type()?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy().to_string();
+        if ft.is_dir() {
+            if skip.contains(name_str.as_str()) {
+                continue;
+            }
+            walk_dir(base, &entry.path(), skip, out)?;
+        } else if ft.is_file() {
+            if let Ok(rel) = entry.path().strip_prefix(base) {
+                out.push(rel.to_string_lossy().to_string());
+            }
+        }
+    }
     Ok(())
 }
 
