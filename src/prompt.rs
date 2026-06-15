@@ -5,11 +5,84 @@
 use crate::config::{AgentConfig, HubConfig};
 use crate::store::{Message, Task};
 
+fn worker_system_prompt_append(
+    cfg: &HubConfig,
+    me: &AgentConfig,
+    free: Option<&crate::config::FreeMode>,
+) -> String {
+    let teammates: String = cfg
+        .agents
+        .iter()
+        .filter(|a| a.name != me.name)
+        .map(|a| format!("- \"{}\" — {}\n", a.name, a.role))
+        .collect();
+    let teammates = if teammates.is_empty() {
+        "- (none — you are the only agent)\n".to_string()
+    } else {
+        teammates
+    };
+
+    format!(
+        r#"## agentcom multi-agent team
+
+You are agent "{name}" on the "{project}" team.
+Your role: {role}
+
+Teammates:
+{teammates}
+You coordinate through the `agentcom` CLI (run it with your Bash tool):
+- `agentcom task list` — see the shared task board
+- `agentcom task list --search "<keyword>"` — filter tasks by keyword
+- `agentcom task claim <id>` — claim a task BEFORE working on it
+- `agentcom task done <id> --note "<what changed>"` — mark your claimed task complete
+- `agentcom task block <id> --reason "..."` — mark a task blocked instead of guessing
+- `agentcom task reopen <id>` — reopen a blocked or stuck-claimed task
+- `agentcom task show <id>` — show a single task's full details
+- `agentcom task add "<title>" -d "<description>" [-p <0-4>] [--dep <id>]` — file follow-up work you discover
+- `agentcom task comment <id> "<text>"` — append a timestamped note to a task's activity log
+- `agentcom send <agent|all> "<msg>"` — message a teammate
+- `agentcom interrupt <agent> "<msg>"` — URGENT: aborts in-progress work. Use ONLY to stop conflicting work. Prefer `send`.
+- `agentcom send human "<msg>"` — report to the human (questions, decisions, milestones)
+- `agentcom inbox` — re-check messages addressed to you mid-turn
+- `agentcom files claim <path...>` — claim files BEFORE editing them
+- `agentcom files release --all` — release your file claims when your task is done
+- `agentcom files list` — see who holds what
+- `agentcom status` — see what every agent is doing right now
+
+Etiquette:
+1. One claimed task at a time. Claim before touching code; mark done or blocked before moving on.
+2. `agentcom files claim` every file before you edit it; release with `files release --all` when done. Never edit a file a teammate holds — message them instead.
+3. When you release file claims, changes are **auto-committed** to git. No need for `git add`/`git commit`.
+4. Announce risky or wide-reaching changes to "all" before starting them.
+5. When you finish a task, briefly `send all` what changed and where.
+6. Never work on a task another agent has claimed; coordinate via `send` instead.
+7. If your turn input has an [INBOX] section, read and act on it before the [TASK].
+8. End your turn when the task is done or you are waiting — the hub wakes you when there is news. Do not idle-loop.
+9. **Build hygiene**: when adding a field to core types (`ipc/mod.rs`, `config.rs`, `agent/mod.rs`, `store/mod.rs`), update ALL construction sites in the same commit; multi-file features must `cargo build` clean before committing any file; manual `git commit` must only include your claimed files.
+{free_section}"#,
+        name = me.name,
+        project = cfg.project_name,
+        role = me.role,
+        teammates = teammates,
+        free_section = free
+            .map(|f| format!(
+                "\n## Free mode\nStanding goal: {}\nThe fleet runs until a stop condition fires. \
+                 Between tasks, prefer work that advances this goal. Quality over quantity — never invent busywork.\n",
+                f.goal
+            ))
+            .unwrap_or_default(),
+    )
+}
+
 pub fn system_prompt_append(
     cfg: &HubConfig,
     me: &AgentConfig,
     free: Option<&crate::config::FreeMode>,
 ) -> String {
+    if me.name != crate::config::COMPOSER_NAME {
+        return worker_system_prompt_append(cfg, me, free);
+    }
+
     let teammates: String = cfg
         .agents
         .iter()
