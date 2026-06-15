@@ -246,6 +246,7 @@ pub struct AgentStatusRow {
 
 impl Request {
     /// Construct a TaskAdd request with all optional fields defaulted.
+    #[allow(dead_code)]
     pub fn task_add(
         title: impl Into<String>,
         description: impl Into<String>,
@@ -264,11 +265,13 @@ impl Request {
     }
 
     /// Construct a TaskList request with all optional filters defaulted to None.
+    #[allow(dead_code)]
     pub fn task_list(status: Option<String>, search: Option<String>, tag: Option<String>) -> Self {
         Request::TaskList { status, search, tag }
     }
 
     /// Construct a TaskEdit request (PATCH — None fields are unchanged).
+    #[allow(dead_code)]
     pub fn task_edit(
         id: i64,
         title: Option<String>,

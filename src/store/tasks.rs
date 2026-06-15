@@ -7,6 +7,7 @@ use rusqlite::{params, Connection, Row};
 
 /// Parse a recurrence interval string into seconds.
 /// Supported: Nh (hours), Nd (days), Nw (weeks). Returns None on parse failure.
+#[allow(dead_code)]
 pub(super) fn parse_recur_secs(recur: &str) -> Option<i64> {
     let recur = recur.trim();
     if recur.is_empty() {
@@ -693,6 +694,7 @@ impl Store {
     }
 
     /// Set or clear the per-task timeout (minutes claimed before auto-block).
+    #[allow(dead_code)]
     pub fn task_set_timeout(&self, id: i64, timeout_mins: Option<u64>) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         let updated = conn.execute(
@@ -769,6 +771,7 @@ impl Store {
     }
 
     /// Return the tag list for a task.
+    #[allow(dead_code)]
     pub fn task_tags(&self, id: i64) -> Result<Vec<String>> {
         let conn = self.conn.lock().unwrap();
         let raw: Option<String> = conn
@@ -892,6 +895,7 @@ impl Store {
     /// Bump priority by 1 (toward 0 = highest) for open tasks that have been
     /// sitting untouched for longer than `threshold_secs`. Stops at priority 0.
     /// Returns the IDs of every task that was escalated.
+    #[allow(dead_code)]
     pub fn task_set_recur(&self, id: i64, recur: Option<&str>) -> Result<()> {
         let conn = self.conn.lock().unwrap();
         conn.execute(
@@ -904,6 +908,7 @@ impl Store {
     /// When a recurring task is completed, create a fresh open copy with the same
     /// title/description/priority and set its `next_run_at` to `now + interval`.
     /// Returns `None` if the task has no recur interval, else the new task's id.
+    #[allow(dead_code)]
     pub fn create_next_recurrence(&self, task: &Task) -> Result<Option<i64>> {
         let Some(ref recur) = task.recur else {
             return Ok(None);

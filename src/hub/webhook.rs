@@ -25,9 +25,11 @@ pub enum Event {
     TaskDone,
     TaskBlocked,
     /// Agent claimed a task (started working on it).
+    #[allow(dead_code)]
     TaskClaim,
     AgentCrash,
     /// Agent spawned or restarted.
+    #[allow(dead_code)]
     AgentSpawn,
     BudgetWarning,
     /// Agent claimed one or more files.
