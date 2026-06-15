@@ -910,7 +910,11 @@ pub async fn run_client(command: Command) -> Result<()> {
                         Response::Err { message } => bail!("{message}"),
                         _ => bail!("task #{id} not found"),
                     };
+                    let hook_attempts = task.hook_attempts;
                     print_tasks(&[task]);
+                    if hook_attempts > 0 {
+                        println!("HookAttempts: {hook_attempts}");
+                    }
                     let comments_resp = client.request(&Request::TaskComments { id }).await?;
                     if let Response::Comments { comments } = comments_resp {
                         if !comments.is_empty() {
