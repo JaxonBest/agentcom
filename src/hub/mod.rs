@@ -474,7 +474,7 @@ impl Hub {
             self.hook_dispatch_paused = true;
             let msg = format!(
                 "WARN: {} consecutive post-close hook failures — auto-dispatch paused. \
-                 Fix the hook and run `agentcom resume` to continue.",
+                 Fix the hook and run `agentcom resume all` to continue.",
                 self.consecutive_hook_failures
             );
             self.log(msg.clone());
@@ -1548,6 +1548,7 @@ impl Hub {
             Request::Resume { agent, .. } => {
                 if agent == "all" {
                     self.hook_dispatch_paused = false;
+                    self.consecutive_hook_failures = 0;
                     let names: Vec<String> = self.agents.keys().cloned().collect();
                     for name in &names {
                         self.resume_agent(name);
