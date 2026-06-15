@@ -1303,8 +1303,12 @@ pub fn print_tasks(tasks: &[crate::store::Task]) {
             t.title
         );
         if !t.description.is_empty() {
-            for line in t.description.lines() {
-                println!("      {line}");
+            let first: String = t.description.lines().next().unwrap_or("").chars().take(80).collect();
+            let has_more = first.len() < t.description.trim_end().len();
+            if has_more {
+                println!("      {first}…");
+            } else {
+                println!("      {first}");
             }
         }
     }
