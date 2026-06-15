@@ -464,33 +464,60 @@ fn run_check() -> Result<()> {
 
     // Lane glob validation: for each agent with non-empty lanes, walk the repo
     // and warn if no real file matches any lane glob (catches typos).
+    //
+    // !-prefixed patterns are negations — GlobSet treats them as literal globs
+    // matching paths that start with '!', which never matches real files.  So
+    // we split include vs exclude patterns and validate each group separately.
     for a in &cfg.agents {
         if a.lanes.is_empty() {
             continue;
         }
-        let Some(globset) = (|| -> Option<globset::GlobSet> {
+
+        let include_pats: Vec<&str> = a.lanes.iter()
+            .filter(|p| !p.starts_with('!'))
+            .map(String::as_str)
+            .collect();
+        let exclude_pats: Vec<&str> = a.lanes.iter()
+            .filter(|p| p.starts_with('!'))
+            .map(|p| &p[1..])
+            .collect();
+
+        // Build a helper that turns a slice of glob strings into a GlobSet.
+        let build_globset = |pats: &[&str]| -> Option<globset::GlobSet> {
             let mut b = globset::GlobSetBuilder::new();
-            for pat in &a.lanes {
+            for pat in pats {
                 b.add(globset::Glob::new(pat).ok()?);
             }
             b.build().ok()
-        })() else {
-            continue;
         };
-        let mut matched_any = false;
-        if let Ok(entries) = walk_project_root(&project_root) {
-            for entry in &entries {
-                if globset.is_match(entry) {
-                    matched_any = true;
-                    break;
+
+        let entries = walk_project_root(&project_root).unwrap_or_default();
+
+        // Check include patterns: if there are any, at least one must match a real file.
+        if !include_pats.is_empty() {
+            if let Some(gs) = build_globset(&include_pats) {
+                let matched = entries.iter().any(|e| gs.is_match(e));
+                if !matched {
+                    eprintln!(
+                        "  ⚠  agent {:?} lanes = {:?} — no files in project match any glob pattern (possible typo?)",
+                        a.name, a.lanes
+                    );
                 }
             }
         }
-        if !matched_any {
-            eprintln!(
-                "  ⚠  agent {:?} lanes = {:?} — no files in project match any glob pattern (possible typo?)",
-                a.name, a.lanes
-            );
+
+        // Check exclude patterns: each one (with '!' stripped) should match at least
+        // one file, otherwise the exclusion is probably a typo.
+        for pat in &exclude_pats {
+            if let Some(gs) = build_globset(&[pat]) {
+                let matched = entries.iter().any(|e| gs.is_match(e));
+                if !matched {
+                    eprintln!(
+                        "  ⚠  agent {:?} exclude pattern {:?} matches no files in project (possible typo?)",
+                        a.name, pat
+                    );
+                }
+            }
         }
     }
 

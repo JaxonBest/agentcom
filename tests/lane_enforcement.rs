@@ -297,3 +297,76 @@ fn lane_negation_pattern_excludes_subpath() {
 
     drop(hub);
 }
+
+#[test]
+fn agentcom_check_no_false_warn_for_pure_negation_lane() {
+    // Regression: lanes = ["!src/vendored/**"] only caused a false "no files match"
+    // warning because the old code passed the literal "!src/vendored/**" to GlobSet,
+    // which never matches any real path (no file starts with '!'). After the fix,
+    // !-prefixed patterns are excluded from the include GlobSet so no false warning fires.
+    let project = PathBuf::from(std::env!("CARGO_TARGET_TMPDIR"));
+    let project = project.join("lane_check_pure_negation");
+    let _ = std::fs::remove_dir_all(&project);
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::create_dir_all(project.join("src/vendored")).unwrap();
+    std::fs::write(project.join("src/main.rs"), "fn main() {}").unwrap();
+    std::fs::write(project.join("src/vendored/lib.rs"), "// vendored").unwrap();
+
+    write_config(
+        &project,
+        "\n\
+         [[agent]]\n\
+         name = \"builder\"\n\
+         role = \"builder\"\n\
+         provider = \"claude\"\n\
+         lanes = [\"!src/vendored/**\"]\n",
+    );
+
+    let (ok, out) = run_check(&project);
+    if !ok {
+        eprintln!("agentcom check failed. Full output:\n{out}");
+    }
+    assert!(ok, "agentcom check should exit 0; output:\n{out}");
+    // With no include patterns, no false "no files match" warning should fire.
+    assert!(
+        !out.contains("no files in project match any glob pattern"),
+        "should NOT produce a false-positive warning for negation-only lanes; got:\n{out}"
+    );
+}
+
+#[test]
+fn agentcom_check_warns_on_typo_exclude_pattern() {
+    // After the fix, agentcom check also validates that !-prefixed exclude patterns
+    // (with ! stripped) actually match something in the project, catching exclude typos.
+    // lanes = ["src/**", "!src/buidler/**"] — the typo in the exclude path should warn.
+    let project = PathBuf::from(std::env!("CARGO_TARGET_TMPDIR"));
+    let project = project.join("lane_check_exclude_typo");
+    let _ = std::fs::remove_dir_all(&project);
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(project.join("src")).unwrap();
+    std::fs::write(project.join("src/main.rs"), "fn main() {}").unwrap();
+    std::fs::write(project.join("src/lib.rs"), "pub fn add() {}").unwrap();
+
+    write_config(
+        &project,
+        "\n\
+         [[agent]]\n\
+         name = \"builder\"\n\
+         role = \"builder\"\n\
+         provider = \"claude\"\n\
+         lanes = [\"src/**\", \"!src/buidler/**\"]\n",
+    );
+
+    let (ok, out) = run_check(&project);
+    if !ok {
+        eprintln!("agentcom check failed. Full output:\n{out}");
+    }
+    assert!(ok, "agentcom check should exit 0 even with warnings; output:\n{out}");
+    // Exclude pattern "src/buidler/**" (typo of "src/builder/**") matches no files.
+    // The fixed code adds a second pass for !-prefixed patterns using "possible typo".
+    assert!(
+        out.contains("possible typo"),
+        "expected a 'possible typo' warning about the unmatched exclude pattern; got:\n{out}"
+    );
+}
