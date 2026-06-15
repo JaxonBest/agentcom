@@ -1742,4 +1742,145 @@ capabilities = ["rust", "Invalid!"]
             "expected capability error, got: {err}"
         );
     }
+
+    // ── preset tests ────────────────────────────────────────────────────────
+
+    #[test]
+    fn preset_solo_watchdog_has_one_agent() {
+        let (agents, hooks) = presets::get_preset("solo+watchdog").unwrap();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].name, "builder");
+        assert!(hooks.is_some(), "solo+watchdog should supply hooks");
+    }
+
+    #[test]
+    fn preset_builder_reviewer_tester_has_three_agents() {
+        let (agents, hooks) = presets::get_preset("builder+reviewer+tester").unwrap();
+        assert_eq!(agents.len(), 3);
+        assert_eq!(agents[0].name, "builder");
+        assert_eq!(agents[1].name, "reviewer");
+        assert_eq!(agents[2].name, "tester");
+        assert!(hooks.is_none());
+    }
+
+    #[test]
+    fn preset_cheap_grunt_claude_lead_has_two_agents() {
+        let (agents, hooks) = presets::get_preset("cheap-grunt+claude-lead").unwrap();
+        assert_eq!(agents.len(), 2);
+        assert_eq!(agents[0].name, "builder");
+        assert_eq!(agents[0].provider, Some(AgentProvider::Deepseek));
+        assert_eq!(agents[1].name, "reviewer");
+        assert!(hooks.is_none());
+    }
+
+    #[test]
+    fn preset_unknown_name_rejected() {
+        let err = presets::get_preset("nonexistent-preset").unwrap_err();
+        assert!(
+            err.to_string().contains("unknown preset"),
+            "expected unknown-preset error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn expand_preset_inline_agent_overrides_by_name() {
+        // Start from a TOML that uses a preset but overrides the builder's role.
+        let text = r#"
+project_name = "test"
+preset = "builder+reviewer+tester"
+
+[[agent]]
+name = "builder"
+role = "custom builder role"
+"#;
+        let mut cfg: HubConfig = toml::from_str(text).unwrap();
+        // Simulate what HubConfig::load does: expand the preset.
+        let preset_name = cfg.preset.take().unwrap();
+        cfg.expand_preset(&preset_name).unwrap();
+
+        // Should have 3 agents (preset set), but builder's role is overridden.
+        assert_eq!(cfg.agents.len(), 3);
+        let builder = cfg.agents.iter().find(|a| a.name == "builder").unwrap();
+        assert_eq!(builder.role, "custom builder role");
+        // Other preset agents should still be present.
+        assert!(cfg.agents.iter().any(|a| a.name == "reviewer"));
+        assert!(cfg.agents.iter().any(|a| a.name == "tester"));
+    }
+
+    #[test]
+    fn expand_preset_inline_agent_appended_if_not_in_preset() {
+        let text = r#"
+project_name = "test"
+preset = "solo+watchdog"
+
+[[agent]]
+name = "extra-agent"
+role = "does extra things"
+"#;
+        let mut cfg: HubConfig = toml::from_str(text).unwrap();
+        let preset_name = cfg.preset.take().unwrap();
+        cfg.expand_preset(&preset_name).unwrap();
+
+        // preset provides 1 (builder), inline adds 1 more (extra-agent).
+        assert_eq!(cfg.agents.len(), 2);
+        assert!(cfg.agents.iter().any(|a| a.name == "builder"));
+        assert!(cfg.agents.iter().any(|a| a.name == "extra-agent"));
+    }
+
+    #[test]
+    fn expand_preset_does_not_overwrite_existing_hooks() {
+        let text = r#"
+project_name = "test"
+preset = "solo+watchdog"
+
+[hooks]
+post_close = "my-custom-hook"
+"#;
+        let mut cfg: HubConfig = toml::from_str(text).unwrap();
+        let preset_name = cfg.preset.take().unwrap();
+        cfg.expand_preset(&preset_name).unwrap();
+
+        // Inline hooks must win over preset-supplied hooks.
+        let hooks = cfg.hooks.as_ref().expect("hooks should be set");
+        assert_eq!(hooks.post_close.as_deref(), Some("my-custom-hook"));
+    }
+
+    #[test]
+    fn write_preset_config_rejects_existing_file_without_force() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(crate::paths::CONFIG_FILE);
+        std::fs::write(&config_path, "# existing").unwrap();
+
+        let err = write_preset_config(dir.path(), false, "solo+watchdog").unwrap_err();
+        assert!(
+            err.to_string().contains("already exists"),
+            "expected already-exists error, got: {err}"
+        );
+        // File content must remain unchanged.
+        assert_eq!(std::fs::read_to_string(&config_path).unwrap(), "# existing");
+    }
+
+    #[test]
+    fn write_preset_config_force_overwrites_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join(crate::paths::CONFIG_FILE);
+        std::fs::write(&config_path, "# existing").unwrap();
+
+        write_preset_config(dir.path(), true, "solo+watchdog").unwrap();
+
+        let content = std::fs::read_to_string(&config_path).unwrap();
+        assert!(content.contains("preset = \"solo+watchdog\""));
+    }
+
+    #[test]
+    fn write_preset_config_rejects_unknown_preset() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = write_preset_config(dir.path(), false, "bogus-preset").unwrap_err();
+        assert!(
+            err.to_string().contains("unknown preset"),
+            "expected unknown-preset error, got: {err}"
+        );
+        // Nothing should have been written.
+        assert!(!dir.path().join(crate::paths::CONFIG_FILE).exists());
+    }
 }
