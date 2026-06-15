@@ -1,0 +1,4 @@
+# Raise the default stack size on Windows MSVC to 8 MB.
+# The debug binary exceeds the MSVC default 1 MB stack; release is unaffected.
+[target.'cfg(target_os = "windows")']
+rustflags = ["-C", "link-arg=/STACK:8388608"]
