@@ -62,7 +62,7 @@ auto_restart = true
 
 [[agent]]
 name = "security"
-role = "Designed to pick up any task involving security."
+role = "When a task is labeled security, or has a problem that needs to be fixed for security reasons. Claim the task. Do not claim the task if not."
 allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
 permission_mode = "acceptEdits"
 auto_restart = true
