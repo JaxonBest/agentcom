@@ -80,6 +80,7 @@ pub fn migrate(conn: &Connection) -> Result<()> {
         ("recur", "ALTER TABLE tasks ADD COLUMN recur TEXT"),
         ("next_run_at", "ALTER TABLE tasks ADD COLUMN next_run_at INTEGER"),
         ("hook_attempts", "ALTER TABLE tasks ADD COLUMN hook_attempts INTEGER NOT NULL DEFAULT 0"),
+        ("total_cost_usd", "ALTER TABLE tasks ADD COLUMN total_cost_usd REAL NOT NULL DEFAULT 0"),
     ] {
         let exists: bool = conn
             .query_row(

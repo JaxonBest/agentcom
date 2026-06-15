@@ -288,6 +288,18 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Fleet dashboard: task throughput, cost efficiency, and wall-time percentiles
+    ///
+    /// Reads directly from the local DB — no hub required.
+    ///
+    /// Examples:
+    ///   agentcom dashboard
+    ///   agentcom dashboard --json
+    Dashboard {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Check staged diff for struct field changes and warn which other files may need updating
     ///
     /// Run before committing to catch cascade build breaks caused by partial field additions.
@@ -1042,6 +1054,10 @@ pub async fn run_client(command: Command) -> Result<()> {
         Command::Resume { agent } => {
             let resp = client.request(&Request::Resume { agent }).await?;
             print_simple(resp)
+        }
+        Command::Dashboard { .. } => {
+            // Handled in main (reads DB directly — no hub required).
+            unreachable!("handled in main")
         }
         Command::Init { .. }
         | Command::Up { .. }

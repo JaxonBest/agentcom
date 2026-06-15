@@ -154,6 +154,7 @@ async fn main() -> Result<()> {
         Command::Context { file, agent } => run_context_push(file, agent).await,
         Command::Preflight { verbose } => run_preflight(verbose),
         Command::Cost { agent, json } => run_cost(agent, json),
+        Command::Dashboard { json } => run_dashboard(json),
         Command::Health { json } => run_hub_health(json),
         Command::Workflow(cli::WorkflowCmd::List) => run_workflow_list(),
         Command::Workflow(cli::WorkflowCmd::Run { name, title, vars }) => {
@@ -3076,6 +3077,58 @@ async fn run_workflow_run(
     Ok(())
 }
 
+fn run_dashboard(json_out: bool) -> Result<()> {
+    let cwd = std::env::current_dir()?;
+    let project_root = paths::find_project_root(&cwd)
+        .context("no agentcom.toml found — run `agentcom init` first")?;
+    let db = paths::db_path(&project_root)?;
+    anyhow::ensure!(db.exists(), "no hub data found — run `agentcom up` first");
+    let store = store::Store::open(&db)?;
+    let stats = store.stats_compute()?;
+
+    // Read preset name from config for the Mode line.
+    let config_path = project_root.join("agentcom.toml");
+    let mode: Option<String> = std::fs::read_to_string(&config_path).ok().and_then(|raw| {
+        let val: toml::Value = toml::from_str(&raw).ok()?;
+        val.get("preset")?.as_str().map(str::to_string)
+    });
+
+    if json_out {
+        #[derive(serde::Serialize)]
+        struct Out {
+            resolved: u64,
+            total: u64,
+            resolved_pct: f64,
+            cost_median_usd: f64,
+            wall_p50_secs: i64,
+            wall_p95_secs: i64,
+            last10: String,
+            mode: Option<String>,
+        }
+        println!("{}", serde_json::to_string_pretty(&Out {
+            resolved: stats.resolved,
+            total: stats.total,
+            resolved_pct: stats.resolved_pct(),
+            cost_median_usd: stats.cost_median_usd,
+            wall_p50_secs: stats.wall_p50_secs,
+            wall_p95_secs: stats.wall_p95_secs,
+            last10: stats.last10.clone(),
+            mode: mode.clone(),
+        })?);
+    } else {
+        println!("Resolved:   {}/{} ({:.0}%)", stats.resolved, stats.total, stats.resolved_pct());
+        println!("$/resolved: ${:.4}   (median)", stats.cost_median_usd);
+        println!("Wall p50:   {}s      Wall p95:  {}s", stats.wall_p50_secs, stats.wall_p95_secs);
+        if !stats.last10.is_empty() {
+            println!("Last 10:    {}", stats.last10);
+        }
+        if let Some(ref m) = mode {
+            println!("Mode:       {m}");
+        }
+    }
+    Ok(())
+}
+
 fn run_task_cost(id: i64, json_out: bool) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let project_root = paths::find_project_root(&cwd)
@@ -3084,11 +3137,41 @@ fn run_task_cost(id: i64, json_out: bool) -> Result<()> {
     anyhow::ensure!(db.exists(), "no hub data found — run `agentcom up` first");
     let conn = rusqlite::Connection::open(&db)?;
 
-    let (title, task_status): (String, String) = conn
-        .query_row("SELECT title, status FROM tasks WHERE id = ?1", [id], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
+    let (title, task_status, persisted_cost): (String, String, f64) = conn
+        .query_row(
+            "SELECT title, status, COALESCE(total_cost_usd, 0.0) FROM tasks WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
         .map_err(|_| anyhow::anyhow!("task #{id} not found"))?;
+
+    // If a persisted cost is available (task closed after this feature was added),
+    // report it directly without reconstructing from time windows.
+    if persisted_cost > 0.0 && task_status == "done" {
+        if json_out {
+            #[derive(serde::Serialize)]
+            struct Out<'a> {
+                id: i64,
+                title: &'a str,
+                status: &'a str,
+                total_cost_usd: f64,
+                total_wall_secs: i64,
+                agents: Vec<()>,
+            }
+            println!("{}", serde_json::to_string_pretty(&Out {
+                id,
+                title: &title,
+                status: &task_status,
+                total_cost_usd: persisted_cost,
+                total_wall_secs: 0,
+                agents: vec![],
+            })?);
+        } else {
+            println!("task #{id} — {title} [{task_status}]");
+            println!("  total cost: ${persisted_cost:.4}");
+        }
+        return Ok(());
+    }
 
     let mut stmt = conn.prepare(
         "SELECT agent, body, created_at FROM task_activity WHERE task_id = ?1 ORDER BY created_at ASC"

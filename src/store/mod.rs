@@ -104,6 +104,140 @@ pub struct CleanStats {
     pub runs: usize,
 }
 
+/// Fleet-level metrics for the dashboard.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FleetStats {
+    pub resolved: u64,
+    pub total: u64,
+    pub cost_median_usd: f64,
+    pub wall_p50_secs: i64,
+    pub wall_p95_secs: i64,
+    /// Up to 10 chars — '✓' for done, '✗' for blocked, oldest→newest.
+    pub last10: String,
+}
+
+impl FleetStats {
+    pub fn resolved_pct(&self) -> f64 {
+        if self.total == 0 {
+            0.0
+        } else {
+            self.resolved as f64 / self.total as f64 * 100.0
+        }
+    }
+}
+
+impl Store {
+    /// Compute fleet-level dashboard statistics directly from the DB.
+    pub fn stats_compute(&self) -> Result<FleetStats> {
+        let conn = self.conn.lock().unwrap();
+
+        let total: u64 = conn.query_row(
+            "SELECT COUNT(*) FROM tasks WHERE is_archived = 0",
+            [],
+            |r| r.get(0),
+        )?;
+        let resolved: u64 = conn.query_row(
+            "SELECT COUNT(*) FROM tasks WHERE status = 'done' AND is_archived = 0",
+            [],
+            |r| r.get(0),
+        )?;
+
+        // Median cost over done tasks that have a persisted cost.
+        let mut costs: Vec<f64> = {
+            let mut stmt = conn.prepare(
+                "SELECT total_cost_usd FROM tasks \
+                 WHERE status = 'done' AND total_cost_usd > 0 \
+                 ORDER BY total_cost_usd",
+            )?;
+            let collected: Vec<f64> = stmt.query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            collected
+        };
+        costs.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let cost_median_usd = percentile_f64(&costs, 50);
+
+        // Wall-time percentiles from task_activity claim→done windows.
+        let done_ids: Vec<i64> = {
+            let mut stmt = conn.prepare(
+                "SELECT id FROM tasks WHERE status = 'done' AND is_archived = 0",
+            )?;
+            let collected: Vec<i64> = stmt.query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            collected
+        };
+        let mut wall_secs: Vec<i64> = Vec::new();
+        for task_id in &done_ids {
+            let claim_at: Option<i64> = conn.query_row(
+                "SELECT created_at FROM task_activity \
+                 WHERE task_id = ?1 AND body LIKE 'claimed%' \
+                 ORDER BY created_at DESC LIMIT 1",
+                [task_id],
+                |r| r.get(0),
+            ).ok();
+            if let Some(claim_ts) = claim_at {
+                let done_at: Option<i64> = conn.query_row(
+                    "SELECT created_at FROM task_activity \
+                     WHERE task_id = ?1 AND body LIKE 'done%' AND created_at > ?2 \
+                     ORDER BY created_at ASC LIMIT 1",
+                    rusqlite::params![task_id, claim_ts],
+                    |r| r.get(0),
+                ).ok();
+                if let Some(done_ts) = done_at {
+                    let secs = done_ts - claim_ts;
+                    if secs >= 0 {
+                        wall_secs.push(secs);
+                    }
+                }
+            }
+        }
+        wall_secs.sort_unstable();
+        let wall_p50_secs = percentile_i64(&wall_secs, 50);
+        let wall_p95_secs = percentile_i64(&wall_secs, 95);
+
+        // Last 10 closed tasks (done or blocked), oldest→newest.
+        let last10_statuses: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT status FROM tasks \
+                 WHERE status IN ('done', 'blocked') AND is_archived = 0 \
+                 ORDER BY updated_at DESC LIMIT 10",
+            )?;
+            let collected: Vec<String> = stmt.query_map([], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            collected
+        };
+        let last10: String = last10_statuses
+            .iter()
+            .rev()
+            .map(|s| if s == "done" { '✓' } else { '✗' })
+            .collect();
+
+        Ok(FleetStats {
+            resolved,
+            total,
+            cost_median_usd,
+            wall_p50_secs,
+            wall_p95_secs,
+            last10,
+        })
+    }
+}
+
+fn percentile_f64(sorted: &[f64], pct: usize) -> f64 {
+    if sorted.is_empty() {
+        return 0.0;
+    }
+    let idx = (pct * sorted.len()).saturating_sub(1) / 100;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
+fn percentile_i64(sorted: &[i64], pct: usize) -> i64 {
+    if sorted.is_empty() {
+        return 0;
+    }
+    let idx = (pct * sorted.len()).saturating_sub(1) / 100;
+    sorted[idx.min(sorted.len() - 1)]
+}
+
 pub fn now_ts() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -182,6 +316,10 @@ pub struct Task {
     /// Times the post-close hook has run for this task. Stops at 2 to prevent looping.
     #[serde(default, skip_serializing_if = "is_zero_u32")]
     pub hook_attempts: u32,
+    /// Total cost in USD accumulated by the closing agent during this task's lifetime.
+    /// Populated on task_done; 0 for old rows or tasks closed before this feature.
+    #[serde(default, skip_serializing_if = "is_zero_f64")]
+    pub total_cost_usd: f64,
     pub created_by: String,
     pub created_at: i64,
     pub updated_at: i64,
@@ -190,6 +328,10 @@ pub struct Task {
 
 fn is_zero_u32(v: &u32) -> bool {
     *v == 0
+}
+
+fn is_zero_f64(v: &f64) -> bool {
+    *v == 0.0
 }
 
 
@@ -239,6 +381,7 @@ impl Default for Task {
             recur: None,
             next_run_at: None,
             hook_attempts: 0,
+            total_cost_usd: 0.0,
             created_by: String::new(),
             created_at: 0,
             updated_at: 0,
@@ -337,6 +480,71 @@ mod clean_tests {
         assert_eq!(stats.messages, 0);
         assert_eq!(stats.file_claims, 0);
         assert_eq!(stats.runs, 0);
+    }
+}
+
+#[cfg(test)]
+mod stats_tests {
+    use super::*;
+
+    #[test]
+    fn stats_compute_empty_db() {
+        let s = Store::open_in_memory().unwrap();
+        let stats = s.stats_compute().unwrap();
+        assert_eq!(stats.resolved, 0);
+        assert_eq!(stats.total, 0);
+        assert_eq!(stats.cost_median_usd, 0.0);
+        assert_eq!(stats.wall_p50_secs, 0);
+        assert!(stats.last10.is_empty());
+    }
+
+    #[test]
+    fn stats_compute_counts_resolved() {
+        let s = Store::open_in_memory().unwrap();
+        let a = s.task_add("task-a", "", 1, &[], "human").unwrap();
+        let b = s.task_add("task-b", "", 1, &[], "human").unwrap();
+        let _c = s.task_add("task-c", "", 1, &[], "human").unwrap(); // stays open
+        s.task_claim(a, "builder").unwrap();
+        s.task_done(a, "builder", None).unwrap();
+        s.task_claim(b, "builder").unwrap();
+        s.task_block(b, "builder", "reason").unwrap();
+
+        let stats = s.stats_compute().unwrap();
+        assert_eq!(stats.total, 3);
+        assert_eq!(stats.resolved, 1, "only done tasks count as resolved");
+        // last10 includes done + blocked; b is blocked, a is done
+        assert!(!stats.last10.is_empty());
+    }
+
+    #[test]
+    fn stats_compute_persisted_cost_feeds_median() {
+        let s = Store::open_in_memory().unwrap();
+        let id = s.task_add("work", "", 1, &[], "human").unwrap();
+        // Set total_cost_usd directly (simulating a prior task_done with cost)
+        {
+            let conn = s.conn.lock().unwrap();
+            conn.execute(
+                "UPDATE tasks SET status = 'done', total_cost_usd = 0.05 WHERE id = ?1",
+                [id],
+            ).unwrap();
+        }
+        let stats = s.stats_compute().unwrap();
+        assert_eq!(stats.resolved, 1);
+        assert!((stats.cost_median_usd - 0.05).abs() < 1e-9);
+    }
+
+    #[test]
+    fn stats_compute_last10_glyphs() {
+        let s = Store::open_in_memory().unwrap();
+        for i in 0..5 {
+            let id = s.task_add(&format!("task-{i}"), "", 1, &[], "human").unwrap();
+            s.task_claim(id, "builder").unwrap();
+            s.task_done(id, "builder", None).unwrap();
+        }
+        let stats = s.stats_compute().unwrap();
+        // All 5 are done, so all glyphs should be ✓
+        assert_eq!(stats.last10.chars().count(), 5);
+        assert!(stats.last10.chars().all(|c| c == '✓'));
     }
 }
 

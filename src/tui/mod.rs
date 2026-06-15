@@ -83,6 +83,8 @@ pub struct App {
     pub total_cost: f64,
     /// Free-mode summary (e.g. "95m left") from hub status, or None.
     pub free_mode: Option<String>,
+    /// Fleet dashboard stats, refreshed alongside the task board.
+    pub stats: Option<crate::store::FleetStats>,
     /// `None` = follow live output; `Some(n)` = scrolled up by n lines.
     pub scroll_back: Option<usize>,
     /// Always-on input line in the Chat tab (talks to the composer).
@@ -219,6 +221,7 @@ async fn run_loop(
         open_tasks: 0,
         total_cost: 0.0,
         free_mode: None,
+        stats: None,
         scroll_back: None,
         chat_input: String::new(),
         spin: 0,
@@ -334,4 +337,5 @@ fn refresh_board(app: &mut App, store: &Store) {
     app.tasks = store.task_list(None, None).unwrap_or_default();
     app.messages = store.msg_recent(200).unwrap_or_default();
     app.file_claims = store.files_list().unwrap_or_default();
+    app.stats = store.stats_compute().ok();
 }

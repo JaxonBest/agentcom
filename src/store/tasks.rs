@@ -54,6 +54,7 @@ fn task_from_row(row: &Row) -> rusqlite::Result<Task> {
         recur: row.get("recur").unwrap_or(None),
         next_run_at: row.get("next_run_at").unwrap_or(None),
         hook_attempts: row.get::<_, i64>("hook_attempts").unwrap_or(0) as u32,
+        total_cost_usd: row.get::<_, f64>("total_cost_usd").unwrap_or(0.0),
         created_by: row.get("created_by")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
@@ -522,14 +523,38 @@ impl Store {
     }
 
     pub fn task_done(&self, id: i64, agent: &str, note: Option<&str>) -> Result<Task> {
+        let now = now_ts();
         let conn = self.conn.lock().unwrap();
         let updated = conn.execute(
             "UPDATE tasks SET status = 'done', note = COALESCE(?1, note), updated_at = ?2
              WHERE id = ?3 AND status IN ('claimed', 'open') AND (claimed_by = ?4 OR ?4 = 'human')",
-            params![note, now_ts(), id, agent],
+            params![note, now, id, agent],
         )?;
         if updated == 0 {
             bail!("task #{id} not found, or claimed by another agent");
+        }
+        // Persist cost accumulated by the closing agent over its claim window.
+        // Skipped for "human" (no run rows) and when no claim event is found.
+        if agent != "human" {
+            if let Ok(Some(claim_at)) = conn.query_row(
+                "SELECT created_at FROM task_activity WHERE task_id = ?1 AND agent = ?2 \
+                 AND body LIKE 'claimed%' ORDER BY created_at DESC LIMIT 1",
+                params![id, agent],
+                |r| r.get::<_, Option<i64>>(0),
+            ) {
+                let cost: f64 = conn.query_row(
+                    "SELECT COALESCE(SUM(cost_usd), 0.0) FROM runs \
+                     WHERE agent = ?1 AND started_at >= ?2 AND started_at <= ?3",
+                    params![agent, claim_at, now],
+                    |r| r.get(0),
+                ).unwrap_or(0.0);
+                if cost > 0.0 {
+                    let _ = conn.execute(
+                        "UPDATE tasks SET total_cost_usd = ?1 WHERE id = ?2",
+                        params![cost, id],
+                    );
+                }
+            }
         }
         drop(conn);
         Ok(self.task_get(id)?.expect("just completed"))

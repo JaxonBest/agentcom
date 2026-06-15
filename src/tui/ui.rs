@@ -14,7 +14,7 @@ pub fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
+            Constraint::Length(2),
             Constraint::Min(5),
             Constraint::Length(1),
         ])
@@ -133,7 +133,7 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         .as_deref()
         .map(|f| format!(" | {f}"))
         .unwrap_or_default();
-    let mut spans = vec![
+    let mut line1_spans = vec![
         Span::styled(
             format!(" agentcom - {} ", app.project),
             Style::default().add_modifier(Modifier::BOLD),
@@ -144,22 +144,53 @@ fn draw_header(f: &mut Frame, app: &App, area: Rect) {
         )),
     ];
     if human_questions > 0 {
-        spans.push(Span::styled(
+        line1_spans.push(Span::styled(
             format!(" | {human_questions} QUESTION(S)"),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ));
     } else if human_pending > 0 {
-        spans.push(Span::styled(
+        line1_spans.push(Span::styled(
             format!(" | {human_pending} message(s) to you"),
             Style::default()
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ));
     }
+
+    let line2 = if let Some(ref s) = app.stats {
+        let pct = s.resolved_pct();
+        let cost_str = if s.cost_median_usd > 0.0 {
+            format!("${:.4}", s.cost_median_usd)
+        } else {
+            "n/a".to_string()
+        };
+        let wall_str = if s.wall_p50_secs > 0 {
+            format!("p50 {}s  p95 {}s", s.wall_p50_secs, s.wall_p95_secs)
+        } else {
+            "n/a".to_string()
+        };
+        format!(
+            " Resolved: {}/{} ({:.0}%)  $/done: {}  Wall: {}{}",
+            s.resolved,
+            s.total,
+            pct,
+            cost_str,
+            wall_str,
+            if s.last10.is_empty() { String::new() } else { format!("  [{}]", s.last10) },
+        )
+    } else {
+        String::new()
+    };
+
+    use ratatui::text::Text;
+    let text = Text::from(vec![
+        Line::from(line1_spans),
+        Line::from(Span::styled(line2, Style::default().fg(Color::DarkGray))),
+    ]);
     f.render_widget(
-        Paragraph::new(Line::from(spans)).style(Style::default().bg(Color::Indexed(236))),
+        Paragraph::new(text).style(Style::default().bg(Color::Indexed(236))),
         area,
     );
 }
