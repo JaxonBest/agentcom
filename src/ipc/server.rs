@@ -11,8 +11,9 @@
 //! - MAX_LINE_BYTES: per-request size cap; oversized frames are rejected
 //!   immediately to prevent memory exhaustion from unbounded task descriptions.
 
-use super::{HubInfo, Request, Response};
+use super::{is_human_identity, HubInfo, Request, Response};
 use crate::hub::events::{IpcMsg, UiEvent};
+use crate::store::Store;
 use crate::tui::ringbuf::SharedRingBuf;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -40,6 +41,9 @@ pub struct IpcServer {
     hub_tx: mpsc::Sender<IpcMsg>,
     buffers: Buffers,
     ui_tx: broadcast::Sender<UiEvent>,
+    /// Read-only store handle so `Tail` can backfill from the persisted
+    /// transcript when the in-memory ring buffer is empty (e.g. post-restart).
+    store: Arc<Store>,
     /// Shared counter of live connections (across tasks).
     conn_count: Arc<AtomicUsize>,
 }
@@ -50,6 +54,7 @@ impl IpcServer {
         hub_tx: mpsc::Sender<IpcMsg>,
         buffers: Buffers,
         ui_tx: broadcast::Sender<UiEvent>,
+        store: Arc<Store>,
     ) -> Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", 0))
             .await
@@ -74,6 +79,7 @@ impl IpcServer {
             hub_tx,
             buffers,
             ui_tx,
+            store,
             conn_count: Arc::new(AtomicUsize::new(0)),
         })
     }
@@ -112,10 +118,11 @@ impl IpcServer {
                     let hub_tx = self.hub_tx.clone();
                     let buffers = self.buffers.clone();
                     let ui_rx = self.ui_tx.subscribe();
+                    let store = self.store.clone();
                     let conn_count = self.conn_count.clone();
                     tokio::spawn(async move {
                         if let Err(e) =
-                            handle_conn(stream, addr, token, hub_tx, buffers, ui_rx).await
+                            handle_conn(stream, addr, token, hub_tx, buffers, ui_rx, store).await
                         {
                             tracing::debug!(error = %e, "ipc connection ended with error");
                         }
@@ -166,6 +173,7 @@ async fn handle_conn(
     hub_tx: mpsc::Sender<IpcMsg>,
     buffers: Buffers,
     mut ui_rx: broadcast::Receiver<UiEvent>,
+    store: Arc<Store>,
 ) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut lines = BufReader::new(read_half).lines();
@@ -173,9 +181,11 @@ async fn handle_conn(
     // First frame must be a valid Hello.
     let identity = match read_line_bounded(&mut lines).await? {
         Some(line) => match serde_json::from_str::<Request>(&line) {
-            Ok(Request::Hello { token: t, identity }) if ct_eq(&t, &token) => {
-                // Validate identity format: must be "human" or a valid agent name.
-                let valid = identity == "human"
+            Ok(Request::Hello { token: t, identity, .. }) if ct_eq(&t, &token) => {
+                // Valid identities: a human session ("human" or "human:<id>"),
+                // the REST bridge ("rest-api"), or a configured agent name.
+                let valid = is_human_identity(&identity)
+                    || identity == "rest-api"
                     || crate::config::validate_agent_name(&identity).is_ok();
                 if !valid {
                     tracing::warn!(
@@ -201,7 +211,15 @@ async fn handle_conn(
         },
         None => return Ok(()),
     };
-    write_frame(&mut write_half, &Response::ok()).await?;
+    // Echo the confirmed session identity (new clients read this; older
+    // clients tolerate it the same as a plain Ok).
+    write_frame(
+        &mut write_half,
+        &Response::HelloOk {
+            session_id: identity.clone(),
+        },
+    )
+    .await?;
 
     loop {
         let line = match read_line_bounded(&mut lines).await {
@@ -241,7 +259,7 @@ async fn handle_conn(
                     let map = buffers.read().unwrap();
                     map.get(&agent).map(|buf| buf.read().unwrap().tail(n))
                 };
-                let Some(backlog) = backlog else {
+                let Some(mut backlog) = backlog else {
                     write_frame(
                         &mut write_half,
                         &Response::err(format!("unknown agent {agent:?}")),
@@ -249,6 +267,13 @@ async fn handle_conn(
                     .await?;
                     continue;
                 };
+                // After a hub restart the ring buffer is empty; backfill the
+                // tail from the persisted transcript so history survives.
+                if backlog.is_empty() {
+                    if let Ok(events) = store.transcript_actor_tail(&agent, n) {
+                        backlog = events.into_iter().map(|e| e.body).collect();
+                    }
+                }
                 for l in backlog {
                     write_frame(&mut write_half, &Response::TailLine { line: l }).await?;
                 }
@@ -291,6 +316,18 @@ async fn handle_conn(
                 write_frame(&mut write_half, &resp).await?;
             }
         }
+    }
+    // Connection closed: tell the hub to stamp the session disconnected so
+    // `session_active` stops counting it. Fire-and-forget (reply ignored).
+    if is_human_identity(&identity) || identity == "rest-api" {
+        let (reply_tx, _reply_rx) = oneshot::channel();
+        let _ = hub_tx
+            .send(IpcMsg {
+                identity: identity.clone(),
+                request: Request::SessionBye,
+                reply: reply_tx,
+            })
+            .await;
     }
     Ok(())
 }

@@ -13,6 +13,13 @@ use crate::store::{Message, Task};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+/// True for a human session identity: the legacy literal `human` or the
+/// per-session form `human:<id>`. Human peers use the non-destructive
+/// per-session inbox cursor; everything else uses the destructive agent inbox.
+pub fn is_human_identity(identity: &str) -> bool {
+    identity == "human" || identity.starts_with("human:")
+}
+
 /// Written to the data dir by a running hub; clients discover it from here
 /// when env vars aren't present.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -29,8 +36,16 @@ pub struct HubInfo {
 pub enum Request {
     Hello {
         token: String,
-        /// Agent name from `AGENTCOM_AGENT`, or "human" for terminals.
+        /// Agent name from `AGENTCOM_AGENT`, or a human session id
+        /// (`human:<uuid>`) for terminals/TUIs.
         identity: String,
+        /// Session kind for human peers: "human" | "tui" | "cli" | "rest".
+        /// Absent for legacy clients and agents.
+        #[serde(default)]
+        kind: Option<String>,
+        /// Optional human-friendly session label.
+        #[serde(default)]
+        label: Option<String>,
     },
     Send {
         to: String,
@@ -38,6 +53,13 @@ pub enum Request {
         urgent: bool,
     },
     Inbox,
+    /// List currently-connected sessions (multi-session awareness).
+    Sessions,
+    /// Server-internal ONLY: the IPC server emits this to the hub when a
+    /// connection closes so the hub can stamp the session disconnected. It is
+    /// never sent by real clients (and harmless if one does — a session can
+    /// only disconnect itself).
+    SessionBye,
     TaskAdd {
         title: String,
         description: String,
@@ -206,6 +228,14 @@ pub enum Response {
     Inbox {
         messages: Vec<Message>,
     },
+    /// Reply to Hello: the (possibly server-confirmed) session identity.
+    HelloOk {
+        session_id: String,
+    },
+    /// Active sessions (reply to a Sessions request).
+    Sessions {
+        sessions: Vec<crate::store::sessions::SessionRow>,
+    },
     Tasks {
         tasks: Vec<Task>,
     },
@@ -302,5 +332,55 @@ impl Response {
         Response::Ok {
             message: Some(msg.into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hello_back_compat_without_kind_label() {
+        // An old client that predates session identity sends no kind/label.
+        let json = r#"{"cmd":"hello","token":"x","identity":"human"}"#;
+        match serde_json::from_str::<Request>(json).unwrap() {
+            Request::Hello {
+                token,
+                identity,
+                kind,
+                label,
+            } => {
+                assert_eq!(token, "x");
+                assert_eq!(identity, "human");
+                assert!(kind.is_none() && label.is_none());
+            }
+            other => panic!("expected Hello, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn hello_with_kind_label_roundtrips() {
+        let req = Request::Hello {
+            token: "t".into(),
+            identity: "human:abc".into(),
+            kind: Some("tui".into()),
+            label: Some("term".into()),
+        };
+        let s = serde_json::to_string(&req).unwrap();
+        match serde_json::from_str::<Request>(&s).unwrap() {
+            Request::Hello { kind, label, .. } => {
+                assert_eq!(kind.as_deref(), Some("tui"));
+                assert_eq!(label.as_deref(), Some("term"));
+            }
+            other => panic!("expected Hello, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn human_identity_classification() {
+        assert!(is_human_identity("human"));
+        assert!(is_human_identity("human:abc-123"));
+        assert!(!is_human_identity("builder"));
+        assert!(!is_human_identity("rest-api"));
     }
 }

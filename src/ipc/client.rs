@@ -19,12 +19,32 @@ pub struct Client {
     writer: tokio::net::tcp::OwnedWriteHalf,
 }
 
+/// Identity for a non-agent peer (human terminal, TUI, or CLI one-shot).
+///
+/// A stable id can be pinned via `AGENTCOM_SESSION` so a shell keeps a usable,
+/// persistent inbox across invocations (otherwise each one-shot would mint a
+/// fresh id, read from the cursor head, and see an empty inbox). Without it we
+/// mint a per-process `human:<uuid>`.
+fn human_identity() -> String {
+    if let Ok(s) = std::env::var("AGENTCOM_SESSION") {
+        let s = s.trim();
+        if !s.is_empty() {
+            return if s.starts_with("human") {
+                s.to_string()
+            } else {
+                format!("human:{s}")
+            };
+        }
+    }
+    format!("human:{}", uuid::Uuid::new_v4())
+}
+
 pub fn discover() -> Result<(u16, String, String)> {
     if let (Ok(port), Ok(token)) = (
         std::env::var("AGENTCOM_PORT"),
         std::env::var("AGENTCOM_TOKEN"),
     ) {
-        let identity = std::env::var("AGENTCOM_AGENT").unwrap_or_else(|_| "human".to_string());
+        let identity = std::env::var("AGENTCOM_AGENT").unwrap_or_else(|_| human_identity());
         return Ok((
             port.parse().context("AGENTCOM_PORT is not a port")?,
             token,
@@ -38,7 +58,7 @@ pub fn discover() -> Result<(u16, String, String)> {
     )?;
     let hub_path = crate::paths::hub_json_path(&root)?;
     let info = read_hub_json(&hub_path)?;
-    let identity = std::env::var("AGENTCOM_AGENT").unwrap_or_else(|_| "human".to_string());
+    let identity = std::env::var("AGENTCOM_AGENT").unwrap_or_else(|_| human_identity());
     Ok((info.port, info.token, identity))
 }
 
@@ -68,14 +88,22 @@ impl Client {
             reader: BufReader::new(read_half),
             writer,
         };
+        // CLI one-shots and the Client::connect path register as "cli";
+        // agents (identity not starting with "human") send no kind.
+        let kind = identity
+            .starts_with("human")
+            .then(|| "cli".to_string());
         let resp = client
             .request(&Request::Hello {
                 token: token.to_string(),
                 identity: identity.to_string(),
+                kind,
+                label: None,
             })
             .await?;
         match resp {
-            Response::Ok { .. } => Ok(client),
+            // HelloOk is the new reply; plain Ok is accepted for a legacy hub.
+            Response::Ok { .. } | Response::HelloOk { .. } => Ok(client),
             Response::Err { message } => bail!("hub rejected connection: {message}"),
             other => bail!("unexpected hello response: {other:?}"),
         }

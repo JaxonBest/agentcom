@@ -13,8 +13,9 @@ pub mod webhook;
 use crate::agent::{spawn, AgentRuntime, AgentState, WriterCmd};
 use crate::config::HubConfig;
 use crate::ipc::server::{Buffers, IpcServer};
-use crate::ipc::{AgentStatusRow, Request, Response};
+use crate::ipc::{is_human_identity, AgentStatusRow, Request, Response};
 use crate::protocol::event::CliEvent;
+use crate::store::transcript::EventKind;
 use crate::store::Store;
 use crate::tui::ringbuf::RingBuf;
 use anyhow::{Context, Result};
@@ -26,6 +27,20 @@ use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc};
 
 const STOP_GRACE: Duration = Duration::from_secs(5);
+
+/// Classify a non-agent session identity into a kind label for the sessions
+/// table (purely informational — drives the `/sessions` view).
+fn session_kind_for(identity: &str) -> &'static str {
+    if identity == "rest-api" {
+        "rest"
+    } else if identity.starts_with("human:tui") {
+        "tui"
+    } else if identity.starts_with("human:") {
+        "cli"
+    } else {
+        "human"
+    }
+}
 
 pub struct Hub {
     pub cfg: HubConfig,
@@ -79,6 +94,9 @@ pub struct Hub {
     /// Task IDs that have already had their "awaiting_review stale" webhook fired.
     /// Prevents repeated notifications for the same stale task.
     stale_review_notified: std::collections::HashSet<i64>,
+    /// Human/session identities already registered this run, so dispatch only
+    /// INSERTs a sessions row once per identity instead of on every request.
+    registered_sessions: std::collections::HashSet<String>,
 }
 
 impl Hub {
@@ -134,6 +152,7 @@ impl Hub {
             ipc_tx.clone(),
             buffers.clone(),
             ui_tx.clone(),
+            store.clone(),
         )
         .await?;
         let ipc_port = server.info.port;
@@ -195,6 +214,7 @@ impl Hub {
             consecutive_hook_failures: 0,
             hook_dispatch_paused: false,
             stale_review_notified: std::collections::HashSet::new(),
+            registered_sessions: std::collections::HashSet::new(),
         })
     }
 
@@ -334,17 +354,44 @@ impl Hub {
 
     fn emit_state(&self, name: &str) {
         if let Some(rt) = self.agents.get(name) {
+            let state = rt.state.as_str().to_string();
+            let detail = rt.state_detail.clone();
             let _ = self.ui_tx.send(UiEvent::StateChange {
                 agent: name.to_string(),
-                state: rt.state.as_str().to_string(),
-                detail: rt.state_detail.clone(),
+                state: state.clone(),
+                detail: detail.clone(),
             });
+            let body = match &detail {
+                Some(d) if !d.is_empty() => format!("{state} — {d}"),
+                _ => state,
+            };
+            self.record(EventKind::AgentState, name, &body, None, None);
         }
     }
 
     fn log(&self, msg: String) {
         tracing::info!("{msg}");
+        self.record(EventKind::HubLog, "hub", &msg, None, None);
         let _ = self.ui_tx.send(UiEvent::HubLog(msg));
+    }
+
+    /// Persist one transcript event. Best-effort: a write failure is logged
+    /// but never blocks or panics the hub loop. Co-located with the matching
+    /// `UiEvent` send so the live broadcast and durable transcript agree.
+    fn record(
+        &self,
+        kind: EventKind,
+        actor: &str,
+        body: &str,
+        task_id: Option<i64>,
+        session_id: Option<&str>,
+    ) {
+        if let Err(e) = self
+            .store
+            .transcript_append(kind, actor, body, task_id, session_id)
+        {
+            tracing::warn!("transcript_append failed: {e}");
+        }
     }
 
     /// Fire a webhook event if `webhook_url` is configured in agentcom.toml.
@@ -979,6 +1026,25 @@ impl Hub {
         self.check_deadlock();
         self.check_priority_escalation();
         self.check_stale_reviews();
+        self.prune_transcript();
+    }
+
+    /// Periodically trim the persisted transcript when a retention window is
+    /// configured. Runs at most once every 5 minutes (the tick fires each
+    /// second, so gate on elapsed seconds to avoid a delete every tick).
+    fn prune_transcript(&self) {
+        let Some(retention) = self.cfg.transcript_retention_secs else {
+            return;
+        };
+        if !self.started.elapsed().as_secs().is_multiple_of(300) {
+            return;
+        }
+        let cutoff = crate::store::now_ts() - retention as i64;
+        match self.store.transcript_prune(cutoff) {
+            Ok(n) if n > 0 => tracing::debug!("pruned {n} transcript events older than {cutoff}"),
+            Ok(_) => {}
+            Err(e) => tracing::warn!("transcript_prune failed: {e}"),
+        }
     }
 
     /// Free mode: enforce time/usage stop conditions; when the whole fleet
@@ -1076,13 +1142,49 @@ impl Hub {
 
     fn dispatch(&mut self, identity: &str, request: Request) -> Response {
         tracing::debug!(identity, request = ?request, "ipc request");
+        // Lazily register human/CLI/TUI/REST sessions (once per identity per
+        // run) and refresh last_seen on every request, so concurrent sessions
+        // are tracked individually.
+        if is_human_identity(identity) || identity == "rest-api" {
+            if self.registered_sessions.insert(identity.to_string()) {
+                if let Err(e) =
+                    self.store
+                        .session_register(identity, session_kind_for(identity), None)
+                {
+                    tracing::warn!("session_register({identity}) failed: {e}");
+                }
+            } else if let Err(e) = self.store.session_touch(identity) {
+                tracing::warn!("session_touch({identity}) failed: {e}");
+            }
+        }
         match request {
             Request::Hello { .. } => Response::err("unexpected hello"),
             Request::Send { to, body, urgent, .. } => self.do_send(identity, &to, &body, urgent),
-            Request::Inbox => match self.store.msg_take_pending(identity) {
-                Ok(messages) => Response::Inbox { messages },
+            // Human sessions read via a non-destructive per-session cursor, so
+            // every concurrent terminal/TUI sees each message exactly once;
+            // agents keep the destructive consume-on-read inbox.
+            Request::Inbox => {
+                let result = if is_human_identity(identity) || identity == "rest-api" {
+                    self.store.msg_read_for_session(identity)
+                } else {
+                    self.store.msg_take_pending(identity)
+                };
+                match result {
+                    Ok(messages) => Response::Inbox { messages },
+                    Err(e) => Response::err(e.to_string()),
+                }
+            }
+            Request::Sessions => match self.store.session_active(crate::store::now_ts(), 3600) {
+                Ok(sessions) => Response::Sessions { sessions },
                 Err(e) => Response::err(e.to_string()),
             },
+            Request::SessionBye => {
+                if let Err(e) = self.store.session_disconnect(identity) {
+                    tracing::warn!("session_disconnect({identity}) failed: {e}");
+                }
+                self.registered_sessions.remove(identity);
+                Response::ok()
+            }
             Request::TaskAdd {
                 title,
                 description,

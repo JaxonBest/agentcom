@@ -7,3 +7,4 @@ sandbox-runs
 /data
 runs/
 PLAN.md
+.env

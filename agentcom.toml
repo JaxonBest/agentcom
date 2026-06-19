@@ -1,5 +1,12 @@
-# agentcom configuration
-# Define your agent fleet here. Run `agentcom up` to start it.
+# agentcom configuration — tightened, quality-gated fleet.
+# Run `agentcom up` to start it.
+#
+# This config deliberately wires up the quality mechanisms agentcom ships but
+# that the previous 7-agent config left OFF:
+#   • lanes            — restrict which files each agent may claim (no sprawl)
+#   • review gate      — the builder's work must pass a reviewer before Done
+#   • post_close hook   — every closed task is verified with cargo test + clippy
+# Fewer, well-scoped, gated agents beat many loosely-scoped ones.
 
 project_name = "agentcom-src"
 default_provider = "claude"
@@ -7,62 +14,66 @@ default_model = "sonnet"
 auto_commit = true
 # max_total_budget_usd = 20.0
 
+# Verify every task close by building + testing + linting the tree. A non-zero
+# exit re-blocks the task with the hook's stderr as the reason, so broken work
+# never reaches Done. (Circuit breaker stops after 2 failed attempts.)
+[hooks]
+post_close = "cargo test --quiet && cargo clippy --quiet --all-targets -- -D warnings"
+post_close_timeout_secs = 600
+
+# ── builder ───────────────────────────────────────────────────────────────
+# Primary implementer. Owns src/ and the crate manifest. Its closes are
+# review-gated: closing a task moves it to AwaitingReview and the hub auto-files
+# a review task assigned to an agent with the "review" capability (below).
 [[agent]]
 name = "builder"
-role = "Implements features and fixes. Owns src/. Coordinates with reviewer before large refactors."
-# IMPORTANT: agents run headless, so nobody can answer permission prompts —
-# any tool NOT listed here is auto-denied. (`agentcom` coordination commands
-# are always allowed regardless.) Narrow Bash rules like "Bash(npm test:*)"
-# work too.
+role = "Implements features and fixes. Owns src/ and Cargo manifests. Claims one task at a time and writes focused, well-tested changes."
 allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
-model = "claude-sonnet-4-6"
-# cwd = "."                      # working dir, relative to this file
-# provider = "claude"            # or "codex" or "deepseek"
-# model = "sonnet"
-# permission_mode = "acceptEdits"  # or "plan", "default", "bypassPermissions"
-# max_turns_per_prompt = 50
-# max_budget_usd = 10.0
-# auto_restart = true
+permission_mode = "acceptEdits"
+lanes = ["src/**", "Cargo.toml", "Cargo.lock"]
+default_review_required = true
+max_claimed_tasks = 1
 
+# ── reviewer ──────────────────────────────────────────────────────────────
+# Read-only: can run cargo test/clippy and read code, but cannot edit — so it
+# critiques rather than rewrites. The "review" capability is REQUIRED for the
+# hub's review gate to route auto-filed review tasks here.
 [[agent]]
 name = "reviewer"
-role = "Reviews changes made by other agents, runs tests, and files follow-up tasks for problems found."
+role = "Reviews other agents' changes, runs tests/clippy, and approves or rejects review tasks. Files follow-up tasks for any problems found."
 allowed_tools = ["Bash", "Read", "Glob", "Grep"]
+capabilities = ["review"]
 
+# ── tester ────────────────────────────────────────────────────────────────
+# Owns the test suite. May touch tests/ and the #[cfg(test)] modules in src/.
 [[agent]]
-name = "junior-developer"
-role = "Given clear instructions to do large amounts of code that require little reasoning. The task should be delegated to you. If builder, builder-assistant, or software-engineer are free. Wait to see if they want it first. Do not wait to see if they want it first if the task appears easy to implement."
-allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
-provider = "deepseek"
-model = "deepseek-reasoner"
-permission_mode = "acceptEdits"
-auto_restart = true
-
-[[agent]]
-name = "builder-assistant"
-role = "Assist the builder with anything that he needs done. If he is not busy, do not claim."
+name = "tester"
+role = "Writes and maintains tests. Owns tests/ and unit-test modules in src/. Adds coverage for new behavior and regressions."
 allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
 permission_mode = "acceptEdits"
-auto_restart = true
+lanes = ["tests/**", "src/**"]
 
-[[agent]]
-name = "software-engineer"
-role = "A software engineer who is designed to pick up any task that requires simple or basic implementation."
-allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
-permission_mode = "acceptEdits"
-auto_restart = true
-
-[[agent]]
-name = "junior-developer-assistant"
-role = "Junior developers backup coder. Only claim if Junior Developer is busy, AND if the task is a <=6/10 difficulty to implement. It must not contain anything to do with security."
-allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
-permission_mode = "acceptEdits"
-provider = "deepseek"
-auto_restart = true
-
+# ── security ──────────────────────────────────────────────────────────────
+# Claims security-labeled tasks. Also review-capable, so it can back up the
+# reviewer on security-sensitive changes.
 [[agent]]
 name = "security"
-role = "When a task is labeled security, or has a problem that needs to be fixed for security reasons. Claim the task. Do not claim the task if not."
+role = "Claims tasks labeled security, or with a security-relevant defect. Does not claim non-security tasks unless explicitly asked."
 allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
 permission_mode = "acceptEdits"
-auto_restart = true
+lanes = ["src/**", "Cargo.toml", "Cargo.lock"]
+capabilities = ["security", "review"]
+
+# ── optional: cost-optimized worker ─────────────────────────────────────────
+# To grind mechanical work cheaply, add a DeepSeek builder — but keep it GATED
+# (same lanes + review required) so its output is held to the same bar:
+#
+# [[agent]]
+# name = "junior"
+# role = "Mechanical, well-specified changes delegated by the builder."
+# provider = "deepseek"
+# model = "deepseek-reasoner"
+# allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+# permission_mode = "acceptEdits"
+# lanes = ["src/**"]
+# default_review_required = true

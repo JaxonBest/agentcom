@@ -1,767 +1,148 @@
-//! TUI rendering.
+//! Single-pane chat rendering: a full-height scrolling transcript, a persistent
+//! bottom input editor, and a one-line status bar.
 
-use super::{App, InputKind, Tab};
-use crate::store::{Message, TaskStatus};
+use super::command::SLASH_HELP;
+use super::{theme, ChatState};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style, Stylize};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Cell, List, ListItem, Paragraph, Row, Table, Tabs};
+use ratatui::widgets::{
+    Block, Borders, Clear, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
+};
 use ratatui::Frame;
 
+/// Min/max height (including the top separator) of the input box.
+const INPUT_MIN: u16 = 3;
+const INPUT_MAX: u16 = 8;
+
+/// Working-state spinner frames.
 const SPINNER: [&str; 4] = ["|", "/", "-", "\\"];
 
-pub fn draw(f: &mut Frame, app: &App) {
+pub fn draw(f: &mut Frame, st: &ChatState) {
+    let editor_rows = st.input.lines().len() as u16;
+    let input_h = (editor_rows + 1).clamp(INPUT_MIN, INPUT_MAX);
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(2),
-            Constraint::Min(5),
+            Constraint::Min(3),
+            Constraint::Length(input_h),
             Constraint::Length(1),
         ])
         .split(f.area());
 
-    draw_header(f, app, chunks[0]);
+    draw_transcript(f, st, chunks[0]);
+    draw_input(f, st, chunks[1]);
+    draw_status(f, st, chunks[2]);
 
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(36), Constraint::Min(20)])
-        .split(chunks[1]);
-    draw_sidebar(f, app, body[0]);
-    draw_main(f, app, body[1]);
-
-    draw_footer(f, app, chunks[2]);
-
-    if app.show_help {
+    if st.show_help {
         draw_help_overlay(f, f.area());
     }
-    if let Some(id) = app.task_detail_id {
-        if let Some(task) = app.tasks.iter().find(|t| t.id == id) {
-            draw_task_detail(f, task, f.area());
-        }
+}
+
+fn draw_transcript(f: &mut Frame, st: &ChatState, area: Rect) {
+    let mut lines: Vec<Line> = Vec::new();
+    for item in &st.transcript {
+        lines.extend(item.to_lines());
     }
-}
-
-fn state_style(state: &str) -> Style {
-    match state {
-        "working" => Style::default().fg(Color::Green),
-        "interrupting" => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        "idle" => Style::default().fg(Color::DarkGray),
-        "paused" => Style::default().fg(Color::Yellow),
-        "crashed" => Style::default().fg(Color::Red),
-        "starting" => Style::default().fg(Color::Cyan),
-        _ => Style::default().fg(Color::DarkGray),
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "Tell the composer what you want done. It will plan, recruit, and report back.",
+            Style::default().fg(theme::MUTED),
+        )));
+        lines.push(Line::from(Span::styled(
+            "Type below and press Enter. Slash commands start with '/'; F1 for help.",
+            Style::default().fg(theme::MUTED),
+        )));
     }
-}
 
-fn state_glyph(state: &str) -> &'static str {
-    match state {
-        "working" => ">",
-        "interrupting" => "!",
-        "idle" => ".",
-        "paused" => "||",
-        "crashed" => "x",
-        "starting" => "...",
-        _ => "-",
-    }
-}
-
-fn provider_badge(provider: &str) -> Span<'static> {
-    match provider {
-        "claude" => Span::styled("[claude]", Style::default().fg(Color::Magenta)),
-        "codex" => Span::styled("[codex]", Style::default().fg(Color::Blue)),
-        "deepseek" => Span::styled("[deepseek]", Style::default().fg(Color::Cyan)),
-        other => Span::styled(format!("[{other}]"), Style::default().fg(Color::DarkGray)),
-    }
-}
-
-fn provider_usage(app: &App) -> Vec<(String, f64, u64)> {
-    let mut usage = std::collections::BTreeMap::<String, (f64, u64)>::new();
-    for agent in &app.agents {
-        let entry = usage.entry(agent.provider.clone()).or_default();
-        entry.0 += agent.spent_usd;
-        entry.1 += agent.turns;
-    }
-    usage
-        .into_iter()
-        .map(|(provider, (cost, turns))| (provider, cost, turns))
-        .collect()
-}
-
-fn looks_like_question(body: &str) -> bool {
-    let b = body.trim();
-    b.contains('?')
-}
-
-fn human_attention(app: &App) -> (usize, usize) {
-    let pending = app
-        .messages
-        .iter()
-        .filter(|m| m.to_who == "human" && !m.delivered)
-        .count();
-    let questions = app
-        .messages
-        .iter()
-        .filter(|m| m.to_who == "human" && !m.delivered && looks_like_question(&m.body))
-        .count();
-    (pending, questions)
-}
-
-fn draw_header(f: &mut Frame, app: &App, area: Rect) {
-    let usage = provider_usage(app)
-        .into_iter()
-        .map(|(provider, cost, turns)| format!("{provider} ${cost:.2}/{turns}t"))
-        .collect::<Vec<_>>()
-        .join(" | ");
-    let usage = if usage.is_empty() {
-        String::new()
+    let total = lines.len();
+    let view_h = area.height as usize;
+    let max_offset = total.saturating_sub(view_h);
+    // Follow mode pins to the bottom; otherwise clamp the frozen offset.
+    let offset = if st.scroll.follow {
+        max_offset
     } else {
-        format!(" | {usage}")
-    };
-    let (human_pending, human_questions) = human_attention(app);
-    let working = app.agents.iter().filter(|a| a.state == "working").count();
-    let idle = app.agents.iter().filter(|a| a.state == "idle").count();
-    let paused = app.agents.iter().filter(|a| a.state == "paused").count();
-    let crashed = app.agents.iter().filter(|a| a.state == "crashed").count();
-    let state_summary = {
-        let mut parts = vec![format!("{working}w/{idle}i")];
-        if paused > 0 { parts.push(format!("{paused}p")); }
-        if crashed > 0 { parts.push(format!("{crashed}!")); }
-        parts.join("/")
-    };
-    let free_indicator = app
-        .free_mode
-        .as_deref()
-        .map(|f| format!(" | {f}"))
-        .unwrap_or_default();
-    let mut line1_spans = vec![
-        Span::styled(
-            format!(" agentcom - {} ", app.project),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(format!(
-            "| ${:.2} total{usage} | {} open | {state_summary}{free_indicator}",
-            app.total_cost, app.open_tasks
-        )),
-    ];
-    if human_questions > 0 {
-        line1_spans.push(Span::styled(
-            format!(" | {human_questions} QUESTION(S)"),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        ));
-    } else if human_pending > 0 {
-        line1_spans.push(Span::styled(
-            format!(" | {human_pending} message(s) to you"),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ));
-    }
-
-    let line2 = if let Some(ref s) = app.stats {
-        let pct = s.resolved_pct();
-        let cost_str = if s.cost_median_usd > 0.0 {
-            format!("${:.4}", s.cost_median_usd)
-        } else {
-            "n/a".to_string()
-        };
-        let wall_str = if s.wall_p50_secs > 0 {
-            format!("p50 {}s  p95 {}s", s.wall_p50_secs, s.wall_p95_secs)
-        } else {
-            "n/a".to_string()
-        };
-        format!(
-            " Resolved: {}/{} ({:.0}%)  $/done: {}  Wall: {}{}",
-            s.resolved,
-            s.total,
-            pct,
-            cost_str,
-            wall_str,
-            if s.last10.is_empty() { String::new() } else { format!("  [{}]", s.last10) },
-        )
-    } else {
-        String::new()
+        st.scroll.offset.min(max_offset)
     };
 
-    use ratatui::text::Text;
-    let text = Text::from(vec![
-        Line::from(line1_spans),
-        Line::from(Span::styled(line2, Style::default().fg(Color::DarkGray))),
-    ]);
     f.render_widget(
-        Paragraph::new(text).style(Style::default().bg(Color::Indexed(236))),
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((offset as u16, 0)),
         area,
     );
-}
 
-fn draw_sidebar(f: &mut Frame, app: &App, area: Rect) {
-    let claim_count = app.file_claims.len();
-    let claim_height = if claim_count == 0 {
-        0
-    } else {
-        (claim_count + 2).min(area.height as usize / 3) as u16
-    };
-
-    let chunks = if claim_height > 0 {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(3),
-                Constraint::Length(claim_height),
-            ])
-            .split(area)
-    } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3)])
-            .split(area)
-    };
-
-    // Agent list
-    let items: Vec<ListItem> = app
-        .agent_names
-        .iter()
-        .enumerate()
-        .map(|(i, name)| {
-            let row = app.agent_row(name);
-            let state = row.map(|r| r.state.as_str()).unwrap_or("stopped");
-            let provider = row.map(|r| r.provider.as_str()).unwrap_or("?");
-            let cost = row.map(|r| r.spent_usd).unwrap_or(0.0);
-            let turns = row.map(|r| r.turns).unwrap_or(0);
-            let detail = row.and_then(|r| r.detail.as_deref()).unwrap_or("");
-            let marker = if i == app.selected { ">" } else { " " };
-            let glyph = if state == "working" {
-                SPINNER[app.spin % SPINNER.len()]
-            } else {
-                state_glyph(state)
-            };
-            let main_line = Line::from(vec![
-                Span::raw(format!("{marker} ")),
-                Span::styled(format!("{glyph:<2} "), state_style(state)),
-                Span::raw(format!("{name:<10} ")),
-                provider_badge(provider),
-                Span::styled(format!(" ${cost:.2} {turns}t"), Style::default().fg(Color::DarkGray)),
-            ]);
-            let mut lines = vec![main_line];
-            if !detail.is_empty() {
-                let truncated = if detail.len() > 28 {
-                    format!("  {}…", &detail[..27])
-                } else {
-                    format!("  {detail}")
-                };
-                lines.push(Line::from(Span::styled(
-                    truncated,
-                    Style::default().fg(Color::Indexed(242)),
-                )));
-            }
-            let item = ListItem::new(lines);
-            if i == app.selected {
-                item.style(Style::default().bg(Color::Indexed(237)))
-            } else {
-                item
-            }
-        })
-        .collect();
-    f.render_widget(
-        List::new(items).block(Block::default().borders(Borders::RIGHT).title(" agents ")),
-        chunks[0],
-    );
-
-    // File claims panel (only when there are active claims)
-    if claim_height > 0 {
-        let claim_items: Vec<ListItem> = app
-            .file_claims
-            .iter()
-            .map(|c| {
-                let label = format!(" {}", c.path);
-                ListItem::new(Line::from(vec![
-                    Span::styled(label, Style::default().fg(Color::Yellow)),
-                    Span::styled(
-                        format!(" ({})", c.agent),
-                        Style::default().fg(Color::DarkGray),
-                    ),
-                ]))
-            })
-            .collect();
-        f.render_widget(
-            List::new(claim_items)
-                .block(Block::default().borders(Borders::TOP | Borders::RIGHT).title(" files ")),
-            chunks[1],
+    // Scrollbar only when content overflows the viewport.
+    if total > view_h {
+        let mut sb_state = ScrollbarState::new(max_offset).position(offset);
+        f.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None),
+            area,
+            &mut sb_state,
         );
     }
 }
 
-fn draw_main(f: &mut Frame, app: &App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(3)])
-        .split(area);
-
-    let idx = Tab::ALL.iter().position(|t| *t == app.tab).unwrap_or(0);
-    f.render_widget(
-        Tabs::new(Tab::ALL.iter().map(|t| t.title()).collect::<Vec<_>>())
-            .select(idx)
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        chunks[0],
-    );
-
-    match app.tab {
-        Tab::Chat => draw_chat(f, app, chunks[1]),
-        Tab::Output => draw_output(f, app, chunks[1]),
-        Tab::Tasks => draw_tasks(f, app, chunks[1]),
-        Tab::Messages => draw_messages(f, app, chunks[1]),
-        Tab::HubLog => draw_hub_log(f, app, chunks[1]),
-    }
-}
-
-fn draw_chat(f: &mut Frame, app: &App, area: Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Max(8)])
-        .split(area);
-    draw_conversation(f, app, chunks[0]);
-    draw_activity(f, app, chunks[1]);
-}
-
-fn draw_conversation(f: &mut Frame, app: &App, area: Rect) {
-    let inner = area.height.saturating_sub(2) as usize;
-    let chat: Vec<&Message> = app
-        .messages
-        .iter()
-        .filter(|m| m.from_who == "human" || m.to_who == "human")
-        .collect();
-    let question_count = chat
-        .iter()
-        .filter(|m| m.to_who == "human" && !m.delivered && looks_like_question(&m.body))
-        .count();
-    let title = if question_count > 0 {
-        format!(" composer - {question_count} question(s) need your reply ")
-    } else {
-        " composer ".to_string()
-    };
-    let lines: Vec<Line> = chat
-        .iter()
-        .rev()
-        .take(inner.max(1))
-        .rev()
-        .map(|m| conversation_line(m))
-        .collect();
-    let lines = if lines.is_empty() {
-        vec![
-            Line::from(Span::styled(
-                "Tell the composer what you want done. It will plan, recruit, and report back.",
-                Style::default().fg(Color::DarkGray),
-            )),
-            Line::from(Span::styled(
-                "(Type below, Enter to send. Tab for agent output panes.)",
-                Style::default().fg(Color::DarkGray),
-            )),
-        ]
-    } else {
-        lines
-    };
-    let block_style = if question_count > 0 {
-        Style::default().fg(Color::Yellow)
-    } else {
-        Style::default()
-    };
-    f.render_widget(
-        Paragraph::new(lines)
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(title)
-                    .border_style(block_style),
-            ),
-        area,
-    );
-}
-
-fn conversation_line(m: &Message) -> Line<'static> {
-    if m.from_who == "human" {
-        return Line::from(vec![
-            Span::styled(
-                format!("you -> {}: ", m.to_who),
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(m.body.clone()),
-        ]);
-    }
-
-    let is_question = m.to_who == "human" && !m.delivered && looks_like_question(&m.body);
-    let is_pending = m.to_who == "human" && !m.delivered;
-    if is_question {
-        Line::from(vec![
-            Span::styled(
-                format!("QUESTION from {}: ", m.from_who),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(m.body.clone()),
-        ])
-    } else if is_pending {
-        Line::from(vec![
-            Span::styled(
-                format!("MESSAGE from {}: ", m.from_who),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(m.body.clone()),
-        ])
-    } else {
-        Line::from(vec![
-            Span::styled(
-                format!("{}: ", m.from_who),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(m.body.clone()),
-        ])
-    }
-}
-
-fn draw_activity(f: &mut Frame, app: &App, area: Rect) {
-    let spinner = SPINNER[app.spin % SPINNER.len()];
-    let mut lines: Vec<Line> = Vec::new();
-
-    for row in &app.agents {
-        let busy = matches!(row.state.as_str(), "working" | "interrupting");
-        if !busy {
-            continue;
-        }
-        let last_action: String = {
-            let map = app.buffers.read().unwrap();
-            map.get(&row.name)
-                .map(|b| b.read().unwrap().tail(1))
-                .unwrap_or_default()
-                .pop()
-                .unwrap_or_default()
-        };
-        let last_action: String = last_action.chars().take(60).collect();
-        let style = if row.state == "interrupting" {
-            Style::default().fg(Color::Red)
-        } else {
-            Style::default().fg(Color::Green)
-        };
-        let turns = row.turns;
-        lines.push(Line::from(vec![
-            Span::styled(format!("{spinner} "), style),
-            Span::styled(format!("{} ({turns}t) ", row.name), style.add_modifier(Modifier::BOLD)),
-            provider_badge(&row.provider),
-            Span::styled(format!(" {}", row.state), style),
-            Span::styled(
-                if last_action.is_empty() {
-                    String::new()
-                } else {
-                    format!("  {last_action}")
-                },
-                Style::default().fg(Color::DarkGray),
-            ),
-        ]));
-    }
-    if lines.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "all agents idle",
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
-
-    let remaining = (area.height.saturating_sub(2) as usize).saturating_sub(lines.len());
-    for event in app.hub_log.iter().rev().take(remaining).rev() {
-        lines.push(Line::from(Span::styled(
-            format!("- {event}"),
-            Style::default().fg(Color::DarkGray),
-        )));
-    }
-
-    f.render_widget(
-        Paragraph::new(lines)
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).title(" activity ")),
-        area,
-    );
-}
-
-fn draw_output(f: &mut Frame, app: &App, area: Rect) {
-    let Some(name) = app.selected_agent() else {
-        f.render_widget(Paragraph::new("no agent selected"), area);
-        return;
-    };
-    let row = app.agent_row(name);
-    let provider = row.map(|r| r.provider.as_str()).unwrap_or("?");
-    let title = format!(
-        " {name} [{provider}] - {} - {} turns - ${:.2}{} ",
-        row.map(|r| r.state.clone()).unwrap_or_default(),
-        row.map(|r| r.turns).unwrap_or(0),
-        row.map(|r| r.spent_usd).unwrap_or(0.0),
-        row.and_then(|r| r.detail.clone())
-            .map(|d| format!(" - {d}"))
-            .unwrap_or_default(),
-    );
-
-    let inner_height = area.height.saturating_sub(2) as usize;
-    let lines: Vec<String> = {
-        let map = app.buffers.read().unwrap();
-        match map.get(name) {
-            Some(buf) => {
-                let buf = buf.read().unwrap();
-                let want = inner_height + app.scroll_back.unwrap_or(0);
-                let mut tail = buf.tail(want);
-                if let Some(back) = app.scroll_back {
-                    let keep = tail.len().saturating_sub(back);
-                    tail.truncate(keep.max(inner_height.min(tail.len())));
-                    let start = tail.len().saturating_sub(inner_height);
-                    tail = tail.split_off(start);
-                } else {
-                    let start = tail.len().saturating_sub(inner_height);
-                    tail = tail.split_off(start);
-                }
-                tail
-            }
-            None => vec![],
-        }
-    };
-
-    let text: Vec<Line> = lines
-        .iter()
-        .map(|l| {
-            if l.starts_with("[stderr]") {
-                Line::from(Span::styled(
-                    l.clone(),
-                    Style::default().fg(Color::Red).dim(),
-                ))
-            } else if l.starts_with("[tool]") {
-                Line::from(Span::styled(l.clone(), Style::default().fg(Color::Cyan)))
-            } else if l.starts_with("[turn end]") || l.starts_with("[session]") {
-                Line::from(Span::styled(
-                    l.clone(),
-                    Style::default().fg(Color::DarkGray),
-                ))
+fn draw_input(f: &mut Frame, st: &ChatState, area: Rect) {
+    let block = Block::default()
+        .borders(Borders::TOP)
+        .border_style(Style::default().fg(theme::MUTED))
+        .title(Span::styled(
+            if st.confirm_quit {
+                " quit and stop all agents? [y/N] "
             } else {
-                Line::from(l.clone())
-            }
-        })
-        .collect();
-
-    let mut block = Block::default().borders(Borders::ALL).title(title);
-    if app.scroll_back.is_some() {
-        block = block.title_bottom(" SCROLLED (End to follow) ");
-    }
-    f.render_widget(
-        Paragraph::new(text)
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .block(block),
-        area,
-    );
+                " > "
+            },
+            if st.confirm_quit {
+                Style::default()
+                    .fg(theme::ERROR)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::HUMAN)
+            },
+        ));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    f.render_widget(&st.input, inner);
 }
 
-fn priority_style(priority: i64) -> Style {
-    match priority {
-        0 => Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        1 => Style::default().fg(Color::Yellow),
-        2 => Style::default().fg(Color::Cyan),
-        _ => Style::default().fg(Color::DarkGray),
-    }
-}
-
-fn draw_tasks(f: &mut Frame, app: &App, area: Rect) {
-    let filter = app.task_filter.to_lowercase();
-    let visible: Vec<_> = app
-        .tasks
-        .iter()
-        .filter(|t| {
-            if app.hide_done_tasks && t.status == TaskStatus::Done {
-                return false;
-            }
-            if filter.is_empty() {
-                return true;
-            }
-            t.title.to_lowercase().contains(&filter)
-                || t.description.to_lowercase().contains(&filter)
-                || t.status.as_str().contains(&filter)
-                || t.claimed_by
-                    .as_deref()
-                    .map(|s| s.to_lowercase().contains(&filter))
-                    .unwrap_or(false)
-        })
-        .collect();
-    let cursor = app.task_cursor.min(visible.len().saturating_sub(1));
-    let rows: Vec<Row> = visible
-        .iter()
-        .enumerate()
-        .map(|(i, t)| {
-            let row_style = match t.status {
-                TaskStatus::Claimed => Style::default().fg(Color::Green),
-                TaskStatus::Open => Style::default(),
-                TaskStatus::Blocked => Style::default().fg(Color::Yellow),
-                TaskStatus::Done => Style::default().fg(Color::DarkGray),
-                TaskStatus::AwaitingReview => Style::default().fg(Color::Cyan),
-            };
-            let extra = match t.status {
-                TaskStatus::Blocked => t.blocked_reason.as_deref().unwrap_or(""),
-                TaskStatus::Done => t.note.as_deref().unwrap_or(""),
-                _ => "",
-            };
-            let extra: String = extra.chars().take(35).collect();
-            let now_ts = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0);
-            let is_overdue = t.due_at.map(|d| d < now_ts).unwrap_or(false);
-            let row_style = if is_overdue && t.status != TaskStatus::Done {
-                Style::default().fg(Color::Red)
-            } else {
-                row_style
-            };
-
-            let mut prefix = String::new();
-            if t.pinned { prefix.push_str("[pin] "); }
-            if is_overdue && t.status != TaskStatus::Done { prefix.push_str("[DUE] "); }
-
-            let dep_marker = if !t.depends_on.is_empty() {
-                format!("[{}]", t.depends_on.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join(","))
-            } else {
-                String::new()
-            };
-            let tag_marker = if !t.tags.is_empty() {
-                format!(" {}", t.tags.iter().map(|l| format!("[{l}]")).collect::<Vec<_>>().join(""))
-            } else {
-                String::new()
-            };
-            let title_cell = format!("{}{}{}{}", prefix, t.title, dep_marker, tag_marker);
-
-            let selected = i == cursor;
-            let base_style = if selected {
-                row_style.add_modifier(Modifier::REVERSED)
-            } else {
-                row_style
-            };
-            Row::new(vec![
-                Cell::from(format!("#{}", t.id)),
-                Cell::from(format!("p{}", t.priority)).style(priority_style(t.priority)),
-                Cell::from(t.status.as_str()),
-                Cell::from(t.claimed_by.clone().unwrap_or_default()),
-                Cell::from(title_cell),
-                Cell::from(extra),
-            ])
-            .style(base_style)
-        })
-        .collect();
-    let table = Table::new(
-        rows,
-        [
-            Constraint::Length(5),
-            Constraint::Length(3),
-            Constraint::Length(8),
-            Constraint::Length(10),
-            Constraint::Min(20),
-            Constraint::Min(10),
-        ],
-    )
-    .header(
-        Row::new(vec!["id", "p", "status", "agent", "title", "note"])
-            .style(Style::default().add_modifier(Modifier::BOLD)),
-    )
-    .block(Block::default().borders(Borders::ALL).title({
-        let open = app.tasks.iter().filter(|t| t.status == TaskStatus::Open).count();
-        let claimed = app.tasks.iter().filter(|t| t.status == TaskStatus::Claimed).count();
-        let done = app.tasks.iter().filter(|t| t.status == TaskStatus::Done).count();
-        let blocked = app.tasks.iter().filter(|t| t.status == TaskStatus::Blocked).count();
-        let counts = format!("open:{open} wip:{claimed} done:{done} blocked:{blocked}");
-        if filter.is_empty() && !app.hide_done_tasks {
-            format!(" tasks — {counts} ")
-        } else {
-            let mut extras = Vec::new();
-            if !filter.is_empty() {
-                extras.push(format!("filter:\"{}\"", app.task_filter));
-            }
-            if app.hide_done_tasks {
-                extras.push("-done".into());
-            }
+fn draw_status(f: &mut Frame, st: &ChatState, area: Rect) {
+    let working = st.agents.iter().filter(|a| a.state == "working").count();
+    let idle = st.agents.iter().filter(|a| a.state == "idle").count();
+    let n = st.agents.len();
+    let free = st
+        .free_mode
+        .as_deref()
+        .map(|f| format!(" · {f}"))
+        .unwrap_or_default();
+    let mut spans = vec![
+        Span::styled(
+            format!(" {} ", st.project),
+            Style::default().fg(theme::SYSTEM),
+        ),
+        theme::provider_badge(&st.model_label),
+        Span::styled(
             format!(
-                " tasks — {counts} | {} ({}/{}) ",
-                extras.join(" "),
-                visible.len(),
-                app.tasks.len()
-            )
-        }
-    }));
-    f.render_widget(table, area);
-}
-
-fn draw_messages(f: &mut Frame, app: &App, area: Rect) {
-    let inner = area.height.saturating_sub(2) as usize;
-    let msgs = app.messages.iter().rev().take(inner).rev();
-    let lines: Vec<Line> = msgs
-        .map(|m| {
-            let mut spans = vec![Span::styled(
-                format!("{} -> {} ", m.from_who, m.to_who),
-                Style::default().fg(Color::Cyan),
-            )];
-            if m.to_who == "human" && !m.delivered && looks_like_question(&m.body) {
-                spans.push(Span::styled(
-                    "QUESTION ",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ));
-            } else if m.to_who == "human" && !m.delivered {
-                spans.push(Span::styled(
-                    "TO YOU ",
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                ));
-            }
-            if m.urgent {
-                spans.push(Span::styled(
-                    "URGENT ",
-                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-                ));
-            }
-            if !m.delivered {
-                spans.push(Span::styled(
-                    "(queued) ",
-                    Style::default().fg(Color::Yellow),
-                ));
-            }
-            spans.push(Span::raw(m.body.clone()));
-            Line::from(spans)
-        })
-        .collect();
+                " · {n} agents {working}w/{idle}i · ${:.2}{free} · {} open ",
+                st.total_cost, st.open_tasks
+            ),
+            Style::default().fg(theme::SYSTEM),
+        ),
+    ];
+    // Compact per-agent state strip; the working glyph spins on each tick.
+    for a in &st.agents {
+        let glyph = if a.state == "working" {
+            SPINNER[st.spin % SPINNER.len()]
+        } else {
+            theme::state_glyph(&a.state)
+        };
+        spans.push(Span::styled(format!("{glyph} "), theme::state_style(&a.state)));
+    }
     f.render_widget(
-        Paragraph::new(lines)
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).title(" messages ")),
-        area,
-    );
-}
-
-fn draw_hub_log(f: &mut Frame, app: &App, area: Rect) {
-    let inner = area.height.saturating_sub(2) as usize;
-    let lines: Vec<Line> = app
-        .hub_log
-        .iter()
-        .rev()
-        .take(inner)
-        .rev()
-        .map(|l| Line::from(l.clone()))
-        .collect();
-    f.render_widget(
-        Paragraph::new(lines)
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).title(" hub log ")),
+        Paragraph::new(Line::from(spans)).style(Style::default().bg(theme::STATUS_BG)),
         area,
     );
 }
@@ -779,206 +160,61 @@ fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
 }
 
 fn draw_help_overlay(f: &mut Frame, area: Rect) {
-    // Each entry: (key, description, key, description) — two columns per row.
-    let rows: &[(&str, &str, &str, &str)] = &[
-        ("Tab / 1-5",  "switch tabs",        "Up/Down/j/k", "select agent"),
-        ("m",          "message agent",       "u",           "interrupt agent"),
-        ("M",          "broadcast all",       "a",           "add task"),
-        ("/",          "filter tasks",        "F",           "clear task filter"),
-        ("d",          "toggle done tasks",   "Enter",       "task detail popup"),
-        ("p",          "pause/resume agent",  "s",           "stop agent"),
-        ("P",          "pause ALL agents",    "R",           "resume ALL agents"),
-        ("PgUp/PgDn",  "scroll output",       "End",         "follow live"),
-        ("Enter",      "send chat message",   "?",           "toggle this help"),
-        ("q / Ctrl+C", "quit",                "",            ""),
-    ];
-
-    let popup_height = rows.len() as u16 + 2; // 2 border lines
-    let popup = centered_rect(72, popup_height, area);
-
-    f.render_widget(ratatui::widgets::Clear, popup);
-
-    // Inner width minus borders, split 50/50.
-    let inner_w = popup.width.saturating_sub(2) as usize;
-    let col = inner_w / 2;
-
-    let lines: Vec<Line> = rows
-        .iter()
-        .map(|(lk, ld, rk, rd)| {
-            let left_key = format!("{:<12}", lk);
-            let left_desc = format!("{:<width$}", ld, width = col.saturating_sub(13));
-            let right_key = format!("{:<12}", rk);
-            Line::from(vec![
-                Span::styled(left_key, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::raw(left_desc),
-                Span::styled(right_key, Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::raw(rd.to_string()),
-            ])
-        })
-        .collect();
-
-    f.render_widget(
-        Paragraph::new(lines)
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" keybindings ")
-                    .title_alignment(Alignment::Center)
-                    .style(Style::default().bg(Color::Indexed(235))),
-            ),
-        popup,
-    );
-}
-
-fn draw_task_detail(f: &mut Frame, task: &crate::store::Task, area: Rect) {
-    let popup = centered_rect(80, 22u16.min(area.height.saturating_sub(4)), area);
-    f.render_widget(ratatui::widgets::Clear, popup);
-
-    let mut lines: Vec<Line> = Vec::new();
-
-    // Header row
-    lines.push(Line::from(vec![
-        Span::styled(format!("#{} ", task.id), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::styled(task.title.clone(), Style::default().add_modifier(Modifier::BOLD)),
-    ]));
-    let mut meta_spans = vec![
-        Span::styled(format!("status: {}", task.status.as_str()), Style::default().fg(Color::Cyan)),
-        Span::raw(format!("  priority: p{}", task.priority)),
-    ];
-    if let Some(agent) = &task.claimed_by {
-        meta_spans.push(Span::raw(format!("  agent: {agent}")));
-    }
-    if task.pinned {
-        meta_spans.push(Span::styled("  [pinned]", Style::default().fg(Color::Yellow)));
-    }
-    lines.push(Line::from(meta_spans));
-    if !task.depends_on.is_empty() {
-        let deps = task.depends_on.iter().map(|id| format!("#{id}")).collect::<Vec<_>>().join(", ");
-        lines.push(Line::from(Span::styled(format!("depends on: {deps}"), Style::default().fg(Color::DarkGray))));
-    }
-    if !task.tags.is_empty() {
-        let tag_str = task.tags.iter().map(|l| format!("[{l}]")).collect::<Vec<_>>().join(" ");
-        lines.push(Line::from(Span::styled(format!("tags: {tag_str}"), Style::default().fg(Color::Magenta))));
-    }
-    if !task.requires.is_empty() {
-        let req_str = task.requires.join(", ");
-        lines.push(Line::from(Span::styled(format!("requires: {req_str}"), Style::default().fg(Color::Cyan))));
-    }
-    if let Some(due) = task.due_at {
-        let now_ts = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i64)
-            .unwrap_or(0);
-        let overdue = due < now_ts;
-        let label = if overdue { "due: OVERDUE" } else { "due:" };
-        let color = if overdue { Color::Red } else { Color::Cyan };
-        lines.push(Line::from(Span::styled(
-            format!("{} {}", label, due),
-            Style::default().fg(color),
-        )));
-    }
-    lines.push(Line::from(""));
-
-    // Description
-    if !task.description.is_empty() {
-        for desc_line in task.description.lines() {
-            lines.push(Line::from(Span::raw(desc_line.to_string())));
-        }
-    } else {
-        lines.push(Line::from(Span::styled("(no description)", Style::default().fg(Color::DarkGray))));
-    }
-
-    // Note / blocked reason
-    if let Some(note) = &task.note {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(format!("note: {note}"), Style::default().fg(Color::Green))));
-    }
-    if let Some(reason) = &task.blocked_reason {
-        lines.push(Line::from(""));
-        lines.push(Line::from(Span::styled(format!("blocked: {reason}"), Style::default().fg(Color::Yellow))));
-    }
-
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("Esc", Style::default().fg(Color::DarkGray)),
-        Span::styled(" — close  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("r", Style::default().fg(Color::DarkGray)),
-        Span::styled(" — reopen  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("i", Style::default().fg(Color::DarkGray)),
-        Span::styled(" — pin/unpin  ", Style::default().fg(Color::DarkGray)),
-        Span::styled("0-4", Style::default().fg(Color::DarkGray)),
-        Span::styled(" — set priority", Style::default().fg(Color::DarkGray)),
-    ]));
-
-    f.render_widget(
-        Paragraph::new(lines)
-            .wrap(ratatui::widgets::Wrap { trim: false })
-            .block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(format!(" task #{} ", task.id))
-                    .title_alignment(Alignment::Center)
-                    .style(Style::default().bg(Color::Indexed(235))),
-            ),
-        popup,
-    );
-}
-
-fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
-    let (_, human_questions) = human_attention(app);
-    let content: Line = if let Some(modal) = &app.modal {
-        let label = match modal.kind {
-            InputKind::Message => format!("message -> {}: ", app.selected_agent().unwrap_or("?")),
-            InputKind::Urgent => format!("INTERRUPT -> {}: ", app.selected_agent().unwrap_or("?")),
-            InputKind::Broadcast => "broadcast -> all: ".to_string(),
-            InputKind::AddTask => "new task title: ".to_string(),
-            InputKind::TaskFilter => "filter tasks (empty to clear): ".to_string(),
-        };
-        Line::from(vec![
-            Span::styled(label, Style::default().fg(Color::Yellow)),
-            Span::raw(modal.buffer.clone()),
-            Span::styled("|", Style::default().fg(Color::Yellow)),
-        ])
-    } else if app.confirm_quit {
-        Line::from(Span::styled(
-            "quit and stop all agents? [y/N]",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
-        ))
-    } else if app.tab == Tab::Chat {
-        let mut spans = vec![
-            Span::styled("> ", Style::default().fg(Color::Green)),
-            Span::raw(app.chat_input.clone()),
-            Span::styled("|", Style::default().fg(Color::Green)),
+    let mut lines: Vec<Line> = Vec::with_capacity(SLASH_HELP.len() + 2);
+    for (cmd, desc) in SLASH_HELP {
+        lines.push(Line::from(vec![
             Span::styled(
-                "  (Enter send - Tab panes - ? help - Ctrl+C quit)",
-                Style::default().fg(Color::DarkGray),
-            ),
-        ];
-        if human_questions > 0 {
-            spans.push(Span::styled(
-                format!("  {human_questions} question(s) waiting"),
+                format!("{cmd:<22}"),
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(theme::ACCENT)
                     .add_modifier(Modifier::BOLD),
-            ));
-        }
-        Line::from(spans)
-    } else if let Some(flash) = &app.flash {
-        Line::from(vec![
-            Span::styled(format!(" {flash} "), Style::default().fg(Color::Green)),
-            Span::styled(
-                " [m]msg [u]int [M]bcast [a]add [p]pause [?]help [q]quit",
-                Style::default().fg(Color::DarkGray),
             ),
-        ])
-    } else {
-        Line::from(Span::styled(
-            " [m]msg [u]int [M]bcast [a]add [p]pause [?]help [q]quit",
-            Style::default().fg(Color::DarkGray),
-        ))
-    };
+            Span::raw(desc.to_string()),
+        ]));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled(
+            "Enter",
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" send  ", Style::default().fg(theme::MUTED)),
+        Span::styled(
+            "Shift+Enter",
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" newline  ", Style::default().fg(theme::MUTED)),
+        Span::styled(
+            "PgUp/PgDn",
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" scroll  ", Style::default().fg(theme::MUTED)),
+        Span::styled(
+            "Ctrl+C",
+            Style::default()
+                .fg(theme::ACCENT)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(" quit", Style::default().fg(theme::MUTED)),
+    ]));
+
+    let popup_height = (lines.len() as u16 + 2).min(area.height);
+    let popup = centered_rect(74, popup_height, area);
+    f.render_widget(Clear, popup);
     f.render_widget(
-        Paragraph::new(content).style(Style::default().bg(Color::Indexed(236))),
-        area,
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" commands ")
+                .title_alignment(Alignment::Center)
+                .style(Style::default().bg(theme::OVERLAY_BG)),
+        ),
+        popup,
     );
 }

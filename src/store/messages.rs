@@ -77,6 +77,42 @@ impl Store {
         Ok(msgs)
     }
 
+    /// Non-destructive per-session read of the shared `human` mailbox.
+    ///
+    /// Returns messages addressed to `human` that this session has not yet
+    /// seen (id beyond its cursor) and advances the session's cursor past
+    /// them. It never touches `messages.delivered`, so every other session
+    /// still sees the same messages exactly once for itself. This is the fix
+    /// for the multi-session cannibalization bug: agent inboxes stay
+    /// destructive (`msg_take_pending`); human inboxes are per-session cursors.
+    pub fn msg_read_for_session(&self, session_id: &str) -> Result<Vec<Message>> {
+        let mut guard = self.conn.lock().unwrap();
+        let tx = guard.transaction()?;
+        let msgs = {
+            let mut stmt = tx.prepare(
+                "SELECT * FROM messages
+                 WHERE to_who = 'human'
+                   AND id > COALESCE(
+                       (SELECT last_read_msg_id FROM message_cursors WHERE session_id = ?1), 0)
+                 ORDER BY created_at, id",
+            )?;
+            let rows = stmt.query_map([session_id], msg_from_row)?;
+            rows.collect::<rusqlite::Result<Vec<Message>>>()?
+        };
+        if let Some(max_id) = msgs.iter().map(|m| m.id).max() {
+            tx.execute(
+                "INSERT INTO message_cursors (session_id, last_read_msg_id, updated_at)
+                 VALUES (?1, ?2, ?3)
+                 ON CONFLICT(session_id) DO UPDATE SET
+                     last_read_msg_id = excluded.last_read_msg_id,
+                     updated_at = excluded.updated_at",
+                params![session_id, max_id, now_ts()],
+            )?;
+        }
+        tx.commit()?;
+        Ok(msgs)
+    }
+
     /// Recent traffic for the TUI message feed (delivered or not).
     pub fn msg_recent(&self, limit: usize) -> Result<Vec<Message>> {
         let conn = self.conn.lock().unwrap();
@@ -181,5 +217,47 @@ mod tests {
         assert!(s.msg_take_pending("bob").unwrap().is_empty());
         assert_eq!(s.msg_pending("carol").unwrap().len(), 1);
         assert_eq!(s.msg_pending_count().unwrap(), 1);
+    }
+
+    #[test]
+    fn two_sessions_each_receive_human_broadcast() {
+        let s = Store::open_in_memory().unwrap();
+        s.session_register("human:s1", "cli", None).unwrap();
+        s.session_register("human:s2", "cli", None).unwrap();
+        s.msg_send("composer", &["human".into()], "fleet update", false)
+            .unwrap();
+
+        // Both sessions see the same message — no cannibalization.
+        assert_eq!(s.msg_read_for_session("human:s1").unwrap().len(), 1);
+        assert_eq!(s.msg_read_for_session("human:s2").unwrap().len(), 1);
+        // Re-reading the same session returns nothing (cursor advanced).
+        assert!(s.msg_read_for_session("human:s1").unwrap().is_empty());
+    }
+
+    #[test]
+    fn fresh_session_starts_at_head() {
+        let s = Store::open_in_memory().unwrap();
+        for i in 0..3 {
+            s.msg_send("composer", &["human".into()], &format!("m{i}"), false)
+                .unwrap();
+        }
+        // A session that connects AFTER the backlog must not replay it.
+        s.session_register("human:late", "cli", None).unwrap();
+        assert!(s.msg_read_for_session("human:late").unwrap().is_empty());
+
+        // ...but it does see messages that arrive after it connected.
+        s.msg_send("composer", &["human".into()], "after", false)
+            .unwrap();
+        assert_eq!(s.msg_read_for_session("human:late").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn agent_inbox_still_destructive() {
+        // The human cursor fix must NOT change agent inbox semantics.
+        let s = Store::open_in_memory().unwrap();
+        s.msg_send("composer", &["builder".into()], "do it", false)
+            .unwrap();
+        assert_eq!(s.msg_take_pending("builder").unwrap().len(), 1);
+        assert!(s.msg_take_pending("builder").unwrap().is_empty());
     }
 }

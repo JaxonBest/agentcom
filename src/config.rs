@@ -108,6 +108,10 @@ pub struct HubConfig {
     /// `TaskReviewStale` webhook and notifies the composer. Default: 1800 (30 min).
     #[serde(default = "default_review_stale_secs")]
     pub review_stale_secs: u64,
+    /// If set, the hub periodically prunes transcript events older than this
+    /// many seconds. Unset (the default) keeps the full transcript forever.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript_retention_secs: Option<u64>,
     /// Named fleet preset to expand before validation. Valid values:
     /// "solo+watchdog", "builder+reviewer+tester", "cheap-grunt+claude-lead".
     /// The preset populates `agents` and `hooks`; inline `[[agent]]` blocks
@@ -590,6 +594,9 @@ pub mod presets {
     }
 
     fn solo_watchdog_hooks() -> HooksConfig {
+        // NOTE: this default targets Python projects. For a Rust repo, override
+        // [hooks] post_close in agentcom.toml with a cargo command (see the
+        // checked-in agentcom.toml for an example).
         HooksConfig {
             post_close: Some("pytest -x".to_string()),
             ..HooksConfig::default()
@@ -616,6 +623,11 @@ pub mod presets {
             AgentConfig {
                 name: "reviewer".to_string(),
                 role: "Reviews changes made by other agents, runs tests, and files follow-up tasks for problems found.".to_string(),
+                // The hub's review gate (hub/mod.rs) only assigns auto-filed
+                // review tasks to an agent that declares the "review" capability.
+                // Without this, review_required tasks enter AwaitingReview but are
+                // never routed to anyone — the gate silently half-fires.
+                capabilities: vec!["review".to_string()],
                 allowed_tools: Some(vec![
                     "Bash".to_string(),
                     "Read".to_string(),
@@ -662,6 +674,8 @@ pub mod presets {
             AgentConfig {
                 name: "reviewer".to_string(),
                 role: "Reviews changes, runs tests, and files follow-up tasks.".to_string(),
+                // Required so the hub's review gate can route review tasks here.
+                capabilities: vec!["review".to_string()],
                 allowed_tools: Some(vec![
                     "Bash".to_string(),
                     "Read".to_string(),
@@ -1737,6 +1751,12 @@ capabilities = ["rust", "Invalid!"]
         assert_eq!(agents[0].name, "builder");
         assert_eq!(agents[1].name, "reviewer");
         assert_eq!(agents[2].name, "tester");
+        // The reviewer MUST carry the "review" capability or the hub's review
+        // gate can never route auto-filed review tasks to it (see hub/mod.rs).
+        assert!(
+            agents[1].capabilities.iter().any(|c| c == "review"),
+            "reviewer must declare the review capability so the gate fires"
+        );
         assert!(hooks.is_none());
     }
 
@@ -1747,6 +1767,10 @@ capabilities = ["rust", "Invalid!"]
         assert_eq!(agents[0].name, "builder");
         assert_eq!(agents[0].provider, Some(AgentProvider::Deepseek));
         assert_eq!(agents[1].name, "reviewer");
+        assert!(
+            agents[1].capabilities.iter().any(|c| c == "review"),
+            "reviewer must declare the review capability so the gate fires"
+        );
         assert!(hooks.is_none());
     }
 

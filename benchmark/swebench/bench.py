@@ -141,12 +141,31 @@ def _parse_test_list(raw) -> list[str]:
 
 
 def clone_repo(instance: Instance, dest: Path) -> None:
-    """Clone the GitHub repo at the instance's base_commit into dest."""
+    """Clone the GitHub repo at the instance's base_commit into dest.
+
+    Retries the initial clone up to 3 times with exponential backoff because
+    GitHub's CDN intermittently resets mid-stream on large repos (django,
+    scikit-learn, sympy)."""
     if dest.exists():
         shutil.rmtree(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     url = f"https://github.com/{instance.repo}.git"
-    _run(["git", "clone", "--quiet", url, str(dest)])
+
+    last_err: Optional[Exception] = None
+    for attempt in range(3):
+        if dest.exists():
+            shutil.rmtree(dest)
+        try:
+            _run(["git", "clone", "--quiet", url, str(dest)])
+            last_err = None
+            break
+        except RuntimeError as e:
+            last_err = e
+            if attempt < 2:
+                time.sleep(5 * (2 ** attempt))  # 5s, 10s
+    if last_err is not None:
+        raise last_err
+
     _run(["git", "-C", str(dest), "checkout", "--quiet", instance.base_commit])
     # Detach config so commits inside the worktree don't try to identify the user.
     _run(["git", "-C", str(dest), "config", "user.email", "bench@agentcom.local"])

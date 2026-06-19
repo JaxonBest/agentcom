@@ -2905,13 +2905,13 @@ fn run_clean(yes: bool, keep_runs: bool) -> Result<()> {
     let stats = store.clean_session(keep_runs)?;
     if keep_runs {
         println!(
-            "Cleared {} tasks, {} messages, {} file claims.",
-            stats.tasks, stats.messages, stats.file_claims
+            "Cleared {} tasks, {} messages, {} file claims, {} transcript events.",
+            stats.tasks, stats.messages, stats.file_claims, stats.transcript
         );
     } else {
         println!(
-            "Cleared {} tasks, {} messages, {} file claims, {} runs.",
-            stats.tasks, stats.messages, stats.file_claims, stats.runs
+            "Cleared {} tasks, {} messages, {} file claims, {} transcript events, {} runs.",
+            stats.tasks, stats.messages, stats.file_claims, stats.transcript, stats.runs
         );
     }
     Ok(())

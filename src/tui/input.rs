@@ -1,360 +1,324 @@
-//! TUI key handling.
+//! TUI key handling. Global keys (quit, scroll, help) are handled first;
+//! everything else flows into the bottom line editor. Enter sends the buffer to
+//! the composer or dispatches a slash command.
 
-use super::{App, InputKind, InputModal, Tab};
+use super::transcript::TranscriptItem;
+use super::{command, ChatState};
+use crate::config::COMPOSER_NAME;
 use crate::ipc::Request;
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use tui_textarea::{CursorMove, TextArea};
 
-pub fn handle_key(app: &mut App, key: KeyEvent) {
+/// How many transcript lines a PageUp/PageDown moves.
+const PAGE: usize = 10;
+
+pub fn handle_key(st: &mut ChatState, key: KeyEvent) {
     if key.kind != KeyEventKind::Press {
         return;
     }
 
-    // Modal input line takes priority.
-    if app.modal.is_some() {
-        handle_modal_key(app, key);
-        return;
-    }
-
-    if app.confirm_quit {
+    // Quit confirmation gate takes precedence over everything.
+    if st.confirm_quit {
         match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => app.should_quit = true,
-            _ => app.confirm_quit = false,
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => st.should_quit = true,
+            _ => st.confirm_quit = false,
         }
         return;
     }
 
-    // ? toggles help overlay from anywhere (except modals handled above).
-    if key.code == KeyCode::Char('?') {
-        app.show_help = !app.show_help;
-        return;
-    }
-    // Esc closes help overlay if open.
-    if app.show_help && key.code == KeyCode::Esc {
-        app.show_help = false;
-        return;
-    }
-
+    // Ctrl+C arms the quit confirmation.
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-        app.confirm_quit = true;
+        st.confirm_quit = true;
         return;
     }
 
-    // Chat tab: the keyboard belongs to the input line (so you can type
-    // freely); Tab still switches panes, Ctrl+C still quits.
-    if app.tab == Tab::Chat {
-        handle_chat_key(app, key);
+    // Help overlay toggle (F1) / close (Esc).
+    if key.code == KeyCode::F(1) {
+        st.show_help = !st.show_help;
+        return;
+    }
+    if st.show_help {
+        if matches!(key.code, KeyCode::Esc | KeyCode::Char('q')) {
+            st.show_help = false;
+        }
         return;
     }
 
-    // Task detail popup: Esc closes, 'r' reopens, 'i' toggles pin, 0-4 sets priority.
-    if let Some(id) = app.task_detail_id {
+    // Transcript scrollback.
+    match key.code {
+        KeyCode::PageUp => {
+            scroll_up(st, PAGE);
+            return;
+        }
+        KeyCode::PageDown => {
+            scroll_down(st, PAGE);
+            return;
+        }
+        KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            st.scroll.follow = false;
+            st.scroll.offset = 0;
+            return;
+        }
+        KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            st.scroll.follow = true;
+            return;
+        }
+        _ => {}
+    }
+    // Ctrl+U / Ctrl+D scroll a half-screen (don't collide with editor editing,
+    // which uses bare keys).
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
         match key.code {
-            KeyCode::Esc => app.task_detail_id = None,
-            KeyCode::Char('r') => {
-                app.send_request(Request::TaskReopen { id });
-                app.flash = Some(format!("reopened task #{id}"));
-                app.task_detail_id = None;
+            KeyCode::Char('u') => {
+                scroll_up(st, PAGE / 2);
+                return;
             }
-            KeyCode::Char('i') => {
-                let pinned = app.tasks.iter().find(|t| t.id == id).map(|t| t.pinned).unwrap_or(false);
-                if pinned {
-                    app.send_request(Request::TaskUnpin { id });
-                    app.flash = Some(format!("unpinned task #{id}"));
-                } else {
-                    app.send_request(Request::TaskPin { id });
-                    app.flash = Some(format!("pinned task #{id}"));
-                }
-                app.task_detail_id = None;
-            }
-            KeyCode::Char(c @ '0'..='4') => {
-                let priority = (c as i64) - ('0' as i64);
-                app.send_request(Request::TaskEdit {
-                    id,
-                    title: None,
-                    description: None,
-                    priority: Some(priority),
-                });
-                app.flash = Some(format!("task #{id} priority → p{priority}"));
-                app.task_detail_id = None;
+            KeyCode::Char('d') => {
+                scroll_down(st, PAGE / 2);
+                return;
             }
             _ => {}
         }
+    }
+
+    match key.code {
+        KeyCode::Enter => {
+            // Shift+Enter / Alt+Enter insert a newline; bare Enter submits.
+            if key
+                .modifiers
+                .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT)
+            {
+                st.input.insert_newline();
+            } else {
+                submit(st);
+            }
+        }
+        KeyCode::Tab => autocomplete(st),
+        KeyCode::Up => {
+            // Walk history only when the cursor is on the first editor row.
+            if st.input.cursor().0 == 0 {
+                history_prev(st);
+            } else {
+                st.input.move_cursor(CursorMove::Up);
+            }
+        }
+        KeyCode::Down => {
+            let last_row = st.input.lines().len().saturating_sub(1);
+            if st.input.cursor().0 == last_row {
+                history_next(st);
+            } else {
+                st.input.move_cursor(CursorMove::Down);
+            }
+        }
+        _ => {
+            // Everything else is editing — forward to the line editor.
+            st.input.input(Event::Key(key));
+        }
+    }
+}
+
+fn scroll_up(st: &mut ChatState, lines: usize) {
+    st.scroll.follow = false;
+    st.scroll.offset = st.scroll.offset.saturating_sub(lines);
+}
+
+fn scroll_down(st: &mut ChatState, lines: usize) {
+    if st.scroll.follow {
+        return;
+    }
+    st.scroll.offset = st.scroll.offset.saturating_add(lines);
+    // The renderer clamps offset to the bottom; following resumes via Ctrl+End.
+}
+
+fn current_text(st: &ChatState) -> String {
+    st.input.lines().join("\n")
+}
+
+fn submit(st: &mut ChatState) {
+    let text = current_text(st);
+    let trimmed = text.trim().to_string();
+    st.input = ChatState::fresh_input();
+    st.hist_idx = None;
+    if trimmed.is_empty() {
+        return;
+    }
+    // Record in history (skip consecutive duplicates).
+    if st.history.last().map(String::as_str) != Some(trimmed.as_str()) {
+        st.history.push(trimmed.clone());
+    }
+    // Sending resumes follow mode so the new turn is visible.
+    st.scroll.follow = true;
+
+    if trimmed.starts_with('/') {
+        match command::parse(&trimmed) {
+            Ok(cmd) => command::exec(cmd, st),
+            Err(e) => st.push_item(TranscriptItem::System { body: e }),
+        }
         return;
     }
 
-    match key.code {
-        KeyCode::Char('q') => app.confirm_quit = true,
-        KeyCode::Tab => {
-            let i = Tab::ALL.iter().position(|t| *t == app.tab).unwrap_or(0);
-            app.tab = Tab::ALL[(i + 1) % Tab::ALL.len()];
-        }
-        KeyCode::Char('1') => app.tab = Tab::Chat,
-        KeyCode::Char('2') => app.tab = Tab::Output,
-        KeyCode::Char('3') => app.tab = Tab::Tasks,
-        KeyCode::Char('4') => app.tab = Tab::Messages,
-        KeyCode::Char('5') => app.tab = Tab::HubLog,
-        KeyCode::Up | KeyCode::Char('k') => {
-            if app.tab == Tab::Tasks {
-                if app.task_cursor > 0 {
-                    app.task_cursor -= 1;
-                }
-            } else {
-                if app.selected > 0 {
-                    app.selected -= 1;
-                    app.scroll_back = None;
-                }
-            }
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            if app.tab == Tab::Tasks {
-                let n = visible_task_count(app);
-                if app.task_cursor + 1 < n {
-                    app.task_cursor += 1;
-                }
-            } else {
-                if app.selected + 1 < app.agent_names.len() {
-                    app.selected += 1;
-                    app.scroll_back = None;
-                }
-            }
-        }
-        KeyCode::Enter if app.tab == Tab::Tasks => {
-            let filter = app.task_filter.to_lowercase();
-            let visible: Vec<i64> = app
-                .tasks
-                .iter()
-                .filter(|t| {
-                    if app.hide_done_tasks && t.status == crate::store::TaskStatus::Done {
-                        return false;
-                    }
-                    if filter.is_empty() {
-                        return true;
-                    }
-                    t.title.to_lowercase().contains(&filter)
-                        || t.description.to_lowercase().contains(&filter)
-                        || t.status.as_str().contains(&filter)
-                        || t.claimed_by.as_deref().map(|s| s.to_lowercase().contains(&filter)).unwrap_or(false)
-                })
-                .map(|t| t.id)
-                .collect();
-            if let Some(&id) = visible.get(app.task_cursor) {
-                app.task_detail_id = Some(id);
-            }
-        }
-        KeyCode::PageUp => {
-            let cur = app.scroll_back.unwrap_or(0);
-            app.scroll_back = Some(cur + 20);
-        }
-        KeyCode::PageDown => {
-            app.scroll_back = match app.scroll_back {
-                Some(n) if n > 20 => Some(n - 20),
-                _ => None,
-            };
-        }
-        KeyCode::End => app.scroll_back = None,
-        KeyCode::Char('m') => open_modal(app, InputKind::Message),
-        KeyCode::Char('u') => open_modal(app, InputKind::Urgent),
-        KeyCode::Char('M') => {
-            app.modal = Some(InputModal {
-                kind: InputKind::Broadcast,
-                buffer: String::new(),
-            })
-        }
-        KeyCode::Char('a') => {
-            app.modal = Some(InputModal {
-                kind: InputKind::AddTask,
-                buffer: String::new(),
-            })
-        }
-        KeyCode::Char('/') => {
-            app.modal = Some(InputModal {
-                kind: InputKind::TaskFilter,
-                buffer: app.task_filter.clone(),
-            });
-        }
-        KeyCode::Char('F') => {
-            app.task_filter.clear();
-            app.flash = Some("filter cleared".into());
-        }
-        KeyCode::Char('d') => {
-            app.hide_done_tasks = !app.hide_done_tasks;
-            app.flash = Some(if app.hide_done_tasks {
-                "hiding done tasks".into()
-            } else {
-                "showing all tasks".into()
-            });
-        }
-        KeyCode::Char('p') => {
-            if let Some(name) = app.selected_agent().map(str::to_string) {
-                let paused = app
-                    .agent_row(&name)
-                    .map(|r| r.state == "paused")
-                    .unwrap_or(false);
-                let req = if paused {
-                    Request::Resume {
-                        agent: name.clone(),
-                    }
-                } else {
-                    Request::Pause {
-                        agent: name.clone(),
-                    }
-                };
-                app.send_request(req);
-                app.flash = Some(format!(
-                    "{} {name}",
-                    if paused { "resuming" } else { "pausing" }
-                ));
-            }
-        }
-        KeyCode::Char('s') => {
-            if let Some(name) = app.selected_agent().map(str::to_string) {
-                app.send_request(Request::Stop {
-                    agent: Some(name.clone()),
-                });
-                app.flash = Some(format!("stopping {name}"));
-            }
-        }
-        // P — fleet-wide pause (all agents); p already handles single-agent pause/resume.
-        KeyCode::Char('P') => {
-            app.send_request(Request::Pause { agent: "all".to_string() });
-            app.flash = Some("pausing all agents".into());
-        }
-        // R — fleet-wide resume.
-        KeyCode::Char('R') => {
-            app.send_request(Request::Resume { agent: "all".to_string() });
-            app.flash = Some("resuming all agents".into());
-        }
-        _ => {}
+    // Optimistically show the human turn before the store round-trips.
+    st.push_item(TranscriptItem::Human {
+        body: trimmed.clone(),
+    });
+    st.send_request(Request::Send {
+        to: COMPOSER_NAME.to_string(),
+        body: trimmed,
+        urgent: false,
+    });
+}
+
+/// Tab-complete a slash command when the buffer is a single `/`-prefixed token.
+fn autocomplete(st: &mut ChatState) {
+    let text = current_text(st);
+    let trimmed = text.trim_start();
+    if !trimmed.starts_with('/') || trimmed.contains(char::is_whitespace) {
+        return;
     }
-}
-
-fn handle_chat_key(app: &mut App, key: KeyEvent) {
-    match key.code {
-        KeyCode::Tab => {
-            app.tab = Tab::Output;
-        }
-        KeyCode::Enter => {
-            let text = app.chat_input.trim().to_string();
-            app.chat_input.clear();
-            if text.is_empty() {
-                return;
-            }
-            app.send_request(Request::Send {
-                to: crate::config::COMPOSER_NAME.to_string(),
-                body: text,
-                urgent: false,
-            });
-        }
-        KeyCode::Esc => app.chat_input.clear(),
-        KeyCode::Backspace => {
-            app.chat_input.pop();
-        }
-        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            app.chat_input.push(c);
-        }
-        _ => {}
-    }
-}
-
-fn visible_task_count(app: &App) -> usize {
-    let filter = app.task_filter.to_lowercase();
-    app.tasks
-        .iter()
-        .filter(|t| {
-            if app.hide_done_tasks && t.status == crate::store::TaskStatus::Done {
-                return false;
-            }
-            if filter.is_empty() {
-                return true;
-            }
-            t.title.to_lowercase().contains(&filter)
-                || t.description.to_lowercase().contains(&filter)
-                || t.status.as_str().contains(&filter)
-                || t.claimed_by
-                    .as_deref()
-                    .map(|s| s.to_lowercase().contains(&filter))
-                    .unwrap_or(false)
-        })
-        .count()
-}
-
-fn open_modal(app: &mut App, kind: InputKind) {
-    if app.selected_agent().is_some() {
-        app.modal = Some(InputModal {
-            kind,
-            buffer: String::new(),
+    let matches = command::complete(trimmed);
+    if let [only] = matches.as_slice() {
+        let mut ta = ChatState::fresh_input();
+        ta.insert_str(format!("{only} "));
+        st.input = ta;
+    } else if !matches.is_empty() {
+        st.push_item(TranscriptItem::System {
+            body: matches.join("  "),
         });
     }
 }
 
-fn handle_modal_key(app: &mut App, key: KeyEvent) {
-    let Some(modal) = app.modal.as_mut() else {
+fn history_prev(st: &mut ChatState) {
+    if st.history.is_empty() {
         return;
+    }
+    let idx = match st.hist_idx {
+        Some(0) => 0,
+        Some(i) => i - 1,
+        None => st.history.len() - 1,
     };
-    match key.code {
-        KeyCode::Esc => app.modal = None,
-        KeyCode::Enter => {
-            let kind = modal.kind;
-            let text = modal.buffer.trim().to_string();
-            app.modal = None;
-            // TaskFilter allows empty text (clears the filter).
-            if text.is_empty() && kind != InputKind::TaskFilter {
-                return;
-            }
-            match kind {
-                InputKind::Message | InputKind::Urgent => {
-                    if let Some(name) = app.selected_agent().map(str::to_string) {
-                        app.send_request(Request::Send {
-                            to: name.clone(),
-                            body: text,
-                            urgent: kind == InputKind::Urgent,
-                        });
-                        app.flash = Some(format!(
-                            "{} {name}",
-                            if kind == InputKind::Urgent {
-                                "interrupting"
-                            } else {
-                                "messaged"
-                            }
-                        ));
-                    }
-                }
-                InputKind::Broadcast => {
-                    app.send_request(Request::Send {
-                        to: "all".into(),
-                        body: text,
-                        urgent: false,
-                    });
-                    app.flash = Some("broadcast sent".into());
-                }
-                InputKind::AddTask => {
-                    app.send_request(Request::TaskAdd {
-                        title: text,
-                        description: String::new(),
-                        priority: 2,
-                        depends_on: vec![],
-                        timeout_mins: None,
-                        requires: vec![],
-                        recur: None,
-                    });
-                    app.flash = Some("task added".into());
-                }
-                InputKind::TaskFilter => {
-                    app.task_filter = text.clone();
-                    if text.is_empty() {
-                        app.flash = Some("filter cleared".into());
-                    } else {
-                        app.flash = Some(format!("filter: {text}"));
-                    }
-                }
-            }
+    st.hist_idx = Some(idx);
+    set_input_text(st, &st.history[idx].clone());
+}
+
+fn history_next(st: &mut ChatState) {
+    match st.hist_idx {
+        Some(i) if i + 1 < st.history.len() => {
+            st.hist_idx = Some(i + 1);
+            set_input_text(st, &st.history[i + 1].clone());
         }
-        KeyCode::Backspace => {
-            modal.buffer.pop();
+        Some(_) => {
+            // Past the newest entry — clear back to an empty editor.
+            st.hist_idx = None;
+            st.input = ChatState::fresh_input();
         }
-        KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-            modal.buffer.push(c);
+        None => {}
+    }
+}
+
+fn set_input_text(st: &mut ChatState, text: &str) {
+    let mut ta: TextArea<'static> = ChatState::fresh_input();
+    ta.insert_str(text);
+    st.input = ta;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn key_mod(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, mods)
+    }
+
+    fn type_str(st: &mut ChatState, s: &str) {
+        for c in s.chars() {
+            handle_key(st, key(KeyCode::Char(c)));
         }
-        _ => {}
+    }
+
+    #[test]
+    fn history_walk_up_up_down() {
+        let mut st = ChatState::for_test();
+        st.history = vec!["one".into(), "two".into(), "three".into()];
+        // Up recalls newest first.
+        handle_key(&mut st, key(KeyCode::Up));
+        assert_eq!(st.input.lines(), &["three".to_string()]);
+        // Up again walks back.
+        handle_key(&mut st, key(KeyCode::Up));
+        assert_eq!(st.input.lines(), &["two".to_string()]);
+        // Down walks forward again.
+        handle_key(&mut st, key(KeyCode::Down));
+        assert_eq!(st.input.lines(), &["three".to_string()]);
+    }
+
+    #[test]
+    fn shift_enter_inserts_newline() {
+        let mut st = ChatState::for_test();
+        type_str(&mut st, "line1");
+        handle_key(&mut st, key_mod(KeyCode::Enter, KeyModifiers::SHIFT));
+        type_str(&mut st, "line2");
+        assert_eq!(st.input.lines().len(), 2);
+        assert_eq!(
+            st.input.lines(),
+            &["line1".to_string(), "line2".to_string()]
+        );
+    }
+
+    #[test]
+    fn enter_on_slash_routes_to_command_not_send() {
+        let mut st = ChatState::for_test();
+        // A bad command: parse error pushes a System item synchronously and
+        // does NOT optimistically push a Human turn (which a Send would).
+        type_str(&mut st, "/bogus");
+        handle_key(&mut st, key(KeyCode::Enter));
+        assert!(matches!(
+            st.transcript.last(),
+            Some(TranscriptItem::System { .. })
+        ));
+        assert!(
+            !st.transcript
+                .iter()
+                .any(|i| matches!(i, TranscriptItem::Human { .. })),
+            "slash command must not produce a Human turn"
+        );
+        // Input is cleared after submit.
+        assert_eq!(st.input.lines(), &[String::new()]);
+    }
+
+    #[tokio::test]
+    async fn enter_on_plain_text_pushes_human_turn() {
+        // send_request spawns onto the runtime, so run inside one.
+        let mut st = ChatState::for_test();
+        type_str(&mut st, "hello composer");
+        handle_key(&mut st, key(KeyCode::Enter));
+        assert_eq!(
+            st.transcript.last(),
+            Some(&TranscriptItem::Human {
+                body: "hello composer".into()
+            })
+        );
+        // Recorded in history.
+        assert_eq!(st.history, vec!["hello composer".to_string()]);
+    }
+
+    #[test]
+    fn ctrl_c_arms_then_confirms_quit() {
+        let mut st = ChatState::for_test();
+        handle_key(&mut st, key_mod(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        assert!(st.confirm_quit);
+        assert!(!st.should_quit);
+        handle_key(&mut st, key(KeyCode::Char('y')));
+        assert!(st.should_quit);
+    }
+
+    #[test]
+    fn pageup_stops_following() {
+        let mut st = ChatState::for_test();
+        assert!(st.scroll.follow);
+        handle_key(&mut st, key(KeyCode::PageUp));
+        assert!(!st.scroll.follow);
     }
 }

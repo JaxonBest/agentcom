@@ -9,7 +9,9 @@ pub mod activity;
 pub mod files;
 pub mod messages;
 pub mod schema;
+pub mod sessions;
 pub mod tasks;
+pub mod transcript;
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -88,13 +90,17 @@ impl Store {
         conn.execute("DELETE FROM task_deps", [])?;
         let tasks = conn.execute("DELETE FROM tasks", [])?;
         let messages = conn.execute("DELETE FROM messages", [])?;
+        // message_cursors references sessions(id), so clear it before sessions.
+        conn.execute("DELETE FROM message_cursors", [])?;
+        conn.execute("DELETE FROM sessions", [])?;
         let file_claims = conn.execute("DELETE FROM file_claims", [])?;
+        let transcript = conn.execute("DELETE FROM transcript", [])?;
         let runs = if !keep_runs {
             conn.execute("DELETE FROM runs", [])?
         } else {
             0
         };
-        Ok(CleanStats { tasks, messages, file_claims, runs })
+        Ok(CleanStats { tasks, messages, file_claims, transcript, runs })
     }
 }
 
@@ -102,6 +108,7 @@ pub struct CleanStats {
     pub tasks: usize,
     pub messages: usize,
     pub file_claims: usize,
+    pub transcript: usize,
     pub runs: usize,
 }
 

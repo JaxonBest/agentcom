@@ -67,6 +67,45 @@ pub fn migrate(conn: &Connection) -> Result<()> {
             created_at  INTEGER NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_task_activity_task ON task_activity (task_id, created_at);
+
+        -- Connected human/CLI/TUI sessions. Each is an individually-identified
+        -- IPC peer (e.g. 'human:9f3c...') so multiple sessions can coexist
+        -- without cannibalizing each other's inbox. Agents are NOT sessions.
+        CREATE TABLE IF NOT EXISTS sessions (
+            id              TEXT PRIMARY KEY,
+            kind            TEXT NOT NULL DEFAULT 'human',
+            label           TEXT,
+            connected_at    INTEGER NOT NULL,
+            last_seen       INTEGER NOT NULL,
+            disconnected_at INTEGER
+        );
+
+        -- Per-session read cursor over the shared 'human' mailbox. Lets each
+        -- session see every message addressed to 'human' exactly once for
+        -- itself, without marking the row delivered for other sessions.
+        CREATE TABLE IF NOT EXISTS message_cursors (
+            session_id       TEXT PRIMARY KEY REFERENCES sessions(id),
+            last_read_msg_id INTEGER NOT NULL DEFAULT 0,
+            updated_at       INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_messages_human ON messages (to_who, id);
+
+        -- Append-only, durable transcript of the conversation + fleet activity.
+        -- `seq` (AUTOINCREMENT) is the monotonic ordering/pagination key; `ts`
+        -- is seconds-granularity and only for display/retention. This is the
+        -- source of truth the chat TUI backfills from (survives hub restart);
+        -- the in-memory ring buffers remain only a live render scratchpad.
+        CREATE TABLE IF NOT EXISTS transcript (
+            seq         INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts          INTEGER NOT NULL,
+            kind        TEXT NOT NULL,
+            actor       TEXT NOT NULL,
+            body        TEXT NOT NULL DEFAULT '',
+            task_id     INTEGER,
+            session_id  TEXT
+        );
+        CREATE INDEX IF NOT EXISTS idx_transcript_actor ON transcript (actor, seq);
+        CREATE INDEX IF NOT EXISTS idx_transcript_kind  ON transcript (kind, seq);
         "#,
     )?;
     // Idempotent column additions for databases created before these columns existed.

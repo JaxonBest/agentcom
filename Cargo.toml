@@ -35,6 +35,7 @@ toml = "0.8"
 rusqlite = { version = "0.32", features = ["bundled"] }
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
+tui-textarea = { version = "0.7", default-features = false, features = ["crossterm", "ratatui"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"

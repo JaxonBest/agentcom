@@ -13,11 +13,27 @@
 
 use super::Hub;
 use crate::agent::AgentState;
-use crate::ipc::Response;
+use crate::ipc::{is_human_identity, Response};
+use crate::store::transcript::EventKind;
 use std::time::{Duration, Instant};
 
 impl Hub {
     pub(super) fn do_send(&mut self, from: &str, to: &str, body: &str, urgent: bool) -> Response {
+        // Persist conversational traffic to the durable transcript at the
+        // authoritative send point (so it survives a hub restart and is
+        // consistent with the live MessagesChanged broadcast).
+        if is_human_identity(from) {
+            // The human typed to the composer (or directly to an agent).
+            self.record(EventKind::HumanMsg, "human", body, None, Some(from));
+        } else if to == "human" {
+            let kind = if from == crate::config::COMPOSER_NAME {
+                EventKind::ComposerMsg
+            } else {
+                EventKind::AgentLine
+            };
+            self.record(kind, from, body, None, None);
+        }
+
         // Agents report to the human through the same message system; those
         // messages land in the TUI chat / `agentcom inbox`.
         if to == "human" {

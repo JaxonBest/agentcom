@@ -1,11 +1,13 @@
 # Benchmark fleet config. Uses the "builder+reviewer+tester" preset which bakes
-# in: review_required on builder, lanes on each agent, and the pytest hook.
+# in: review_required on builder, the structural review gate (Workstream A),
+# and typed lanes (Workstream B).
 #
-# Lane overrides: the preset builder lane is "src/**" but SWE-bench repos are
-# Python projects with root-level package dirs (flask/, django/, etc.), not a
-# src/ layout. Builder gets Python-file globs minus tests/benchmark/config.
-# Tester gets tests/ plus read access to Python sources for context.
-# Reviewer is unrestricted (no lanes = no enforcement).
+# Inline overrides need full agent fields (role, allowed_tools) since they
+# replace the preset agent by name rather than merge partially.
+#
+# Lanes overridden because the preset default `src/**` only matches flask
+# among the 10 locked SWE-bench Lite instances; django, requests, sympy, and
+# scikit-learn use root-level package dirs.
 
 preset = "builder+reviewer+tester"
 project_name = "swebench-bench"
@@ -15,8 +17,15 @@ auto_commit = true
 
 [[agent]]
 name = "builder"
+role = "Implements the fix described in the free-mode goal. Make the smallest correct change. Use grep/glob to locate code — do not guess paths. Mark task done only when the targeted tests pass."
 lanes = ["**/*.py", "*.py", "!tests/**", "!benchmark/**", "!agentcom.*"]
+default_review_required = true
+allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+max_turns_per_prompt = 40
 
 [[agent]]
 name = "tester"
-lanes = ["tests/**", "**/*.py", "*.py"]
+role = "Writes new tests when the fix needs coverage. Owns tests/ and test_*.py files."
+lanes = ["tests/**", "**/test_*.py", "**/conftest.py"]
+allowed_tools = ["Bash", "Read", "Edit", "Write", "Glob", "Grep"]
+max_turns_per_prompt = 20
